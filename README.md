@@ -122,3 +122,5 @@ Evaluation summaries are written to `.visual-regression\reports\ai-eval-*.json` 
 ```powershell
 python -m pytest -q
 ```
+
+Test auto run
