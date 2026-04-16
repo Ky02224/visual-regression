@@ -62,7 +62,7 @@ jobs:
 
       - name: Run visual suite
         run: |
-          python -m visual_regression.cli run-suite --suite suite.summaries.yaml --no-junit || true
+          python -m visual_regression.cli run-suite --suite suite.summaries.defect.yaml --no-junit
 
       - name: Upload visual artifacts
         if: always()
@@ -70,3 +70,4 @@ jobs:
         with:
           name: visual-regression-artifacts
           path: .visual-regression/
+
