@@ -124,3 +124,5 @@ python -m pytest -q
 ```
 
 Test auto run
+
+Auto-run PR test on 2026-04-16.
