@@ -1,6 +1,7 @@
 name: visual-regression
 
 on:
+  push:
   pull_request:
   workflow_dispatch:
 
@@ -70,3 +71,4 @@ jobs:
         with:
           name: visual-regression-artifacts
           path: .visual-regression/
+
