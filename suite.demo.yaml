@@ -1,0 +1,49 @@
+tests:
+  - name: demo-home-en
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.25
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+    ignore_regions: []
+
+  - name: demo-login-ms
+    url: http://127.0.0.1:8130/demo/login.html?lang=ms-MY
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.25
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: ms-MY
+    timezone_id: Asia/Kuala_Lumpur
+    ignore_regions: []
+
+  - name: demo-dashboard-zh
+    url: http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.25
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: zh-CN
+    timezone_id: Asia/Shanghai
+    ignore_regions: []
+
+  - name: demo-home-mobile
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: chromium
+    device: iPhone 13
+    viewport: [390, 844]
+    wait_ms: 400
+    threshold_pct: 0.35
+    pixel_threshold: 20
+    min_region_area: 100
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+    ignore_regions: []

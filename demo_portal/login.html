@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Northstar Ops Login</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="form-shell">
+    <section class="form-card">
+      <div class="locale-badge" data-locale-badge>English (US)</div>
+      <h2 data-i18n="loginTitle">Sign in to continue</h2>
+      <p data-i18n="loginBody">Use your company identity to access release readiness and regression approvals.</p>
+      <div class="defect-banner" data-defect-banner hidden></div>
+      <div class="field">
+        <label for="email" data-i18n="email">Work Email</label>
+        <input id="email" type="email" value="qa@northstar.example" />
+      </div>
+      <div class="field">
+        <label for="password" data-i18n="password">Password</label>
+        <input id="password" type="password" value="********" />
+      </div>
+      <div class="field">
+        <label for="region" data-i18n="role">Region</label>
+        <select id="region">
+          <option>APAC</option>
+          <option>EMEA</option>
+          <option>Americas</option>
+        </select>
+      </div>
+      <div class="button-row cta-box">
+        <button class="btn primary" data-i18n="signIn">Sign In</button>
+        <button class="btn secondary" data-i18n="requestAccess">Request Access</button>
+      </div>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+name: visual-regression
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  visual-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          python -m playwright install chromium
+
+      - name: Run unit tests
+        run: python -m pytest -q
+
+      - name: Start demo portal
+        run: |
+          python -m visual_regression.cli serve-demo --port 8123 &
+
+      - name: Wait for demo portal
+        run: |
+          python - <<'PY'
+          import time
+          import urllib.request
+
+          url = "http://127.0.0.1:8123/index.html?lang=en-US"
+          deadline = time.time() + 30
+          last_error = None
+
+          while time.time() < deadline:
+              try:
+                  with urllib.request.urlopen(url, timeout=5) as response:
+                      if response.status == 200:
+                          print("Demo portal is ready.")
+                          raise SystemExit(0)
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+
+          raise SystemExit(f"Demo portal did not become ready in time: {last_error}")
+          PY
+
+      - name: Bootstrap demo baselines
+        run: |
+          python -m visual_regression.cli create-suite-baselines --suite suite.summaries.yaml --overwrite
+
+      - name: Train AI classifier
+        run: |
+          python -m visual_regression.cli train-ai --epochs 5 --samples-per-image 4
+
+      - name: Run visual suite
+        run: |
+          python -m visual_regression.cli run-suite --suite suite.summaries.yaml --no-junit || true
+
+      - name: Upload visual artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression-artifacts
+          path: .visual-regression/

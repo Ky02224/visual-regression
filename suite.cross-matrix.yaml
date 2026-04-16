@@ -1,0 +1,80 @@
+tests:
+  - name: home-chromium-desktop-en
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.25
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+
+  - name: home-firefox-desktop-en
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: firefox
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.3
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+
+  - name: home-webkit-desktop-en
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: webkit
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.3
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+
+  - name: home-chromium-iphone13-en
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: chromium
+    device: iPhone 13
+    viewport: [390, 844]
+    wait_ms: 400
+    threshold_pct: 0.35
+    pixel_threshold: 20
+    min_region_area: 100
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+
+  - name: home-chromium-pixel7-en
+    url: http://127.0.0.1:8130/demo/index.html?lang=en-US
+    browser: chromium
+    device: Pixel 7
+    viewport: [412, 915]
+    wait_ms: 400
+    threshold_pct: 0.35
+    pixel_threshold: 20
+    min_region_area: 100
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+
+  - name: dashboard-chromium-ipad-zh
+    url: http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN
+    browser: chromium
+    device: iPad (gen 7)
+    viewport: [810, 1080]
+    wait_ms: 400
+    threshold_pct: 0.3
+    pixel_threshold: 20
+    min_region_area: 110
+    locale: zh-CN
+    timezone_id: Asia/Shanghai
+
+  - name: login-chromium-desktop-ms
+    url: http://127.0.0.1:8130/demo/login.html?lang=ms-MY
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 400
+    threshold_pct: 0.25
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: ms-MY
+    timezone_id: Asia/Kuala_Lumpur

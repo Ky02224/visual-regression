@@ -1,0 +1,20 @@
+tests:
+  - name: example-home
+    url: https://example.com
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 1000
+    threshold_pct: 0.20
+    pixel_threshold: 20
+    min_region_area: 120
+    ignore_regions: []
+
+  - name: iana-domains
+    url: https://www.iana.org/domains/reserved
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 1000
+    threshold_pct: 0.35
+    pixel_threshold: 20
+    min_region_area: 120
+    ignore_regions: []

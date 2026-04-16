@@ -1,0 +1,11 @@
+.visual-regression/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.tmp_ai_studio_review/
+.tmp_figma_review/
+.vscode/
+scratch/
+dashboard_frontend/node_modules/
+*.zip

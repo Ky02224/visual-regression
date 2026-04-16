@@ -1,0 +1,41 @@
+tests:
+  - name: company-home-desktop
+    url: https://your-company-site.com/
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 1500
+    threshold_pct: 0.35
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+    color_scheme: light
+    ignore_regions:
+      - [0, 0, 260, 120]
+
+  - name: company-login-desktop
+    url: https://your-company-site.com/login
+    browser: chromium
+    viewport: [1440, 900]
+    wait_ms: 1500
+    threshold_pct: 0.30
+    pixel_threshold: 20
+    min_region_area: 120
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+    hide_selectors:
+      - ".live-clock"
+    ignore_regions: []
+
+  - name: company-home-mobile
+    url: https://your-company-site.com/
+    browser: chromium
+    device: iPhone 13
+    viewport: [390, 844]
+    wait_ms: 1500
+    threshold_pct: 0.40
+    pixel_threshold: 20
+    min_region_area: 100
+    locale: en-US
+    timezone_id: Asia/Kuala_Lumpur
+    ignore_regions: []
