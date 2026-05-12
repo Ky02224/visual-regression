@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import cv2
 import numpy as np
 
+from ._json_cache import JsonCache
 from .ai_datasets import load_public_dataset_manifest
 from .ai_features import (
     DEFAULT_IMAGE_SIZE,
@@ -243,7 +244,7 @@ def _load_run_pair_samples(
             continue
 
         try:
-            payload = json.loads(result_file.read_text(encoding="utf-8"))
+            payload = JsonCache.read(result_file)
         except Exception:
             continue
 

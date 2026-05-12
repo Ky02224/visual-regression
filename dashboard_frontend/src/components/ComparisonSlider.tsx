@@ -19,6 +19,7 @@ export function ComparisonSlider({
 }: ComparisonSliderProps) {
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleMove = (clientX: number) => {
@@ -60,76 +61,149 @@ export function ComparisonSlider({
   }, [isDragging]);
 
   return (
-    <div 
-      ref={containerRef}
-      className={cn(
-        "relative bg-slate-100 dark:bg-slate-900 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 select-none group cursor-col-resize",
-        compact ? "mx-auto w-full max-w-[360px] h-[680px]" : "w-full h-[320px] md:h-[380px]"
-      )}
-      onMouseDown={() => setIsDragging(true)}
-      onTouchStart={() => setIsDragging(true)}
-    >
-      {/* Current Image (Bottom Layer) */}
-      <img 
-        src={currentUrl} 
-        alt={labelCurrent}
-        className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-        referrerPolicy="no-referrer"
-      />
-
-      {/* Baseline Image (Top Layer with Clip) */}
+    <>
       <div 
-        className="absolute inset-0 w-full h-full"
-        style={{ clipPath: `inset(0 ${100 - sliderPosition}% 0 0)` }}
+        ref={containerRef}
+        className={cn(
+          "relative bg-slate-100 dark:bg-slate-900 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 select-none group cursor-col-resize",
+          compact ? "mx-auto w-full max-w-[360px] h-[680px]" : "w-full h-[320px] md:h-[380px]"
+        )}
+        onMouseDown={() => setIsDragging(true)}
+        onTouchStart={() => setIsDragging(true)}
       >
+        {/* Current Image (Bottom Layer) */}
         <img 
-          src={baselineUrl} 
-          alt={labelBaseline}
+          src={currentUrl} 
+          alt={labelCurrent}
           className="absolute inset-0 w-full h-full object-contain pointer-events-none"
           referrerPolicy="no-referrer"
         />
-        
-        {/* Label Baseline */}
-        <div className="absolute top-4 left-4 px-3 py-1 bg-black/50 backdrop-blur-md rounded-lg text-[10px] font-bold text-white uppercase tracking-widest pointer-events-none">
-          {labelBaseline}
+
+        {/* Baseline Image (Top Layer with Clip) */}
+        <div 
+          className="absolute inset-0 w-full h-full"
+          style={{ clipPath: `inset(0 ${100 - sliderPosition}% 0 0)` }}
+        >
+          <img 
+            src={baselineUrl} 
+            alt={labelBaseline}
+            className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+            referrerPolicy="no-referrer"
+          />
+          
+          {/* Label Baseline */}
+          <div className="absolute top-4 left-4 px-3 py-1 bg-black/50 backdrop-blur-md rounded-lg text-[10px] font-bold text-white uppercase tracking-widest pointer-events-none">
+            {labelBaseline}
+          </div>
         </div>
+
+        {/* Label Current */}
+        <div 
+          className="absolute top-4 right-4 px-3 py-1 bg-indigo-600/60 backdrop-blur-md rounded-lg text-[10px] font-bold text-white uppercase tracking-widest pointer-events-none transition-opacity"
+          style={{ opacity: sliderPosition > 85 ? 0 : 1 }}
+        >
+          {labelCurrent}
+        </div>
+
+        {/* Centered Instructions (Visible on hover if not dragging) */}
+        {!isDragging && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+            <div className="bg-white/10 backdrop-blur-xl border border-white/20 px-6 py-3 rounded-2xl flex items-center gap-3">
+               <Layers className="w-5 h-5 text-white" />
+               <span className="text-white text-xs font-bold uppercase tracking-widest">Drag to Compare</span>
+            </div>
+          </div>
+        )}
+
+        {/* Slider Handle */}
+        <div 
+          className="absolute inset-y-0 z-10 w-1 bg-white shadow-[0_0_15px_rgba(0,0,0,0.5)] flex items-center justify-center"
+          style={{ left: `${sliderPosition}%` }}
+        >
+          <div className="w-8 h-8 bg-white rounded-full shadow-2xl flex items-center justify-center -ml-0.5 border-4 border-slate-100 dark:border-slate-900 group-active:scale-125 transition-transform">
+            <div className="flex gap-0.5">
+              <div className="w-0.5 h-3 bg-slate-300 rounded-full" />
+              <div className="w-0.5 h-3 bg-slate-300 rounded-full" />
+            </div>
+          </div>
+        </div>
+
+        {/* Expand Button */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setExpanded(true);
+          }}
+          className="absolute bottom-4 right-4 p-2 bg-black/30 hover:bg-black/50 text-white rounded-lg transition-colors backdrop-blur-md"
+          aria-label="Expand comparison"
+        >
+          <Maximize2 className="w-4 h-4" />
+        </button>
       </div>
 
-      {/* Label Current */}
-      <div 
-        className="absolute top-4 right-4 px-3 py-1 bg-indigo-600/60 backdrop-blur-md rounded-lg text-[10px] font-bold text-white uppercase tracking-widest pointer-events-none transition-opacity"
-        style={{ opacity: sliderPosition > 85 ? 0 : 1 }}
-      >
-        {labelCurrent}
-      </div>
+      {expanded && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setExpanded(false)}
+          />
+          <div className="relative w-full max-w-6xl h-[85vh] rounded-3xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-950 shadow-2xl">
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="absolute top-4 right-4 z-20 px-3 py-2 rounded-xl bg-black/40 hover:bg-black/60 text-white text-xs font-bold uppercase tracking-widest backdrop-blur-md"
+            >
+              Close
+            </button>
 
-      {/* Centered Instructions (Visible on hover if not dragging) */}
-      {!isDragging && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-          <div className="bg-white/10 backdrop-blur-xl border border-white/20 px-6 py-3 rounded-2xl flex items-center gap-3">
-             <Layers className="w-5 h-5 text-white" />
-             <span className="text-white text-xs font-bold uppercase tracking-widest">Drag to Compare</span>
+            <div
+              className="absolute inset-0 cursor-col-resize"
+              onMouseDown={() => setIsDragging(true)}
+              onTouchStart={() => setIsDragging(true)}
+            >
+              <img
+                src={currentUrl}
+                alt={labelCurrent}
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                referrerPolicy="no-referrer"
+              />
+              <div
+                className="absolute inset-0 w-full h-full"
+                style={{ clipPath: `inset(0 ${100 - sliderPosition}% 0 0)` }}
+              >
+                <img
+                  src={baselineUrl}
+                  alt={labelBaseline}
+                  className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                  referrerPolicy="no-referrer"
+                />
+                <div className="absolute top-4 left-4 px-3 py-1 bg-black/50 backdrop-blur-md rounded-lg text-[10px] font-bold text-white uppercase tracking-widest pointer-events-none">
+                  {labelBaseline}
+                </div>
+              </div>
+              <div
+                className="absolute top-4 right-4 px-3 py-1 bg-indigo-600/60 backdrop-blur-md rounded-lg text-[10px] font-bold text-white uppercase tracking-widest pointer-events-none transition-opacity"
+                style={{ opacity: sliderPosition > 85 ? 0 : 1 }}
+              >
+                {labelCurrent}
+              </div>
+              <div
+                className="absolute inset-y-0 z-10 w-1 bg-white shadow-[0_0_15px_rgba(0,0,0,0.5)] flex items-center justify-center"
+                style={{ left: `${sliderPosition}%` }}
+              >
+                <div className="w-10 h-10 bg-white rounded-full shadow-2xl flex items-center justify-center -ml-0.5 border-4 border-slate-950">
+                  <div className="flex gap-0.5">
+                    <div className="w-0.5 h-4 bg-slate-300 rounded-full" />
+                    <div className="w-0.5 h-4 bg-slate-300 rounded-full" />
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
-
-      {/* Slider Handle */}
-      <div 
-        className="absolute inset-y-0 z-10 w-1 bg-white shadow-[0_0_15px_rgba(0,0,0,0.5)] flex items-center justify-center"
-        style={{ left: `${sliderPosition}%` }}
-      >
-        <div className="w-8 h-8 bg-white rounded-full shadow-2xl flex items-center justify-center -ml-0.5 border-4 border-slate-100 dark:border-slate-900 group-active:scale-125 transition-transform">
-          <div className="flex gap-0.5">
-            <div className="w-0.5 h-3 bg-slate-300 rounded-full" />
-            <div className="w-0.5 h-3 bg-slate-300 rounded-full" />
-          </div>
-        </div>
-      </div>
-
-      {/* Expand Button (Decorative for now) */}
-      <button className="absolute bottom-4 right-4 p-2 bg-black/30 hover:bg-black/50 text-white rounded-lg transition-colors backdrop-blur-md">
-        <Maximize2 className="w-4 h-4" />
-      </button>
-    </div>
+    </>
   );
 }

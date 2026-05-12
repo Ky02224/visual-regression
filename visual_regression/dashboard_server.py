@@ -4,17 +4,25 @@ import json
 import mimetypes
 import subprocess
 import sys
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 from .config import WorkspacePaths
 from .baseline_manager import BaselineManager
-from .dashboard_data import build_dashboard_snapshot
+from .dashboard_data import build_dashboard_snapshot, _DashboardCache
 from .review_manager import ReviewManager
 from .integrations_manager import IntegrationsManager
+from .sqlite_store import SqliteStore
+from .github_oauth import (
+    build_authorize_url,
+    exchange_code_for_token,
+    fetch_github_user,
+    oauth_settings,
+)
 
 
 
@@ -23,7 +31,42 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.project_root = project_root
         self.paths = paths
         self.port = port
+        self.store = SqliteStore(paths.db_path)
         super().__init__(*args, directory=str(project_root), **kwargs)
+
+    def _cookie_value(self, name: str) -> str:
+        header = self.headers.get("Cookie") or ""
+        parts = [item.strip() for item in header.split(";") if item.strip()]
+        for part in parts:
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            if k.strip() == name:
+                return v.strip()
+        return ""
+
+    def _send_set_cookie(self, name: str, value: str, max_age: int | None = None) -> None:
+        cookie = f"{name}={value}; Path=/; HttpOnly; SameSite=Lax"
+        if max_age is not None:
+            cookie += f"; Max-Age={int(max_age)}"
+        self.send_header("Set-Cookie", cookie)
+
+    def _clear_cookie(self, name: str) -> None:
+        self._send_set_cookie(name, "deleted", max_age=0)
+
+    def _session_user(self):
+        token = self._cookie_value("lens_session")
+        return self.store.user_for_session(token)
+
+    def _require_role(self, allowed: set[str]) -> bool:
+        user = self._session_user()
+        return bool(user and user.role in allowed)
+
+    def _send_auth_required(self) -> None:
+        self._send_error_json("Authentication required", status=401)
+
+    def _send_forbidden(self) -> None:
+        self._send_error_json("Forbidden", status=403)
 
     def _safe_path(self, base: Path, relative: str) -> str:
         target = (base / relative).resolve()
@@ -71,6 +114,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _invalidate_dashboard_cache(self) -> None:
+        """Invalidate the dashboard cache after data modifications."""
+        _DashboardCache.invalidate()
+
     def _read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length else b"{}"
@@ -99,8 +146,36 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         payload = {"ok": result.get("returncode", 1) == 0, **result}
         self._send_json(payload, status=status)
 
+    def _send_redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def _dashboard_base_url(self) -> str:
+        host = self.headers.get("Host") or f"127.0.0.1:{self.port}"
+        return f"http://{host}"
+
+    def _github_repo_url(self) -> str:
+        process = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(self.project_root),
+            capture_output=True,
+            text=True,
+        )
+        if process.returncode != 0:
+            return ""
+        return process.stdout.strip()
+
     def _is_authorized(self) -> bool:
-        """Check if the request has the correct access key for sensitive operations."""
+        """
+        Backward compatible authorization check.
+
+        - Browser users: cookie session (admin) OR role checks via _require_role()
+        - Automation: X-Access-Key matches configured api_key
+        """
+        user = self._session_user()
+        if user and user.role == "admin":
+            return True
         manager = IntegrationsManager(self.paths.root)
         config = manager.get_config()
         secure_key = config.get("api_key")
@@ -127,6 +202,72 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/auth/me":
+                user = self._session_user()
+                if not user:
+                    return self._send_json({"ok": True, "authenticated": False, "user": None})
+                return self._send_json(
+                    {"ok": True, "authenticated": True, "user": {"email": user.email, "role": user.role}}
+                )
+            if parsed.path == "/api/integrations/github/status":
+                manager = IntegrationsManager(self.paths.root)
+                settings = oauth_settings(f"{self._dashboard_base_url()}/api/integrations/github/callback")
+                return self._send_json(
+                    {
+                        "configured": settings["configured"],
+                        "redirect_uri": settings["redirect_uri"],
+                        "repo_url": self._github_repo_url(),
+                        **manager.github_status(),
+                    }
+                )
+
+            if parsed.path == "/api/integrations/github/callback":
+                manager = IntegrationsManager(self.paths.root)
+                query = parse_qs(parsed.query)
+                if query.get("error"):
+                    error_value = query.get("error_description", query.get("error", ["Authorization failed"]))[0]
+                    manager.log_activity(
+                        message=f"GitHub OAuth failed: {error_value}",
+                        branch="integrations",
+                        status="failed",
+                    )
+                    return self._send_redirect(f"/integrations?github_error={quote_plus(error_value)}")
+
+                code = query.get("code", [None])[0]
+                state = query.get("state", [None])[0]
+                if not code or not state:
+                    return self._send_redirect("/integrations?github_error=Missing+code+or+state")
+                if not manager.validate_github_state(state):
+                    manager.log_activity(message="GitHub OAuth failed: invalid state", branch="integrations", status="failed")
+                    return self._send_redirect("/integrations?github_error=Invalid+or+expired+state")
+
+                settings = oauth_settings(f"{self._dashboard_base_url()}/api/integrations/github/callback")
+                if not settings["configured"]:
+                    return self._send_redirect("/integrations?github_error=GitHub+OAuth+is+not+configured")
+
+                token_payload = exchange_code_for_token(
+                    client_id=settings["client_id"],
+                    client_secret=settings["client_secret"],
+                    code=code,
+                    redirect_uri=settings["redirect_uri"],
+                )
+                if "error" in token_payload:
+                    error_value = token_payload.get("error_description") or token_payload.get("error") or "Unable to exchange OAuth code"
+                    manager.log_activity(
+                        message=f"GitHub OAuth failed: {error_value}",
+                        branch="integrations",
+                        status="failed",
+                    )
+                    return self._send_redirect(f"/integrations?github_error={quote_plus(error_value)}")
+
+                access_token = token_payload.get("access_token", "")
+                scopes = [scope for scope in str(token_payload.get("scope", "")).split(",") if scope]
+                if not access_token:
+                    return self._send_redirect("/integrations?github_error=Missing+access+token")
+                user = fetch_github_user(access_token)
+                manager.complete_github_oauth(access_token=access_token, user=user, scopes=scopes)
+                return self._send_redirect("/integrations?github=connected")
+
             if parsed.path == "/api/dashboard":
                 snapshot = build_dashboard_snapshot(self.project_root, self.paths)
                 return self._send_json(snapshot)
@@ -156,17 +297,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 config = manager.get_config()
                 # Mask key but provide other info
                 token = config.get("api_key", "")
-                masked_token = (token[:7] + "•" * 20) if len(token) > 10 else "••••••••"
+                masked_token = (token[:7] + "*" * 20) if len(token) > 10 else "********"
+                settings = oauth_settings(f"{self._dashboard_base_url()}/api/integrations/github/callback")
                 return self._send_json({
                     "webhook_url": config.get("webhook_url", ""),
                     "webhook_threshold": config.get("webhook_threshold", 1.0),
-                    "api_key": masked_token
+                    "api_key": masked_token,
+                    "webhook_connected": bool(config.get("webhook_url")),
+                    "activity_count": len(config.get("activity", [])),
+                    "github_configured": settings["configured"],
                 })
 
             if parsed.path == "/api/integrations/activity":
                 manager = IntegrationsManager(self.paths.root)
                 config = manager.get_config()
                 return self._send_json({"activity": config.get("activity", [])})
+
+            if parsed.path == "/api/users":
+                user = self._session_user()
+                if not user:
+                    return self._send_auth_required()
+                if not self._require_role({"admin"}):
+                    return self._send_forbidden()
+                users = self.store.list_users()
+                return self._send_json({"ok": True, "users": users})
 
             return super().do_GET()
 
@@ -179,9 +333,50 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            if self.path == "/api/auth/login":
+                payload = self._read_json()
+                email = str(payload.get("email", "")).strip()
+                password = str(payload.get("password", "")).strip()
+                if not email or not password:
+                    return self._send_error_json("Email and password are required", status=400)
+                user = self.store.authenticate(email, password)
+                if not user:
+                    self.store.audit(None, None, "auth.login_failed", {"email": email})
+                    return self._send_error_json("Invalid credentials", status=401)
+
+                token = self.store.create_session(user.email, ttl_seconds=60 * 60 * 12)
+                self.send_response(200)
+                self._send_set_cookie("lens_session", token, max_age=60 * 60 * 12)
+                body = json.dumps({"ok": True, "user": {"email": user.email, "role": user.role}}, indent=2).encode(
+                    "utf-8"
+                )
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                self.store.audit(user.email, user.role, "auth.login", {"email": user.email})
+                return
+
+            if self.path == "/api/auth/logout":
+                token = self._cookie_value("lens_session")
+                if token:
+                    user = self.store.user_for_session(token)
+                    if user:
+                        self.store.audit(user.email, user.role, "auth.logout", {"email": user.email})
+                    self.store.delete_session(token)
+                self.send_response(200)
+                self._clear_cookie("lens_session")
+                body = json.dumps({"ok": True}, indent=2).encode("utf-8")
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             if self.path in {"/api/review", "/api/decision", "/api/actions/review"}:
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized: Lead Scientist privileges required.", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                     
                 payload = self._read_json()
                 run_ref = str(payload.get("run", "")).strip()
@@ -201,33 +396,39 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     decider=decider,
                     comment=str(payload.get("comment", "")),
                 )
+                self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True, "decision": decision})
 
             if self.path == "/api/run/delete":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized: Lead Scientist privileges required.", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 run_ref = str(payload.get("run", "")).strip()
                 if not run_ref:
                     return self._send_error_json("Missing run id", status=400)
                 manager = ReviewManager(self.paths)
                 result = manager.delete_run(run_ref)
+                self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True, **result})
 
             if self.path == "/api/baseline/delete":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized: Lead Scientist privileges required.", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 name = str(payload.get("name", "")).strip()
                 if not name:
                     return self._send_error_json("Missing baseline name", status=400)
                 manager = BaselineManager(self.paths)
                 result = manager.delete_baseline(name)
+                self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True, **result})
 
             if self.path == "/api/baseline/restore":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized: Lead Scientist privileges required.", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 name = str(payload.get("name", "")).strip()
                 version = str(payload.get("version", "")).strip()
@@ -239,6 +440,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     version=version,
                     restored_by=str(payload.get("restored_by", "")) or None,
                 )
+                self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True, **result})
 
             if self.path == "/api/actions/create-demo-baselines":
@@ -249,16 +451,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                      # In a real app we'd be more granular, but for this FYP we'll let Technicians run tests.
                      pass 
 
-                return self._send_cli_result(self._run_cli_action(["create-suite-baselines", "--suite", "suite.demo.yaml", "--overwrite"]))
+                result = self._run_cli_action(["create-suite-baselines", "--suite", "suite.demo.yaml", "--overwrite"])
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
 
             if self.path == "/api/actions/train-ai":
-                return self._send_cli_result(self._run_cli_action(["train-ai", "--epochs", "20", "--samples-per-image", "12"]))
-
+                result = self._run_cli_action(["train-ai", "--epochs", "20", "--samples-per-image", "12"])
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
             if self.path == "/api/actions/compare-defect":
                 defect_url = f"http://127.0.0.1:{self.port}/demo/index.html?lang=en-US&defect=missing-cta"
-                return self._send_cli_result(self._run_cli_action(["compare", "--name", "demo-home-en", "--url", defect_url]))
+                result = self._run_cli_action(["compare", "--name", "demo-home-en", "--url", defect_url])
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
 
             if self.path == "/api/actions/create-baseline":
+                # Developer+ can capture baselines; CI may use API key only.
+                if not self._require_role({"admin", "developer"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 args = [
                     "create-baseline",
@@ -282,7 +493,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         },
                     )
                 )
-                return self._send_cli_result(self._run_cli_action(args))
+                result = self._run_cli_action(args)
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
 
             if self.path == "/api/actions/create-multiple-baselines":
                 payload = self._read_json()
@@ -314,11 +527,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     args.append("--overwrite")
                 if payload.get("fail_fast"):
                     args.append("--fail-fast")
-                return self._send_cli_result(self._run_cli_action(args))
+                result = self._run_cli_action(args)
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
 
             if self.path == "/api/actions/update-baseline":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized: Lead Scientist privileges required.", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 args = [
                     "update-baseline",
@@ -342,9 +558,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         },
                     )
                 )
-                return self._send_cli_result(self._run_cli_action(args))
+                result = self._run_cli_action(args)
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
 
             if self.path == "/api/actions/compare":
+                if not self._require_role({"admin", "developer"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 browsers = payload.get("browsers") or []
                 devices = payload.get("devices") or []
@@ -382,7 +603,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         args.append("--no-ai")
                     if payload.get("fail_fast"):
                         args.append("--fail-fast")
-                    return self._send_cli_result(self._run_cli_action(args))
+                    result = self._run_cli_action(args)
+                    self._invalidate_dashboard_cache()
+                    return self._send_cli_result(result)
 
                 effective_payload = dict(payload)
                 if browsers:
@@ -416,33 +639,166 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 if payload.get("no_ai"):
                     args.append("--no-ai")
-                return self._send_cli_result(self._run_cli_action(args))
+                result = self._run_cli_action(args)
+                self._invalidate_dashboard_cache()
+                return self._send_cli_result(result)
 
             if self.path == "/api/integrations/webhooks":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 url = str(payload.get("url", "")).strip()
                 threshold = float(payload.get("threshold", 1.0))
                 manager = IntegrationsManager(self.paths.root)
                 manager.update_webhook(url, threshold)
+                self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True})
 
             if self.path == "/api/integrations/rotate-key":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 manager = IntegrationsManager(self.paths.root)
                 new_key = manager.rotate_api_key()
                 return self._send_json({"ok": True, "api_key": new_key})
 
+            if self.path == "/api/integrations/reveal-key":
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
+                manager = IntegrationsManager(self.paths.root)
+                return self._send_json({"ok": True, "api_key": manager.reveal_api_key()})
+
             if self.path == "/api/integrations/test-webhook":
-                if not self._is_authorized():
-                    return self._send_error_json("Unauthorized", status=403)
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
                 payload = self._read_json()
                 url = str(payload.get("url", "")).strip()
-                from .notifier import trigger_webhook
-                ok = trigger_webhook(url, {"event": "test_ping", "message": "The Lens Integration Test"})
-                return self._send_json({"ok": ok})
+                if not url:
+                    return self._send_error_json("Webhook URL is required", status=400)
+                from .notifier import trigger_webhook_detailed
+                result = trigger_webhook_detailed(url, {"event": "test_ping", "message": "The Lens Integration Test"})
+                manager = IntegrationsManager(self.paths.root)
+                manager.log_activity(
+                    message="Webhook test succeeded" if result.get("ok") else "Webhook test failed",
+                    branch="integrations",
+                    status="success" if result.get("ok") else "failed",
+                )
+                return self._send_json(result, status=200 if result.get("ok") else 400)
+
+            if self.path == "/api/integrations/github/connect":
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
+                manager = IntegrationsManager(self.paths.root)
+                settings = oauth_settings(f"{self._dashboard_base_url()}/api/integrations/github/callback")
+                if not settings["configured"]:
+                    return self._send_error_json(
+                        "GitHub OAuth is not configured. Set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET on the dashboard server.",
+                        status=400,
+                    )
+                state = manager.begin_github_oauth()
+                authorize_url = build_authorize_url(
+                    client_id=settings["client_id"],
+                    redirect_uri=settings["redirect_uri"],
+                    state=state,
+                    scope=settings["scope"],
+                )
+                return self._send_json({"ok": True, "authorize_url": authorize_url})
+
+            if self.path == "/api/integrations/github/disconnect":
+                if not self._require_role({"admin"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
+                manager = IntegrationsManager(self.paths.root)
+                manager.disconnect_github()
+                return self._send_json({"ok": True})
+
+            if self.path == "/api/users":
+                user = self._session_user()
+                if not user:
+                    return self._send_auth_required()
+                if not self._require_role({"admin"}):
+                    return self._send_forbidden()
+                payload = self._read_json()
+                email = str(payload.get("email", "")).strip()
+                password = str(payload.get("password", "")).strip()
+                role = str(payload.get("role", "viewer")).strip()
+                if not email or not password:
+                    return self._send_error_json("Email and password are required", status=400)
+                try:
+                    self.store.create_user(email, password, role=role)
+                except ValueError as exc:
+                    return self._send_error_json(str(exc), status=400)
+                except Exception:
+                    return self._send_error_json("User already exists", status=409)
+                actor = self._session_user()
+                self.store.audit(
+                    actor.email if actor else None,
+                    actor.role if actor else None,
+                    "users.create",
+                    {"email": email, "role": role},
+                )
+                return self._send_json({"ok": True})
+
+            if self.path == "/api/users/delete":
+                user = self._session_user()
+                if not user:
+                    return self._send_auth_required()
+                if not self._require_role({"admin"}):
+                    return self._send_forbidden()
+                payload = self._read_json()
+                email = str(payload.get("email", "")).strip()
+                if not email:
+                    return self._send_error_json("Email is required", status=400)
+                actor = self._session_user()
+                if actor and actor.email == email.lower():
+                    return self._send_error_json("Cannot delete your own account", status=400)
+                self.store.delete_user(email)
+                self.store.audit(
+                    actor.email if actor else None,
+                    actor.role if actor else None,
+                    "users.delete",
+                    {"email": email},
+                )
+                return self._send_json({"ok": True})
+
+            if self.path == "/api/users/update":
+                user = self._session_user()
+                if not user:
+                    return self._send_auth_required()
+                if not self._require_role({"admin"}):
+                    return self._send_forbidden()
+                payload = self._read_json()
+                email = str(payload.get("email", "")).strip()
+                if not email:
+                    return self._send_error_json("Email is required", status=400)
+                role = payload.get("role")
+                disabled = payload.get("disabled")
+                password = payload.get("password")
+                if role is not None:
+                    role = str(role).strip()
+                if password is not None:
+                    password = str(password).strip() or None
+                try:
+                    self.store.update_user(
+                        email,
+                        role=role if role else None,
+                        disabled=bool(disabled) if disabled is not None else None,
+                        password=password,
+                    )
+                except ValueError as exc:
+                    return self._send_error_json(str(exc), status=400)
+                actor = self._session_user()
+                self.store.audit(
+                    actor.email if actor else None,
+                    actor.role if actor else None,
+                    "users.update",
+                    {"email": email},
+                )
+                return self._send_json({"ok": True})
 
             return self._send_error_json("Unknown API endpoint", status=404)
 
@@ -462,6 +818,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: int) -> None:
+    store = SqliteStore(paths.db_path)
+    store.ensure_bootstrap_users()
+    
     handler = partial(DashboardHandler, project_root=project_root, paths=paths, port=port)
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Serving dashboard at http://{host}:{port}/")
@@ -471,3 +830,5 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
         pass
     finally:
         server.server_close()
+
+

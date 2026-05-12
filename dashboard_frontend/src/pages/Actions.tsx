@@ -14,7 +14,8 @@ import {
   X,
   Loader2,
   CheckCircle,
-  AlertCircle
+  AlertCircle,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -30,7 +31,7 @@ const tabs = [
 ] as const;
 
 export function Actions() {
-  const { can, role, accessKey } = useRole();
+  const { can, role } = useRole();
   const [activeTab, setActiveTab] = React.useState<ActionTab>('single');
   const [isExecuting, setIsExecuting] = React.useState(false);
   const [status, setStatus] = React.useState<{type: 'success' | 'error', message: string} | null>(null);
@@ -43,8 +44,8 @@ export function Actions() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Access-Key': accessKey || ''
         },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
       const result = await response.json();

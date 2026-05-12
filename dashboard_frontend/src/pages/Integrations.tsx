@@ -1,441 +1,823 @@
 import React from 'react';
-import { 
-  Terminal, 
-  Key, 
-  Copy, 
-  Check, 
-  Eye, 
-  EyeOff, 
-  Cpu, 
-  Github, 
-  Gitlab, 
-  Webhook, 
-  ExternalLink,
+import { useSearchParams } from 'react-router-dom';
+import {
+  Terminal,
+  Key,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  Cpu,
+  Github,
+  Gitlab,
+  Webhook,
   RefreshCw,
   Clock,
   CheckCircle2,
   XCircle,
-  AlertCircle
+  AlertCircle,
+  ShieldCheck,
+  Link2,
+  ExternalLink,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { useRole } from '../context/RoleContext';
 
+type IntegrationConfig = {
+  webhook_url?: string;
+  webhook_threshold?: number;
+  api_key?: string;
+  webhook_connected?: boolean;
+  activity_count?: number;
+  github_configured?: boolean;
+};
+
+type GithubStatus = {
+  configured?: boolean;
+  connected?: boolean;
+  login?: string;
+  avatar_url?: string;
+  profile_url?: string;
+  scopes?: string[];
+  connected_at?: number;
+  repo_url?: string;
+  redirect_uri?: string;
+};
+
+type ActivityItem = {
+  id: string;
+  message: string;
+  branch: string;
+  status: 'success' | 'failed';
+  timestamp: number;
+};
+
+type Notice = {
+  tone: 'success' | 'error' | 'info';
+  message: string;
+};
+
+function NoticeBanner({ notice }: { notice: Notice | null }) {
+  if (!notice) return null;
+
+  return (
+    <div
+      className={cn(
+        'rounded-2xl border px-4 py-3 text-sm font-medium',
+        notice.tone === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-700',
+        notice.tone === 'error' && 'border-rose-200 bg-rose-50 text-rose-700',
+        notice.tone === 'info' && 'border-blue-200 bg-blue-50 text-blue-700',
+      )}
+    >
+      {notice.message}
+    </div>
+  );
+}
+
+function CopyIconButton({ value, label, disabled = false }: { value: string; label: string; disabled?: boolean }) {
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopy = async () => {
+    if (!value || disabled) return;
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      disabled={disabled}
+      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
+      aria-label={label}
+    >
+      {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
 
 export function Integrations() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [pageNotice, setPageNotice] = React.useState<Notice | null>(null);
+
+  React.useEffect(() => {
+    const githubConnected = searchParams.get('github');
+    const githubError = searchParams.get('github_error');
+    if (githubConnected === 'connected') {
+      setPageNotice({ tone: 'success', message: 'GitHub OAuth connected successfully.' });
+      setSearchParams({}, { replace: true });
+      return;
+    }
+    if (githubError) {
+      setPageNotice({ tone: 'error', message: decodeURIComponent(githubError) });
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
   return (
-    <div className="p-8 corporate-grid min-h-screen">
-      <div className="max-w-6xl mx-auto space-y-12">
-        {/* Header */}
-        <header className="border-b border-slate-200 dark:border-slate-800 pb-8">
-          <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100 mb-2">CI/CD Integrations</h2>
-          <p className="text-slate-500 dark:text-slate-400 font-medium">Connect The Lens to your development workflow for automated visual regression testing.</p>
+    <div className="min-h-screen p-8 corporate-grid">
+      <div className="mx-auto max-w-6xl space-y-10">
+        <header className="space-y-3 border-b border-slate-200 pb-8 dark:border-slate-800">
+          <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <Link2 className="h-3.5 w-3.5" />
+            Integrations
+          </div>
+          <div>
+            <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">CI/CD Integrations</h2>
+            <p className="mt-2 max-w-3xl text-sm font-medium text-slate-500 dark:text-slate-400">
+              Connect your dashboard to GitHub and webhook-based alerts so failed visual regressions can flow into a real release workflow.
+            </p>
+          </div>
         </header>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* API Tokens Module */}
+        <NoticeBanner notice={pageNotice} />
+
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+          <GitHubConnectionModule />
           <ApiTokensModule />
-
-          {/* Webhooks Module */}
           <WebhooksModule />
-
-          {/* Pipeline Generator Module */}
           <div className="lg:col-span-2">
             <PipelineGeneratorModule />
           </div>
-
-          {/* Pipeline Feed Module */}
           <div className="lg:col-span-2">
             <PipelineFeedModule />
           </div>
         </div>
-
       </div>
     </div>
+  );
+}
+
+function GitHubConnectionModule() {
+  const { role } = useRole();
+  const [status, setStatus] = React.useState<GithubStatus | null>(null);
+  const [notice, setNotice] = React.useState<Notice | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [connecting, setConnecting] = React.useState(false);
+  const [disconnecting, setDisconnecting] = React.useState(false);
+
+  const loadStatus = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/integrations/github/status');
+      const data: GithubStatus = await res.json();
+      setStatus(data);
+    } catch {
+      setNotice({ tone: 'error', message: 'Unable to load GitHub connection status.' });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadStatus();
+  }, [loadStatus]);
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    setNotice(null);
+    try {
+      const res = await fetch('/api/integrations/github/connect', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Unable to start GitHub OAuth.');
+      }
+      window.location.href = data.authorize_url;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to start GitHub OAuth.';
+      setNotice({ tone: 'error', message });
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!window.confirm('Disconnect GitHub from this dashboard?')) return;
+    setDisconnecting(true);
+    setNotice(null);
+    try {
+      const res = await fetch('/api/integrations/github/disconnect', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Unable to disconnect GitHub.');
+      }
+      setNotice({ tone: 'success', message: 'GitHub disconnected.' });
+      await loadStatus();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to disconnect GitHub.';
+      setNotice({ tone: 'error', message });
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  return (
+    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
+            <Github className="h-5 w-5" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">GitHub OAuth</h3>
+            <p className="text-xs font-medium text-slate-400">Connect a GitHub account so this dashboard can identify the linked engineering workflow.</p>
+          </div>
+        </div>
+        <div
+          className={cn(
+            'rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]',
+            status?.connected
+              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
+              : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300'
+          )}
+        >
+          {status?.connected ? 'Connected' : 'Not connected'}
+        </div>
+      </div>
+
+      <NoticeBanner notice={notice} />
+
+      <div className="mt-5 rounded-3xl border border-slate-100 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-950">
+        {loading ? (
+          <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Loading GitHub connection...</p>
+        ) : !status?.configured ? (
+          <div className="space-y-3">
+            <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">GitHub OAuth is not configured on the dashboard server yet.</p>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Set <code className="font-mono">GITHUB_OAUTH_CLIENT_ID</code> and <code className="font-mono">GITHUB_OAUTH_CLIENT_SECRET</code> before using this feature.
+            </p>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Redirect URI: <code className="font-mono">{status?.redirect_uri || 'http://127.0.0.1:8130/api/integrations/github/callback'}</code>
+            </p>
+          </div>
+        ) : status.connected ? (
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-4">
+              {status.avatar_url ? (
+                <img src={status.avatar_url} alt={status.login || 'GitHub avatar'} className="h-14 w-14 rounded-2xl object-cover ring-1 ring-slate-200 dark:ring-slate-700" />
+              ) : (
+                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  <Github className="h-6 w-6" />
+                </div>
+              )}
+              <div className="space-y-1">
+                <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{status.login || 'Connected account'}</p>
+                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                  {status.connected_at ? `Connected ${new Date(status.connected_at * 1000).toLocaleString()}` : 'Connected'}
+                </p>
+                {status.profile_url && (
+                  <a href={status.profile_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200">
+                    View GitHub profile
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleDisconnect}
+              disabled={role !== 'admin' || disconnecting}
+              className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600"
+            >
+              {disconnecting ? 'Disconnecting...' : 'Disconnect'}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm font-medium text-slate-600 dark:text-slate-300">
+              Start the GitHub OAuth flow to bind this dashboard to the GitHub identity you use for CI/CD and release review.
+            </p>
+            {status.repo_url && (
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Local repo: <span className="font-mono">{status.repo_url}</span>
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={handleConnect}
+              disabled={role !== 'admin' || connecting}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
+            >
+              {connecting ? 'Redirecting...' : 'Connect GitHub'}
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
 function ApiTokensModule() {
-  const { accessKey, role } = useRole();
+  const { role, updateAccessKey } = useRole();
+  const [maskedKey, setMaskedKey] = React.useState('••••••••');
+  const [revealedKey, setRevealedKey] = React.useState('');
   const [showKey, setShowKey] = React.useState(false);
-  const [copied, setCopied] = React.useState(false);
-  const [apiKey, setApiKey] = React.useState("••••••••••••••••••••••••••••••••");
-  const [isRotating, setIsRotating] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [rotating, setRotating] = React.useState(false);
+  const [revealing, setRevealing] = React.useState(false);
+  const [notice, setNotice] = React.useState<Notice | null>(null);
+  const [activityCount, setActivityCount] = React.useState(0);
 
-  React.useEffect(() => {
-    fetch('/api/integrations')
-      .then(res => res.json())
-      .then(data => {
-        if (data.api_key) setApiKey(data.api_key);
-      })
-      .catch(() => {});
+  const loadConfig = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/integrations');
+      const data: IntegrationConfig = await res.json();
+      setMaskedKey(data.api_key || '••••••••');
+      setActivityCount(data.activity_count || 0);
+    } catch {
+      setNotice({ tone: 'error', message: 'Unable to load integration settings from the dashboard server.' });
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const handleCopy = () => {
-    // If it's masked, we can't really copy the real key unless we fetch it or it's provided
-    // In our case, we'll fetch the real key when "show" is clicked or just allow copying if we have it
-    if (apiKey.includes('•')) {
-       alert("Please rotate or reveal key to copy real token.");
-       return;
+  React.useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
+
+  const handleReveal = async () => {
+    if (showKey) {
+      setShowKey(false);
+      return;
     }
-    navigator.clipboard.writeText(apiKey);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setRevealing(true);
+    setNotice(null);
+    try {
+      const res = await fetch('/api/integrations/reveal-key', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Unable to reveal API key.');
+      }
+      setRevealedKey(data.api_key || '');
+      setShowKey(true);
+      setNotice({ tone: 'success', message: 'API key revealed. You can now copy it into your CI/CD secret store.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to reveal API key.';
+      setNotice({ tone: 'error', message });
+    } finally {
+      setRevealing(false);
+    }
   };
 
-  const handleRotateKey = async () => {
-    if (!window.confirm("Rotating the key will invalidate the current one. Continue?")) return;
-    
-    setIsRotating(true);
+  const handleRotate = async () => {
+    if (!window.confirm('Rotate the API key now? Existing CI secrets will stop working until you update them.')) return;
+    setRotating(true);
+    setNotice(null);
     try {
       const res = await fetch('/api/integrations/rotate-key', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
-          'X-Access-Key': accessKey || '' 
-        }
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
       });
-      
       const data = await res.json();
-      if (data.ok) {
-        setApiKey(data.api_key);
-        setShowKey(true);
-      } else {
-        alert(data.error || "Failed to rotate key");
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Failed to rotate API key.');
       }
-    } catch (e) {
-      alert("Network error. Please ensure the dashboard server is running.");
+      setRevealedKey(data.api_key || '');
+      setShowKey(true);
+      setMaskedKey(data.api_key || maskedKey);
+      updateAccessKey(data.api_key || null);
+      setNotice({ tone: 'success', message: 'API key rotated. Update your GitHub secret with the new value.' });
+      await loadConfig();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to rotate API key.';
+      setNotice({ tone: 'error', message });
     } finally {
-      setIsRotating(false);
+      setRotating(false);
     }
   };
 
+  const currentKey = showKey ? (revealedKey || maskedKey) : maskedKey;
+
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-8 shadow-sm">
-      <div className="flex items-center gap-4 mb-6">
-        <div className="w-10 h-10 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-accent border border-slate-100 dark:border-slate-700">
-          <Key className="w-5 h-5" />
+    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
+            <Key className="h-5 w-5" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">API access token</h3>
+            <p className="text-xs font-medium text-slate-400">Use this secret in GitHub Actions, Jenkins, or any pipeline that needs to call the dashboard.</p>
+          </div>
         </div>
-        <div>
-          <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">API Access Tokens</h3>
-          <p className="text-xs text-slate-400 font-medium">Use this token to authenticate CI/CD requests.</p>
+        <div className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:border-slate-700 dark:text-slate-300">
+          {activityCount} activity entries
         </div>
       </div>
 
-      <div className="space-y-4">
-        <div className="p-4 bg-slate-900 rounded-2xl border border-slate-800 flex items-center justify-between group">
-          <div className="flex-1 mr-4 overflow-hidden">
-            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Production Key</p>
-            <code className="text-sm font-mono text-blue-400 block truncate">
-              {showKey ? apiKey : "••••••••••••••••••••••••••••••••"}
-            </code>
+      <NoticeBanner notice={notice} />
+
+      <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-950 p-5 dark:border-slate-700">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.26em] text-slate-500">Production key</p>
+            <p className="mt-1 text-xs font-medium text-slate-400">Store this in your CI secret manager, not directly in code.</p>
           </div>
           <div className="flex items-center gap-2">
-            <button 
-              onClick={() => setShowKey(!showKey)}
-              className="p-2 text-slate-500 hover:text-white transition-colors"
+            <CopyIconButton value={showKey ? revealedKey : ''} label="Copy API key" disabled={!showKey || !revealedKey} />
+            <button
+              type="button"
+              onClick={handleReveal}
+              disabled={role !== 'admin' || revealing || loading}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-            <button 
-              onClick={handleCopy}
-              className="p-2 text-slate-500 hover:text-white transition-colors relative"
-            >
-              {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+              {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              {showKey ? 'Hide' : revealing ? 'Revealing...' : 'Reveal'}
             </button>
           </div>
         </div>
-        
-        <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-tight px-2">
-          <span>{isRotating ? "Generating..." : "Secure and Encrypted"}</span>
-          {role === 'admin' && (
-            <button 
-              onClick={handleRotateKey}
-              className="text-accent hover:underline disabled:opacity-50"
-              disabled={isRotating}
-            >
-              Rotate Key
-            </button>
-          )}
-        </div>
+        <code className="block overflow-x-auto rounded-2xl bg-slate-900 px-4 py-4 text-sm text-blue-300">
+          {loading ? 'Loading token...' : currentKey}
+        </code>
       </div>
-    </div>
+
+      <div className="mt-5 flex items-center justify-between gap-4 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
+        <div className="flex items-center gap-3 text-sm font-medium text-slate-600 dark:text-slate-300">
+          <ShieldCheck className="h-4 w-4 text-emerald-500" />
+          Only admin can reveal or rotate the live token.
+        </div>
+        <button
+          type="button"
+          onClick={handleRotate}
+          disabled={role !== 'admin' || rotating}
+          className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
+        >
+          {rotating ? 'Rotating...' : 'Rotate key'}
+        </button>
+      </div>
+    </section>
   );
 }
 
-
 function WebhooksModule() {
-  const { accessKey, role } = useRole();
-  const [url, setUrl] = React.useState("");
-  const [threshold, setThreshold] = React.useState(1.0);
-  const [isSaving, setIsSaving] = React.useState(false);
-  const [isTesting, setIsTesting] = React.useState(false);
+  const { role } = useRole();
+  const [url, setUrl] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+  const [notice, setNotice] = React.useState<Notice | null>(null);
+  const [connected, setConnected] = React.useState(false);
 
-  React.useEffect(() => {
-    fetch('/api/integrations')
-      .then(res => res.json())
-      .then(data => {
-        setUrl(data.webhook_url || "");
-        setThreshold(data.webhook_threshold || 1.0);
-      });
+  const loadConfig = React.useCallback(async () => {
+    try {
+      const res = await fetch('/api/integrations');
+      const data: IntegrationConfig = await res.json();
+      setUrl(data.webhook_url || '');
+      setConnected(Boolean(data.webhook_connected));
+    } catch {
+      setNotice({ tone: 'error', message: 'Unable to load webhook settings from the dashboard server.' });
+    }
   }, []);
 
+  React.useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
+
   const handleSave = async () => {
-    setIsSaving(true);
+    setSaving(true);
+    setNotice(null);
     try {
       const res = await fetch('/api/integrations/webhooks', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Access-Key': accessKey || '' },
-        body: JSON.stringify({ url, threshold })
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ url, threshold: 0 }),
       });
-      if (!(await res.json()).ok) alert("Failed to save settings");
-    } catch (e) {
-      alert("Network error");
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Failed to save webhook configuration.');
+      }
+      setConnected(Boolean(url));
+      setNotice({ tone: 'success', message: url ? 'Webhook saved. The dashboard can now send notifications to this endpoint.' : 'Webhook cleared.' });
+      await loadConfig();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save webhook configuration.';
+      setNotice({ tone: 'error', message });
     } finally {
-      setIsSaving(false);
+      setSaving(false);
     }
   };
 
   const handleTest = async () => {
-    if (!url) return;
-    setIsTesting(true);
+    if (!url) {
+      setNotice({ tone: 'info', message: 'Enter a webhook URL first, then run the test.' });
+      return;
+    }
+    setTesting(true);
+    setNotice(null);
     try {
       const res = await fetch('/api/integrations/test-webhook', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Access-Key': accessKey || '' },
-        body: JSON.stringify({ url })
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      alert(data.ok ? "Test Success! Check your webhook destination." : "Test Failed. Check URL connectivity.");
-    } catch (e) {
-      alert("Test Error: Network failure");
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Webhook test failed.');
+      }
+      setNotice({ tone: 'success', message: data.message || 'Webhook test succeeded.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Webhook test failed.';
+      setNotice({ tone: 'error', message });
     } finally {
-      setIsTesting(false);
+      setTesting(false);
     }
   };
 
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-8 shadow-sm flex flex-col">
-      <div className="flex items-center gap-4 mb-6">
-        <div className="w-10 h-10 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-accent border border-slate-100 dark:border-slate-700">
-          <Webhook className="w-5 h-5" />
+    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
+            <Webhook className="h-5 w-5" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Regression-detected webhook</h3>
+            <p className="text-xs font-medium text-slate-400">Connect one endpoint that should be notified whenever a failed visual regression is detected.</p>
+          </div>
         </div>
-        <div>
-          <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Webhook Notifications</h3>
-          <p className="text-xs text-slate-400 font-medium">Receive real-time alerts in your workspace.</p>
+        <div className={cn(
+          'rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]',
+          connected ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300'
+        )}>
+          {connected ? 'Connected' : 'Not connected'}
         </div>
       </div>
 
-      <div className="space-y-6 flex-1">
+      <NoticeBanner notice={notice} />
+
+      <div className="mt-5 space-y-5">
         <div className="space-y-2">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 px-1">Endpoint URL</label>
-          <input 
-            type="text" 
+          <label className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Webhook URL</label>
+          <input
+            type="url"
             value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            onChange={(event) => setUrl(event.target.value)}
             placeholder="https://hooks.slack.com/services/..."
-            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-3 text-sm outline-none focus:ring-2 focus:ring-accent/20 transition-all dark:text-slate-100"
+            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-blue-500 dark:focus:ring-blue-950"
           />
         </div>
 
-        <div className="flex items-center justify-between p-4 bg-slate-50 dark:bg-slate-950 rounded-2xl border border-slate-100 dark:border-slate-800">
-          <div className="flex items-center gap-3">
-            <div className={cn("w-2 h-2 rounded-full", url ? "bg-green-500" : "bg-slate-300")} />
-            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-              Threshold: {threshold}% Mismatch
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={handleTest}
-              disabled={isTesting || !url}
-              className="text-[10px] font-bold uppercase text-accent hover:underline disabled:opacity-50"
-            >
-              {isTesting ? "Testing..." : "Test Hook"}
-            </button>
-          </div>
+        <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Event</p>
+          <p className="mt-2 text-sm font-bold text-slate-900 dark:text-slate-100">regression.detected</p>
+          <p className="mt-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+            The platform sends this event only when a compare result or suite case fails against the approved baseline.
+          </p>
         </div>
       </div>
-      
-      <div className="mt-6">
-          <button 
-            disabled={isSaving || role !== 'admin'}
-            onClick={handleSave}
-            className="w-full py-3 bg-slate-900 dark:bg-slate-800 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-black transition-all disabled:opacity-50"
-          >
-            {isSaving ? "Saving..." : "Save Configuration"}
-          </button>
+
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={role !== 'admin' || saving}
+          className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
+        >
+          {saving ? 'Saving...' : 'Save webhook'}
+        </button>
+        <button
+          type="button"
+          onClick={handleTest}
+          disabled={role !== 'admin' || testing || !url}
+          className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600"
+        >
+          {testing ? 'Testing...' : 'Test webhook'}
+        </button>
       </div>
-    </div>
+    </section>
   );
 }
 
-
 function PipelineGeneratorModule() {
   const [activeTab, setActiveTab] = React.useState<'github' | 'gitlab' | 'jenkins'>('github');
+  const [copied, setCopied] = React.useState(false);
 
-  const configs = {
-    github: `name: Visual Regression Test
-on: [push]
+  const snippets = {
+    github: `name: visual-regression
+on:
+  push:
+  pull_request:
+
 jobs:
-  lens-test:
+  visual-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Run The Lens Comparison
-        uses: the-lens/action@v1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          api-key: \${{ secrets.LENS_API_KEY }}
-          project-id: "PRJ-9021"
-          threshold: 0.5`,
-    gitlab: `visual_test:
-  image: the-lens/runner:latest
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m playwright install chromium
+      - run: python -m pytest -q
+      - run: python -m visual_regression.cli serve-demo --port 8123 &
+      - run: python -m visual_regression.cli create-suite-baselines --suite suite.summaries.yaml --overwrite
+      - run: python -m visual_regression.cli run-suite --suite suite.summaries.yaml --no-junit
+        env:
+          LENS_API_KEY: \${{ secrets.LENS_API_KEY }}`,
+    gitlab: `visual_regression:
+  image: python:3.11
   script:
-    - lens compare --key $LENS_API_KEY --project PRJ-9021
-  only:
-    - merge_requests`,
+    - pip install -r requirements-dev.txt
+    - python -m playwright install chromium
+    - python -m pytest -q
+    - python -m visual_regression.cli serve-demo --port 8123 &
+    - python -m visual_regression.cli create-suite-baselines --suite suite.summaries.yaml --overwrite
+    - python -m visual_regression.cli run-suite --suite suite.summaries.yaml --no-junit
+  variables:
+    LENS_API_KEY: $LENS_API_KEY`,
     jenkins: `pipeline {
-    agent any
-    stages {
-        stage('Visual Test') {
-            steps {
-                sh 'lens compare --key \${LENS_API_KEY} --project PRJ-9021'
-            }
-        }
+  agent any
+  stages {
+    stage('Visual Regression') {
+      steps {
+        bat 'pip install -r requirements-dev.txt'
+        bat 'python -m playwright install chromium'
+        bat 'python -m pytest -q'
+        bat 'python -m visual_regression.cli serve-demo --port 8123'
+        bat 'python -m visual_regression.cli create-suite-baselines --suite suite.summaries.yaml --overwrite'
+        bat 'python -m visual_regression.cli run-suite --suite suite.summaries.yaml --no-junit'
+      }
     }
-}`
+  }
+}`,
+  } as const;
+
+  const snippet = snippets[activeTab];
+
+  const copySnippet = async () => {
+    await navigator.clipboard.writeText(snippet);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
   };
 
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
-      <div className="p-8 border-b border-slate-100 dark:border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
+    <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-col justify-between gap-6 border-b border-slate-100 p-8 dark:border-slate-800 md:flex-row md:items-center">
         <div className="flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-accent border border-slate-100 dark:border-slate-700">
-            <Cpu className="w-5 h-5" />
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
+            <Cpu className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Pipeline Generator</h3>
-            <p className="text-xs text-slate-400 font-medium">Generate configuration files for your CI provider.</p>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Pipeline generator</h3>
+            <p className="text-xs font-medium text-slate-400">Copy a starter config and drop your token into your CI secret store.</p>
           </div>
         </div>
 
-        <div className="flex p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
+        <div className="flex flex-wrap gap-2">
           {(['github', 'gitlab', 'jenkins'] as const).map((tab) => (
             <button
               key={tab}
+              type="button"
               onClick={() => setActiveTab(tab)}
               className={cn(
-                "px-4 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
-                activeTab === tab 
-                  ? "bg-white dark:bg-slate-950 text-primary dark:text-slate-100 shadow-sm" 
-                  : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                'rounded-xl px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] transition',
+                activeTab === tab
+                  ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                  : 'border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white'
               )}
             >
-              {tab === 'github' && <Github className="w-3.5 h-3.5 inline mr-2" />}
-              {tab === 'gitlab' && <Gitlab className="w-3.5 h-3.5 inline mr-2" />}
+              {tab === 'github' && <Github className="mr-2 inline h-3.5 w-3.5" />}
+              {tab === 'gitlab' && <Gitlab className="mr-2 inline h-3.5 w-3.5" />}
               {tab}
             </button>
           ))}
         </div>
       </div>
 
-      <div className="p-8 bg-slate-900 relative group">
-        <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button className="p-2 bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-700">
-            <Copy className="w-4 h-4" />
-          </button>
+      <div className="space-y-4 p-8">
+        <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-200">
+          Tip: add your live token as <code className="font-mono">LENS_API_KEY</code> in your CI/CD secret settings instead of hardcoding it into the file.
         </div>
-        <pre className="text-sm font-mono text-blue-300 overflow-x-auto leading-relaxed">
-          {configs[activeTab]}
-        </pre>
+        <div className="relative rounded-3xl bg-slate-950 p-6">
+          <button
+            type="button"
+            onClick={copySnippet}
+            className="absolute right-4 top-4 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-500 hover:text-white"
+          >
+            {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+            {copied ? 'Copied' : 'Copy snippet'}
+          </button>
+          <pre className="overflow-x-auto whitespace-pre-wrap pr-28 text-sm leading-6 text-blue-300">{snippet}</pre>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 function PipelineFeedModule() {
-  const [runs, setRuns] = React.useState<any[]>([]);
+  const [runs, setRuns] = React.useState<ActivityItem[]>([]);
   const [loading, setLoading] = React.useState(true);
 
-  const fetchActivity = () => {
+  const fetchActivity = React.useCallback(() => {
     setLoading(true);
     fetch('/api/integrations/activity')
-      .then(res => res.json())
-      .then(data => {
+      .then((res) => res.json())
+      .then((data) => {
         setRuns(data.activity || []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  };
+  }, []);
 
   React.useEffect(() => {
     fetchActivity();
-  }, []);
+  }, [fetchActivity]);
 
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-8 shadow-sm">
-      <div className="flex items-center justify-between mb-8">
+    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-8 flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-accent border border-slate-100 dark:border-slate-700">
-            <Terminal className="w-5 h-5" />
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
+            <Terminal className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Recent Pipeline Activity</h3>
-            <p className="text-xs text-slate-400 font-medium">Real-time feed of CI-triggered visual tests.</p>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Recent integration activity</h3>
+            <p className="text-xs font-medium text-slate-400">See webhook saves, key rotations, and CI-triggered events in one place.</p>
           </div>
         </div>
-        <button 
+        <button
+          type="button"
           onClick={fetchActivity}
           disabled={loading}
-          className="p-2 text-slate-400 hover:text-accent transition-colors disabled:opacity-50"
+          className="rounded-xl border border-slate-200 p-2 text-slate-500 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white"
         >
-          <RefreshCw className={cn("w-5 h-5", loading && "animate-spin")} />
+          <RefreshCw className={cn('h-5 w-5', loading && 'animate-spin')} />
         </button>
       </div>
 
       <div className="space-y-4">
         {loading && runs.length === 0 && (
-          <div className="py-12 text-center text-xs font-bold text-slate-300 uppercase tracking-widest animate-pulse">
-            Fetching activity log...
+          <div className="rounded-2xl border-2 border-dashed border-slate-200 px-6 py-10 text-center text-xs font-bold uppercase tracking-[0.2em] text-slate-400 dark:border-slate-700 dark:text-slate-500">
+            Loading integration activity...
           </div>
         )}
-        
+
         {!loading && runs.length === 0 && (
-          <div className="py-12 text-center text-xs font-bold text-slate-300 uppercase tracking-widest border-2 border-dashed border-slate-100 dark:border-slate-800 rounded-2xl">
-            No integrated activity detected yet.
+          <div className="rounded-2xl border-2 border-dashed border-slate-200 px-6 py-10 text-center text-sm font-medium text-slate-500 dark:border-slate-700 dark:text-slate-400">
+            No integration activity yet. Save a webhook, rotate a key, or run CI/CD once to populate this feed.
           </div>
         )}
 
         {runs.map((run) => (
-          <div key={run.id} className="flex items-center justify-between p-4 rounded-2xl border border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all group cursor-pointer">
+          <div key={run.id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-100 p-4 transition hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/70">
             <div className="flex items-center gap-4">
               <div className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center",
-                run.status === 'success' ? "bg-green-50 text-green-500" : "bg-red-50 text-red-500"
+                'flex h-10 w-10 items-center justify-center rounded-full',
+                run.status === 'success' ? 'bg-emerald-50 text-emerald-500 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-rose-50 text-rose-500 dark:bg-rose-950/40 dark:text-rose-300'
               )}>
-                {run.status === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+                {run.status === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <XCircle className="h-5 w-5" />}
               </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-slate-900 dark:text-slate-100 text-sm">{run.message}</span>
-                  <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-950 text-slate-500 rounded text-[10px] font-bold uppercase tracking-tight">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{run.message}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500 dark:bg-slate-800 dark:text-slate-300">
                     {run.branch}
                   </span>
                 </div>
-                <div className="flex items-center gap-3 mt-1">
-                  <span className="text-[10px] font-mono text-slate-400">#{run.id}</span>
-                  <div className="flex items-center gap-1 text-[10px] text-slate-400 font-medium">
-                    <Clock className="w-3 h-3" />
+                <div className="mt-1 flex items-center gap-3 text-xs font-medium text-slate-400">
+                  <span className="font-mono">#{run.id}</span>
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="h-3 w-3" />
                     {new Date(run.timestamp * 1000).toLocaleString()}
-                  </div>
+                  </span>
                 </div>
               </div>
             </div>
-            <ExternalLink className="w-4 h-4 text-slate-300 group-hover:text-accent transition-colors" />
+            <AlertCircle className="h-4 w-4 text-slate-300 dark:text-slate-600" />
           </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 

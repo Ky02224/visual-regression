@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+from ._json_cache import JsonCache
+
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 KNOWN_SOURCES = ("webui", "rico", "screen-annotation")
@@ -106,7 +108,7 @@ def save_public_dataset_manifest(paths, manifest: Dict[str, object], filename: s
 
 
 def load_public_dataset_manifest(manifest_path: Path) -> Dict[str, object]:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload = JsonCache.read(manifest_path)
     payload.setdefault("sources", {})
     payload.setdefault("images", [])
     payload.setdefault("total_images", len(payload["images"]))

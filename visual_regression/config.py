@@ -14,6 +14,7 @@ class WorkspacePaths:
     reviews_dir: Path = field(init=False)
     models_dir: Path = field(init=False)
     datasets_dir: Path = field(init=False)
+    db_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
         self.baselines_dir = self.root / "baselines"
@@ -22,6 +23,7 @@ class WorkspacePaths:
         self.reviews_dir = self.root / "reviews"
         self.models_dir = self.root / "models"
         self.datasets_dir = self.root / "datasets"
+        self.db_path = self.root / "storage.db"
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

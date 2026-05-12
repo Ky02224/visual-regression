@@ -8,4 +8,8 @@ __pycache__/
 .vscode/
 scratch/
 dashboard_frontend/node_modules/
+dashboard_frontend/dist/
+dashboard_frontend/.env
+dashboard_frontend/.env.local
+dashboard_frontend/.env.*.local
 *.zip

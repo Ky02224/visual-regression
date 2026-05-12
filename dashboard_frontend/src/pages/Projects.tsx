@@ -39,7 +39,7 @@ export function Projects() {
               id: suite,
               domain: run.url ? new URL(run.url).hostname : 'localhost',
               runs: 0,
-              baselines: baselines.filter((b: any) => b.name.includes(suite)).length,
+              baselines: baselines.filter((b: any) => (b.name || '').includes(suite)).length,
               lastRun: run.run,
               favorite: false
             };

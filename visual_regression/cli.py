@@ -13,7 +13,7 @@ from typing import Any, Dict, Sequence
 from .baseline_manager import BaselineManager
 from .config import CaptureConfig, WorkspacePaths
 from .integrations_manager import IntegrationsManager
-from .notifier import trigger_webhook, format_run_notification
+from .notifier import format_regression_detected_payload, trigger_webhook_detailed
 
 
 
@@ -355,22 +355,28 @@ def _run_compare(
             status="success" if passed else "failed"
         )
         
-        # Trigger Webhook if threshold exceeded
+        # Trigger webhook only when a regression is detected.
         webhook_url = config.get("webhook_url")
-        webhook_threshold = config.get("webhook_threshold", 1.0)
-        
-        if webhook_url and (not passed or result.mismatch_pct >= webhook_threshold):
-            # Port is harder to get here, maybe assume 8130 or pass it
-            # For now use placeholder in URL or let frontend handle it
-            dashboard_url = "http://localhost:8130" 
-            payload = format_run_notification(
+        if webhook_url and not passed:
+            dashboard_url = "http://127.0.0.1:8130"
+            payload = format_regression_detected_payload(
                 run_id=run_dir.name,
                 case_name=case_name,
-                status=output_payload["status"],
                 mismatch=result.mismatch_pct,
                 dashboard_url=dashboard_url
+                ,
+                severity=severity.get("label"),
+                browser=capture_cfg.browser,
+                device=capture_cfg.device,
+                locale=capture_cfg.locale,
+                ai_label=ai_assessment.get("label"),
             )
-            trigger_webhook(webhook_url, payload)
+            webhook_result = trigger_webhook_detailed(webhook_url, payload)
+            int_manager.log_activity(
+                message="Regression webhook sent" if webhook_result.get("ok") else "Regression webhook failed",
+                branch="integrations",
+                status="success" if webhook_result.get("ok") else "failed",
+            )
     except Exception as e:
         print(f"Integration hook failed: {e}")
 

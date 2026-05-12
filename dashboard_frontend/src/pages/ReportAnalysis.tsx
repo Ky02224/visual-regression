@@ -15,10 +15,11 @@ import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
 import { useRole } from '../context/RoleContext';
 import { ComparisonSlider } from '../components/ComparisonSlider';
+import { clearApiCacheEntry } from '../hooks/useApiData';
 
 export function ReportAnalysis() {
   const { id } = useParams();
-  const { can, accessKey, role } = useRole();
+  const { can, role } = useRole();
   const [data, setData] = React.useState<any>(null);
   const [loading, setLoading] = React.useState(true);
   const [isExecuting, setIsExecuting] = React.useState(false);
@@ -49,8 +50,8 @@ export function ReportAnalysis() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Access-Key': accessKey || ''
         },
+        credentials: 'include',
         body: JSON.stringify({ 
           run: id, 
           decision: 'approved',
@@ -59,6 +60,7 @@ export function ReportAnalysis() {
       });
       const result = await res.json();
       if (result.ok) {
+        clearApiCacheEntry('/api/dashboard');
         fetchData();
       } else {
         alert(result.error || 'Failed to approve change');
@@ -255,7 +257,6 @@ export function ReportAnalysis() {
             <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
               {regions.length > 0 ? regions.map((r: any, idx: number) => (
                 <RegionItem 
-                  key={idx}
                   id={r.label || `region_${idx}`} 
                   type="Mismatch" 
                   description={`Visual variance detected at coordinates [${r.x}, ${r.y}] with dimensions ${r.width}x${r.height}.`} 
@@ -274,7 +275,6 @@ export function ReportAnalysis() {
               <div className="space-y-4">
                 {history.length > 0 ? history.map((h: any, idx: number) => (
                   <HistoryStep 
-                    key={idx}
                     title={h.status === 'approved' ? 'Approved' : 'Rejected'} 
                     meta={`by ${h.decider || 'Unknown'} • ${new Date(h.timestamp).toLocaleString()}`} 
                     color={h.status === 'approved' ? 'bg-green-500' : 'bg-red-500'} 

@@ -21,7 +21,7 @@ import { Baseline } from '../types';
 import { useRole } from '../context/RoleContext';
 
 export function Baselines() {
-  const { role, accessKey } = useRole();
+  const { role } = useRole();
   const [baselines, setBaselines] = React.useState<Baseline[]>([]);
   const [selectedBaseline, setSelectedBaseline] = React.useState<Baseline | null>(null);
   const [viewMode, setViewMode] = React.useState<'grid' | 'list'>('grid');
@@ -31,6 +31,18 @@ export function Baselines() {
   const [isExecuting, setIsExecuting] = React.useState(false);
   const [baselineDetails, setBaselineDetails] = React.useState<any>(null);
 
+  const [newBaseline, setNewBaseline] = React.useState({
+    name: '',
+    url: '',
+    browser: 'chromium' as 'chromium' | 'firefox' | 'webkit',
+    device: 'desktop' as 'desktop' | 'iPhone 13' | 'Pixel 5' | 'iPad (gen 7)',
+    viewport: '1440x900',
+    locale: '',
+    timezone_id: '',
+    color_scheme: 'light' as 'light' | 'dark' | 'no-preference',
+    wait_ms: 1200,
+  });
+
   const fetchBaselines = () => {
     setLoading(true);
     fetch('/api/dashboard')
@@ -39,12 +51,12 @@ export function Baselines() {
         const mapped = (data.baselines || []).map((b: any) => ({
           id: b.name,
           label: b.name,
-          url: b.name,
+          url: b.url || b.name,
           browser: b.browser || 'Unknown',
           device: b.device || 'Desktop',
           locale: b.locale || 'Unknown',
           updatedAt: b.updated_at || b.created_at || 'Unknown',
-          version: b.current_version || 'v1.0.0',
+          version: '',
           imageUrl: b.current_image_href || `/baseline/${b.name}/baseline.png`
         }));
         setBaselines(mapped);
@@ -78,8 +90,8 @@ export function Baselines() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Access-Key': accessKey || ''
         },
+        credentials: 'include',
         body: JSON.stringify({ name })
       });
       const data = await res.json();
@@ -103,8 +115,8 @@ export function Baselines() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Access-Key': accessKey || ''
         },
+        credentials: 'include',
         body: JSON.stringify({ name, version, restored_by: role === 'admin' ? 'Lead Scientist' : 'Technician' })
       });
       const data = await res.json();
@@ -120,10 +132,74 @@ export function Baselines() {
     }
   };
 
-  const filteredBaselines = baselines.filter(baseline => 
-    baseline.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    baseline.url.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const openCreateModal = () => {
+    setNewBaseline({
+      name: '',
+      url: '',
+      browser: 'chromium',
+      device: 'desktop',
+      viewport: '1440x900',
+      locale: '',
+      timezone_id: '',
+      color_scheme: 'light',
+      wait_ms: 1200,
+    });
+    setIsModalOpen(true);
+  };
+
+  const submitCreateBaseline = async () => {
+    if (!newBaseline.name.trim()) {
+      alert('Baseline name is required.');
+      return;
+    }
+    if (!newBaseline.url.trim()) {
+      alert('Target URL is required.');
+      return;
+    }
+
+    setIsExecuting(true);
+    try {
+      const payload: any = {
+        name: newBaseline.name.trim(),
+        url: newBaseline.url.trim(),
+        browser: newBaseline.browser,
+        viewport: newBaseline.viewport,
+        wait_ms: newBaseline.wait_ms,
+        color_scheme: newBaseline.color_scheme,
+        updated_by: role === 'admin' ? 'Lead Scientist' : 'Technician',
+      };
+      if (newBaseline.device !== 'desktop') payload.device = newBaseline.device;
+      if (newBaseline.locale.trim()) payload.locale = newBaseline.locale.trim();
+      if (newBaseline.timezone_id.trim()) payload.timezone_id = newBaseline.timezone_id.trim();
+
+      const res = await fetch('/api/actions/create-baseline', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.stderr || data.error || 'Failed to create baseline');
+      }
+      setIsModalOpen(false);
+      setSelectedBaseline(null);
+      fetchBaselines();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create baseline';
+      alert(message);
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  const filteredBaselines = baselines.filter(baseline => {
+    const q = searchQuery.toLowerCase();
+    return (baseline.label || '').toLowerCase().includes(q) ||
+           (baseline.url || '').toLowerCase().includes(q);
+  });
 
   const websiteBaselines = filteredBaselines.filter(b => ['1', '2'].includes(b.id));
   const marketingBaselines = filteredBaselines.filter(b => b.id === '3');
@@ -290,7 +366,7 @@ export function Baselines() {
 
                       <div className="grid grid-cols-1 gap-3 pt-4">
                         <button 
-                          onClick={() => handleRestore(selectedBaseline.label, selectedBaseline.version)}
+                          onClick={() => alert('To restore, select an archived version from the Integrity Timeline.')}
                           disabled={role === 'viewer' || isExecuting}
                           className="flex items-center justify-center gap-2 py-4 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-50 dark:hover:bg-slate-800 transition-all disabled:opacity-30 disabled:cursor-not-allowed">
                           <RotateCcw className="w-3.5 h-3.5" /> Restore
@@ -322,7 +398,7 @@ export function Baselines() {
       {/* FAB */}
       {role !== 'viewer' && (
         <button 
-          onClick={() => setIsModalOpen(true)}
+          onClick={openCreateModal}
           className="fixed bottom-8 right-8 w-14 h-14 rounded-full signature-gradient text-white shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-30"
         >
           <Plus className="w-6 h-6" />
@@ -351,24 +427,90 @@ export function Baselines() {
             </div>
             <div className="p-8 space-y-6">
               <div className="space-y-2">
+                <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Baseline Name</label>
+                <input
+                  value={newBaseline.name}
+                  onChange={(e) => setNewBaseline(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                  placeholder="e.g. landing-home-chromium-desktop"
+                />
+              </div>
+              <div className="space-y-2">
                 <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Target URL</label>
-                <input className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100" placeholder="https://app.example.com/dashboard" />
+                <input
+                  value={newBaseline.url}
+                  onChange={(e) => setNewBaseline(prev => ({ ...prev, url: e.target.value }))}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                  placeholder="https://app.example.com/dashboard"
+                />
               </div>
               <div className="grid grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Browser</label>
-                  <select className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100">
-                    <option className="dark:bg-slate-900">Chrome</option>
-                    <option className="dark:bg-slate-900">Firefox</option>
-                    <option className="dark:bg-slate-900">Safari</option>
+                  <select
+                    value={newBaseline.browser}
+                    onChange={(e) => setNewBaseline(prev => ({ ...prev, browser: e.target.value as any }))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                  >
+                    <option value="chromium" className="dark:bg-slate-900">Chromium (Chrome)</option>
+                    <option value="firefox" className="dark:bg-slate-900">Firefox</option>
+                    <option value="webkit" className="dark:bg-slate-900">WebKit (Safari)</option>
                   </select>
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Device</label>
-                  <select className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100">
-                    <option className="dark:bg-slate-900">Desktop</option>
-                    <option className="dark:bg-slate-900">Mobile</option>
-                    <option className="dark:bg-slate-900">Tablet</option>
+                  <select
+                    value={newBaseline.device}
+                    onChange={(e) => setNewBaseline(prev => ({ ...prev, device: e.target.value as any }))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                  >
+                    <option value="desktop" className="dark:bg-slate-900">Desktop</option>
+                    <option value="iPhone 13" className="dark:bg-slate-900">iPhone 13</option>
+                    <option value="Pixel 5" className="dark:bg-slate-900">Pixel 5</option>
+                    <option value="iPad (gen 7)" className="dark:bg-slate-900">iPad (gen 7)</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Viewport</label>
+                  <input
+                    value={newBaseline.viewport}
+                    onChange={(e) => setNewBaseline(prev => ({ ...prev, viewport: e.target.value }))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                    placeholder="1440x900"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Locale (optional)</label>
+                  <input
+                    value={newBaseline.locale}
+                    onChange={(e) => setNewBaseline(prev => ({ ...prev, locale: e.target.value }))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                    placeholder="en-US"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Timezone (optional)</label>
+                  <input
+                    value={newBaseline.timezone_id}
+                    onChange={(e) => setNewBaseline(prev => ({ ...prev, timezone_id: e.target.value }))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                    placeholder="Asia/Kuala_Lumpur"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Color scheme</label>
+                  <select
+                    value={newBaseline.color_scheme}
+                    onChange={(e) => setNewBaseline(prev => ({ ...prev, color_scheme: e.target.value as any }))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-primary/10 dark:text-slate-100"
+                  >
+                    <option value="light" className="dark:bg-slate-900">Light</option>
+                    <option value="dark" className="dark:bg-slate-900">Dark</option>
+                    <option value="no-preference" className="dark:bg-slate-900">No preference</option>
                   </select>
                 </div>
               </div>
@@ -380,7 +522,13 @@ export function Baselines() {
             </div>
             <div className="p-8 bg-slate-50 dark:bg-slate-950 flex justify-end gap-4">
               <button onClick={() => setIsModalOpen(false)} className="px-6 py-2.5 text-sm font-bold text-on-surface-variant hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-all">Cancel</button>
-              <button className="px-8 py-2.5 signature-gradient text-white rounded-lg font-bold text-sm shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all">Capture Baseline</button>
+              <button
+                onClick={submitCreateBaseline}
+                disabled={isExecuting}
+                className="px-8 py-2.5 signature-gradient text-white rounded-lg font-bold text-sm shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isExecuting ? 'Capturing...' : 'Capture Baseline'}
+              </button>
             </div>
           </motion.div>
         </div>

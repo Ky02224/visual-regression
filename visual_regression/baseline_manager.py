@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .config import WorkspacePaths
+from ._json_cache import JsonCache
+from ._file_lock import FileLock, atomic_replace
 
 
 def _utc_now() -> str:
@@ -80,38 +82,50 @@ class BaselineManager:
 
         target_image = self.baseline_image_path(name)
         metadata_file = self.metadata_path(name)
-        now = _utc_now()
+        lock_path = target_dir / ".lock"
+        
+        # Use file lock to prevent concurrent modifications to the baseline
+        with FileLock(lock_path, timeout=30.0):
+            now = _utc_now()
 
-        previous_meta: Dict[str, Any] = {}
-        if metadata_file.exists():
-            previous_meta = self.load_metadata(name)
-            self._archive_existing_baseline(name, previous_meta)
+            previous_meta: Dict[str, Any] = {}
+            if metadata_file.exists():
+                previous_meta = self.load_metadata(name)
+                self._archive_existing_baseline(name, previous_meta)
 
-        shutil.copy2(source_image_path, target_image)
+            # Use atomic replace instead of copy to prevent partial writes
+            # First copy to temp file, then atomically replace
+            import tempfile
+            with tempfile.NamedTemporaryFile(dir=target_dir, delete=False, suffix=".png") as tmp:
+                tmp_path = Path(tmp.name)
+            shutil.copy2(source_image_path, tmp_path)
+            atomic_replace(tmp_path, target_image)
 
-        history = previous_meta.get("history", [])
-        history.append(
-            {
-                "timestamp": now,
-                "actor": capture_meta.get("updated_by") or capture_meta.get("reviewer") or "system",
-                "source": capture_meta.get("source", "capture"),
-                "url": capture_meta.get("url"),
+            history = previous_meta.get("history", [])
+            history.append(
+                {
+                    "timestamp": now,
+                    "actor": capture_meta.get("updated_by") or capture_meta.get("reviewer") or "system",
+                    "source": capture_meta.get("source", "capture"),
+                    "url": capture_meta.get("url"),
+                }
+            )
+            metadata = {
+                "name": self.normalize_name(name),
+                "created_at": previous_meta.get("created_at", now),
+                "updated_at": now,
+                "capture": capture_meta,
+                "history": history[-25:],
             }
-        )
-        metadata = {
-            "name": self.normalize_name(name),
-            "created_at": previous_meta.get("created_at", now),
-            "updated_at": now,
-            "capture": capture_meta,
-            "history": history[-25:],
-        }
-        metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            # Invalidate JSON cache for this metadata file
+            JsonCache.clear(metadata_file)
 
     def load_metadata(self, name: str) -> Dict[str, Any]:
         path = self.metadata_path(name)
         if not path.exists():
             raise FileNotFoundError(f"metadata not found for baseline '{name}'")
-        return json.loads(path.read_text(encoding="utf-8"))
+        return JsonCache.read(path)
 
     def list_baselines(self) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -122,12 +136,12 @@ class BaselineManager:
             metadata_path = child / "metadata.json"
             if not image_path.exists() or not metadata_path.exists():
                 continue
-            data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            data = JsonCache.read(metadata_path)
             manifest_path = child / "versions" / "manifest.json"
             version_count = 0
             if manifest_path.exists():
                 try:
-                    version_count = len(json.loads(manifest_path.read_text(encoding="utf-8")))
+                    version_count = len(JsonCache.read(manifest_path))
                 except Exception:
                     version_count = 0
             items.append(
@@ -154,7 +168,7 @@ class BaselineManager:
         versions_manifest: List[Dict[str, Any]] = []
         manifest_path = self.latest_version_manifest_path(baseline_name)
         if manifest_path.exists():
-            versions_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            versions_manifest = JsonCache.read(manifest_path)
 
         versions = []
         for version in reversed(versions_manifest):

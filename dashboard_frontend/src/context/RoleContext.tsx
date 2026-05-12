@@ -4,55 +4,98 @@ export type Role = 'admin' | 'developer' | 'viewer';
 
 interface RoleContextType {
   role: Role;
+  userEmail: string | null;
+  authenticated: boolean;
+  loading: boolean;
+  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  refreshSession: () => Promise<void>;
   setRole: (role: Role, pin?: string) => Promise<boolean>;
   can: (action: 'approve' | 'capture' | 'manage_baselines') => boolean;
   accessKey: string | null;
+  updateAccessKey: (value: string | null) => void;
 }
 
 const RoleContext = createContext<RoleContextType | undefined>(undefined);
 
-// Use environment variables for security. Fallbacks are provided for local development.
-const ADMIN_PIN = import.meta.env.VITE_ADMIN_PIN || '1234';
-const DEVELOPER_PIN = import.meta.env.VITE_DEVELOPER_PIN || '0000';
-const ADMIN_KEY = import.meta.env.VITE_ADMIN_KEY || 'lead-scientist-secure-key-2024';
-const DEVELOPER_KEY = import.meta.env.VITE_DEVELOPER_KEY || 'technician-working-key-2024';
+type MeResponse = {
+  ok: boolean;
+  authenticated: boolean;
+  user: { email: string; role: Role } | null;
+};
 
 export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [role, setRoleState] = useState<Role>(() => {
-    return (localStorage.getItem('lab-identity-role') as Role) || 'viewer';
-  });
-  const [accessKey, setAccessKey] = useState<string | null>(() => {
-    return localStorage.getItem('lab-access-key');
-  });
+  const [role, setRoleState] = useState<Role>('viewer');
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [accessKey, setAccessKey] = useState<string | null>(null);
+
+  const updateAccessKey = (value: string | null) => {
+    setAccessKey(value);
+    if (value) {
+      localStorage.setItem('lab-access-key', value);
+    } else {
+      localStorage.removeItem('lab-access-key');
+    }
+  };
+
+  const refreshSession = async () => {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      const data = (await res.json()) as MeResponse;
+      if (data.ok && data.authenticated && data.user) {
+        setAuthenticated(true);
+        setRoleState(data.user.role);
+        setUserEmail(data.user.email);
+        setLoading(false);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    setAuthenticated(false);
+    setRoleState('viewer');
+    setUserEmail(null);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    refreshSession();
+  }, []);
+
+  const login = async (email: string, password: string) => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        return { ok: false, error: data.error || 'Login failed' };
+      }
+      await refreshSession();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Network failure' };
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } finally {
+      await refreshSession();
+    }
+  };
 
   const setRole = async (newRole: Role, pin?: string): Promise<boolean> => {
-    if (newRole === 'admin') {
-      if (pin === ADMIN_PIN) {
-        setRoleState('admin');
-        setAccessKey(ADMIN_KEY);
-        localStorage.setItem('lab-identity-role', 'admin');
-        localStorage.setItem('lab-access-key', ADMIN_KEY);
-        return true;
-      }
-      return false;
-    }
-
-    if (newRole === 'developer') {
-      if (pin === DEVELOPER_PIN) {
-        setRoleState('developer');
-        setAccessKey(DEVELOPER_KEY);
-        localStorage.setItem('lab-identity-role', 'developer');
-        localStorage.setItem('lab-access-key', DEVELOPER_KEY);
-        return true;
-      }
-      return false;
-    }
-
-    setRoleState('viewer');
-    setAccessKey(null);
-    localStorage.setItem('lab-identity-role', 'viewer');
-    localStorage.removeItem('lab-access-key');
-    return true;
+    // Legacy API: keep, but no longer used by the UI.
+    // Role is now derived from backend session.
+    await refreshSession();
+    return newRole === role;
   };
 
   const can = (action: 'approve' | 'capture' | 'manage_baselines'): boolean => {
@@ -64,7 +107,21 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <RoleContext.Provider value={{ role, setRole, can, accessKey }}>
+    <RoleContext.Provider
+      value={{
+        role,
+        userEmail,
+        authenticated,
+        loading,
+        login,
+        logout,
+        refreshSession,
+        setRole,
+        can,
+        accessKey,
+        updateAccessKey,
+      }}
+    >
       {children}
     </RoleContext.Provider>
   );

@@ -8,6 +8,7 @@ import shutil
 from .config import WorkspacePaths
 from .reporter import render_html_report_from_payload, write_json
 from .baseline_manager import BaselineManager
+from ._json_cache import JsonCache
 
 
 def _utc_now() -> str:
@@ -53,9 +54,7 @@ class ReviewManager:
         result_file = run_dir / "result.json"
         if not result_file.exists():
             raise FileNotFoundError(f"Missing result.json in {run_dir}")
-        import json
-
-        return json.loads(result_file.read_text(encoding="utf-8"))
+        return JsonCache.read(result_file)
 
     def save_decision(
         self,

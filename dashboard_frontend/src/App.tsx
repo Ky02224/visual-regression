@@ -8,32 +8,42 @@ import { Summaries } from './pages/Summaries';
 import { ReportAnalysis } from './pages/ReportAnalysis';
 import { Projects } from './pages/Projects';
 import { Integrations } from './pages/Integrations';
+import { SuiteResults } from './pages/SuiteResults';
 import { Login } from './pages/Login';
+import { UserManagement } from './pages/UserManagement';
 
 import { ThemeProvider } from './components/ThemeProvider';
-import { RoleProvider } from './context/RoleContext';
+import { RoleProvider, useRole } from './context/RoleContext';
+
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { authenticated, loading } = useRole();
+  if (loading) return null;
+  if (!authenticated) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
 
 export default function App() {
   return (
     <RoleProvider>
       <ThemeProvider defaultTheme="light" storageKey="vite-ui-theme">
         <BrowserRouter>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/actions" element={<Actions />} />
-            <Route path="/baselines" element={<Baselines />} />
-            <Route path="/summaries" element={<Summaries />} />
-            <Route path="/integrations" element={<Integrations />} />
-            <Route path="/report/:id" element={<ReportAnalysis />} />
-            <Route path="/projects" element={<Projects />} />
-          </Route>
-          <Route path="/login" element={<Login />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+          <Routes>
+            <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/actions" element={<Actions />} />
+              <Route path="/baselines" element={<Baselines />} />
+              <Route path="/summaries" element={<Summaries />} />
+              <Route path="/integrations" element={<Integrations />} />
+              <Route path="/report/:id" element={<ReportAnalysis />} />
+              <Route path="/projects" element={<Projects />} />
+              <Route path="/suite/:suiteName" element={<SuiteResults />} />
+              <Route path="/users" element={<UserManagement />} />
+            </Route>
+            <Route path="/login" element={<Login />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
         </BrowserRouter>
       </ThemeProvider>
     </RoleProvider>
   );
 }
-

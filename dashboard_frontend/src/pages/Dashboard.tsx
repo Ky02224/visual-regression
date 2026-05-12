@@ -14,12 +14,14 @@ import {
   Sparkles,
   Globe,
   Layers,
-  Search
+  Search,
+  RotateCcw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
-import { TestRun } from '../types';
+import { DashboardData, TestRun } from '../types';
 import { useRole } from '../context/RoleContext';
+import { useApiData } from '../hooks/useApiData';
 
 interface GroupedRuns {
   url: string;
@@ -27,57 +29,31 @@ interface GroupedRuns {
 }
 
 export function Dashboard() {
-  const { can, accessKey } = useRole();
-  const [dashboardData, setDashboardData] = React.useState<any>(null);
-  const [loading, setLoading] = React.useState(true);
+  const { can } = useRole();
+  const { data: dashboardData, loading, error, refetch } = useApiData<DashboardData>('/api/dashboard', {
+    ttl: 30000, // 30 second cache
+    onError: (err) => {
+      console.error('Failed to fetch dashboard data:', err);
+    }
+  });
+  
   const [groupedRuns, setGroupedRuns] = React.useState<GroupedRuns[]>([]);
   
   React.useEffect(() => {
-    fetch('/api/dashboard')
-      .then(res => res.json())
-      .then(data => {
-        setDashboardData(data);
+    if (!dashboardData) return;
+    
+    // Group runs by url
+    const groups: Record<string, TestRun[]> = {};
+    const runs = dashboardData.runs || [];
+    runs.forEach((r: TestRun) => {
+      const urlStr = (r as any).url || 'Unknown';
+      if (!groups[urlStr]) groups[urlStr] = [];
+      groups[urlStr].push(r);
+    });
         
-        // Group runs by url
-        const groups: Record<string, TestRun[]> = {};
-        const runs = data.runs || [];
-        runs.forEach((r: any) => {
-          const urlStr = r.url || 'Unknown';
-          if (!groups[urlStr]) groups[urlStr] = [];
-          
-          let status: TestRun['status'] = 'passed';
-          if (r.status === 'FAIL') status = 'failed';
-          if (r.decision_status === 'pending') status = 'attention';
-          
-          // Map backend severity to frontend matching type
-          let mappedSeverity: TestRun['severity'] = undefined;
-          if (r.severity && typeof r.severity === 'object' && r.severity.level) {
-              const level = String(r.severity.level).toLowerCase();
-              if (['critical', 'high', 'medium', 'low'].includes(level)) {
-                  mappedSeverity = level as 'critical' | 'high' | 'medium' | 'low';
-              }
-          }
-
-          groups[urlStr].push({
-            id: r.run,
-            name: r.case_name || r.baseline_name || r.run,
-            status,
-            mismatch: r.mismatch_pct || 0,
-            lastRun: r.decided_at || r.run,
-            browser: r.browser || 'Unknown',
-            device: r.device || 'Unknown',
-            locale: r.locale || 'Unknown',
-            aiInsight: r.ai_explanation,
-            aiLabel: r.ai_label,
-            severity: mappedSeverity
-          });
-        });
-        
-        const arr = Object.keys(groups).map(url => ({ url, runs: groups[url] }));
-        setGroupedRuns(arr);
-        setLoading(false);
-      });
-  }, []);
+    const arr = Object.keys(groups).map(url => ({ url, runs: groups[url] }));
+    setGroupedRuns(arr);
+  }, [dashboardData]);
 
   const [selectedRun, setSelectedRun] = React.useState<TestRun | null>(null);
   const [expandedUrls, setExpandedUrls] = React.useState<string[]>([]);
@@ -103,9 +79,10 @@ export function Dashboard() {
     return groupedRuns.map(group => ({
       ...group,
       runs: group.runs.filter(run => {
-        const matchesSearch = run.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                             group.url.toLowerCase().includes(searchQuery.toLowerCase());
-        const matchesStatus = statusFilter === 'All' || 
+        const q = searchQuery.toLowerCase();
+        const matchesSearch = (run.name || '').toLowerCase().includes(q) ||
+                             (group.url || '').toLowerCase().includes(q);
+        const matchesStatus = statusFilter === 'All' ||
                              (statusFilter === 'Failed' && run.status === 'failed') ||
                              (statusFilter === 'Approved' && run.status === 'passed') ||
                              (statusFilter === 'Attention' && run.status === 'attention');
@@ -134,9 +111,10 @@ export function Dashboard() {
       .map(group => ({
         ...group,
         runs: group.runs.filter(run => {
-          const matchesSearch = searchQuery === '' || 
-                               run.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                               group.url.toLowerCase().includes(searchQuery.toLowerCase());
+          const q = searchQuery.toLowerCase();
+          const matchesSearch = searchQuery === '' ||
+                               (run.name || '').toLowerCase().includes(q) ||
+                               (group.url || '').toLowerCase().includes(q);
           const matchesWebsite = websiteFilter === 'All' || group.url === websiteFilter;
           const matchesDevice = deviceFilter === 'All' || run.device === deviceFilter;
           const matchesLocale = localeFilter === 'All' || run.locale === localeFilter;
@@ -166,7 +144,35 @@ export function Dashboard() {
     );
   }
 
-  const m = dashboardData?.metrics || {};
+  if (error) {
+    return (
+      <div className="p-8 max-w-7xl mx-auto">
+        <div className="bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-2xl p-6">
+          <div className="flex items-start gap-4">
+            <AlertTriangle className="w-6 h-6 text-red-600 dark:text-red-400 flex-shrink-0 mt-1" />
+            <div className="flex-1">
+              <h3 className="text-lg font-bold text-red-900 dark:text-red-200 mb-2">Failed to Load Dashboard</h3>
+              <p className="text-red-700 dark:text-red-300 mb-4">{error.message}</p>
+              <button
+                onClick={() => refetch()}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const m = {
+    baseline_count: dashboardData?.baseline_count || 0,
+    run_count: dashboardData?.run_count || 0,
+    pending_decisions: dashboardData?.pending_decisions || 0,
+    approved_decisions: dashboardData?.approved_decisions || 0,
+    ...dashboardData?.summary,
+  };
 
   return (
     <div className="p-8 max-w-7xl mx-auto corporate-grid min-h-screen transition-colors duration-300">
@@ -292,7 +298,7 @@ export function Dashboard() {
                           >
                             <div className="flex items-center gap-4">
                               <div className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-700 shadow-sm group-hover:scale-110 transition-transform">
-                                {run.device.includes('iPhone') ? <Smartphone className="w-4 h-4 text-slate-400" /> : <Monitor className="w-4 h-4 text-slate-400" />}
+                                {(run.device || '').includes('iPhone') ? <Smartphone className="w-4 h-4 text-slate-400" /> : <Monitor className="w-4 h-4 text-slate-400" />}
                               </div>
                               <div>
                                 <div className="flex items-center gap-2">
@@ -363,7 +369,7 @@ export function Dashboard() {
               <div className="mb-8">
                 <div className="flex items-center gap-3 mb-3">
                   <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded text-[10px] font-bold uppercase tracking-widest font-mono">
-                    Node ID: {selectedRun.id.padStart(4, '0')}
+                    Node ID: {String(selectedRun.id ?? '').padStart(4, '0')}
                   </span>
                   {selectedRun.severity === 'high' && (
                     <span className="px-2 py-1 bg-red-50 text-red-600 rounded text-[10px] font-bold uppercase tracking-widest">
@@ -388,7 +394,7 @@ export function Dashboard() {
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
                 <div className="lg:col-span-2">
                   <ScreenshotSlider 
-                    baselineSrc={`/baseline/${selectedRun.name}/baseline.png`} 
+                    baselineSrc={`/baseline/${(selectedRun as any).baseline_name || selectedRun.name}/baseline.png`} 
                     actualSrc={`/artifacts/${selectedRun.id}/current.png`} 
                     compact={/iphone|pixel|android|mobile/i.test((selectedRun.device || '').toLowerCase())}
                   />
@@ -414,26 +420,6 @@ export function Dashboard() {
               </div>
 
               <div className="flex gap-3 justify-end">
-                {can('approve') && (
-                  <button 
-                    onClick={() => {
-                      fetch('/api/actions/review', {
-                        method: 'POST',
-                        headers: {
-                          'Content-Type':'application/json',
-                          'X-Access-Key': accessKey || ''
-                        },
-                        body: JSON.stringify({ 
-                          run: selectedRun.id, 
-                          decision: 'approved',
-                          reviewer: 'Admin'
-                        })
-                      }).then(() => window.location.reload());
-                    }}
-                    className="px-8 py-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-bold text-sm rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 transition-all">
-                    Approve
-                  </button>
-                )}
                 <Link 
                   to={`/report/${selectedRun.id}`}
                   className="px-8 py-3 bg-primary text-white rounded-xl shadow-lg shadow-primary/20 hover:bg-slate-800 transition-all font-bold text-sm text-center"
