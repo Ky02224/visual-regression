@@ -102,7 +102,7 @@ export function ComparisonImageView({ src, alt, zoom = 1, className, onError }: 
           ref={imgRef}
           src={src}
           alt={alt}
-          className="w-full h-full object-contain opacity-0"
+          className="w-full h-full object-contain"
           referrerPolicy="no-referrer"
           onLoad={(e) => measure(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
           onError={onError}
