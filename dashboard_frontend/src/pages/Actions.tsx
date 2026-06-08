@@ -83,7 +83,7 @@ export function Actions() {
               key={tab.id}
               onClick={() => setActiveTab(tab.id as ActionTab)}
               className={cn(
-                "flex items-center gap-2.5 px-6 py-3 rounded-xl text-xs font-semibold transition-all duration-300",
+                "flex items-center gap-2.5 px-6 py-3 rounded-xl text-sm font-semibold transition-all duration-300",
                 activeTab === tab.id 
                   ? "bg-primary text-white shadow-lg shadow-primary/20" 
                   : "text-[var(--on-surface-variant)] hover:text-primary hover:bg-slate-50 dark:hover:bg-slate-800"
