@@ -11,6 +11,7 @@ function fitSize(m: Metrics, zoom: number) {
 
 export function ComparisonImageView({ src, alt, zoom = 1, className, onError }: { src: string; alt: string; zoom?: number; className?: string; onError?: () => void }) {
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const imgRef = React.useRef<HTMLImageElement>(null);
   const [metrics, setMetrics] = React.useState<Metrics | null>(null);
   const naturalSizeRef = React.useRef<{ iw: number; ih: number } | null>(null);
 
@@ -37,6 +38,14 @@ export function ComparisonImageView({ src, alt, zoom = 1, className, onError }: 
     setMetrics(null);
     naturalSizeRef.current = null;
   }, [src]);
+
+  // Check if image is already cached/complete and trigger measure
+  React.useEffect(() => {
+    const img = imgRef.current;
+    if (img && img.complete && img.naturalWidth) {
+      measure(img.naturalWidth, img.naturalHeight);
+    }
+  }, [src, measure]);
 
   React.useEffect(() => {
     const el = containerRef.current;
@@ -90,6 +99,7 @@ export function ComparisonImageView({ src, alt, zoom = 1, className, onError }: 
         </div>
       ) : (
         <img
+          ref={imgRef}
           src={src}
           alt={alt}
           className="w-full h-full object-contain opacity-0"
