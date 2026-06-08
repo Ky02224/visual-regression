@@ -12,8 +12,10 @@ function fitSize(m: Metrics, zoom: number) {
 export function ComparisonImageView({ src, alt, zoom = 1, className, onError }: { src: string; alt: string; zoom?: number; className?: string; onError?: () => void }) {
   const containerRef = React.useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = React.useState<Metrics | null>(null);
+  const naturalSizeRef = React.useRef<{ iw: number; ih: number } | null>(null);
 
   const measure = React.useCallback((iw: number, ih: number) => {
+    naturalSizeRef.current = { iw, ih };
     const el = containerRef.current;
     if (!el || !iw || !ih) return;
     const cw = el.clientWidth;
@@ -31,19 +33,22 @@ export function ComparisonImageView({ src, alt, zoom = 1, className, onError }: 
     setMetrics({ cw, ch, iw, ih });
   }, []);
 
-  React.useEffect(() => { setMetrics(null); }, [src]);
+  React.useEffect(() => {
+    setMetrics(null);
+    naturalSizeRef.current = null;
+  }, [src]);
 
   React.useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
-      setMetrics(prev => {
-        if (!prev) return prev;
-        const cw = el.clientWidth;
-        const ch = el.clientHeight;
-        if (cw < 2 || ch < 2) return prev;
-        return { ...prev, cw, ch };
-      });
+      const iw = naturalSizeRef.current?.iw;
+      const ih = naturalSizeRef.current?.ih;
+      if (!iw || !ih) return;
+      const cw = el.clientWidth;
+      const ch = el.clientHeight;
+      if (cw < 2 || ch < 2) return;
+      setMetrics({ cw, ch, iw, ih });
     });
     ro.observe(el);
     return () => ro.disconnect();
