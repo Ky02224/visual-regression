@@ -134,13 +134,6 @@ export function Integrations() {
 
         <NoticeBanner notice={pageNotice} />
 
-        <div className="rounded-md border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-          <h3 className="text-sm font-semibold text-[var(--on-surface)]">Ignore regions (dynamic UI)</h3>
-          <p className="mt-2 text-sm text-[var(--on-surface-variant)] leading-relaxed">
-            For ads, clocks, or other moving pixels, add <code className="rounded bg-slate-100 px-1 text-xs dark:bg-slate-800">ignore_regions: [[x, y, width, height], …]</code> to each case in your suite YAML.
-            Those rectangles are masked before compare (same workflow as Percy ignore regions). Re-run the suite after editing — no approve/reject needed.
-          </p>
-        </div>
 
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
           <GitHubConnectionModule />
