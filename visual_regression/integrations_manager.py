@@ -163,3 +163,68 @@ class IntegrationsManager:
         config["activity"].insert(0, entry)
         config["activity"] = config["activity"][:50] # Keep last 50
         self._save(config)
+
+    def post_github_commit_status(self, repo_url: str, sha: str, state: str, target_url: str, description: str) -> Dict[str, Any]:
+        github = self.get_config().get("github", {})
+        if not github.get("connected") or not github.get("access_token"):
+            return {"ok": False, "error": "GitHub not connected"}
+        
+        import re
+        import urllib.request
+        import urllib.error
+        
+        match = re.search(r"github\.com[:/]([^/]+/[^/.]+)(?:\.git)?", repo_url)
+        if not match:
+            return {"ok": False, "error": f"Invalid GitHub repo URL: {repo_url}"}
+        
+        repo_path = match.group(1)
+        api_url = f"https://api.github.com/repos/{repo_path}/statuses/{sha}"
+        
+        headers = {
+            "Authorization": f"token {github['access_token']}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Visual-Regression-Platform",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "state": state,
+            "target_url": target_url,
+            "description": description[:140],
+            "context": "Visual Regression Workbench"
+        }
+        
+        try:
+            req = urllib.request.Request(
+                api_url, 
+                data=json.dumps(payload).encode("utf-8"), 
+                headers=headers, 
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                self.log_activity(
+                    message=f"GitHub status updated for {sha[:7]}: {state}",
+                    branch="integrations",
+                    status="success"
+                )
+                return {"ok": True, "data": data}
+        except urllib.error.HTTPError as e:
+            try:
+                err_msg = e.read().decode("utf-8")
+            except Exception:
+                err_msg = "Unknown error"
+            self.log_activity(
+                message=f"GitHub status update failed for {sha[:7]}: {e.code}",
+                branch="integrations",
+                status="failed"
+            )
+            return {"ok": False, "error": f"HTTP {e.code}: {err_msg}"}
+        except Exception as e:
+            self.log_activity(
+                message=f"GitHub status update error: {str(e)}",
+                branch="integrations",
+                status="failed"
+            )
+            return {"ok": False, "error": str(e)}
+

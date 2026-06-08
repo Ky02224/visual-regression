@@ -24,6 +24,14 @@ export default defineConfig(({mode}) => {
           target: 'http://127.0.0.1:8130',
           changeOrigin: true,
         },
+        '/artifacts': {
+          target: 'http://127.0.0.1:8130',
+          changeOrigin: true,
+        },
+        '/baseline': {
+          target: 'http://127.0.0.1:8130',
+          changeOrigin: true,
+        },
       },
     },
   };

@@ -65,6 +65,7 @@ def compare_arrays(
     pixel_threshold: int,
     min_region_area: int,
     ignore_regions: Sequence[IgnoreRegion],
+    skip_ssim: bool = False,
 ) -> tuple[CompareResult, np.ndarray, np.ndarray]:
     base_canvas, current_canvas = _normalize_canvas(baseline, current)
     _apply_ignore_regions(base_canvas, ignore_regions)
@@ -72,6 +73,8 @@ def compare_arrays(
 
     base_gray = cv2.cvtColor(base_canvas, cv2.COLOR_BGR2GRAY)
     current_gray = cv2.cvtColor(current_canvas, cv2.COLOR_BGR2GRAY)
+    base_gray = cv2.GaussianBlur(base_gray, (3, 3), 0)
+    current_gray = cv2.GaussianBlur(current_gray, (3, 3), 0)
 
     delta = cv2.absdiff(base_gray, current_gray)
     _, binary = cv2.threshold(delta, pixel_threshold, 255, cv2.THRESH_BINARY)
@@ -80,7 +83,7 @@ def compare_arrays(
     binary = cv2.dilate(binary, kernel, iterations=1)
 
     ssim_score = None
-    if structural_similarity is not None:
+    if structural_similarity is not None and not skip_ssim:
         score, ssim_map = structural_similarity(base_gray, current_gray, full=True)
         ssim_score = float(score)
         ssim_delta = (1.0 - ssim_map) * 255.0
@@ -114,23 +117,12 @@ def compare_arrays(
     total_pixels = int(binary.size)
     mismatch_pct = round((diff_pixels / total_pixels) * 100.0, 4)
 
-    overlay = current_canvas.copy()
-    heat = cv2.applyColorMap(delta, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(overlay, 0.72, heat, 0.28, 0)
-    for idx, region in enumerate(regions, start=1):
-        p1 = (region.x, region.y)
-        p2 = (region.x + region.width, region.y + region.height)
-        cv2.rectangle(overlay, p1, p2, (0, 0, 255), thickness=2)
-        cv2.putText(
-            overlay,
-            str(idx),
-            (region.x, max(18, region.y - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 255),
-            2,
-            lineType=cv2.LINE_AA,
-        )
+    # Percy-style: tint changed pixels red/magenta on current screenshot (no bounding boxes).
+    overlay = current_canvas.copy().astype(np.float32)
+    mask = binary > 0
+    highlight_bgr = np.array([80, 80, 255], dtype=np.float32)
+    overlay[mask] = overlay[mask] * 0.35 + highlight_bgr * 0.65
+    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
 
     result = CompareResult(
         baseline_size=[int(base_canvas.shape[1]), int(base_canvas.shape[0])],

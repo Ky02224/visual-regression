@@ -74,9 +74,9 @@ def summarize_severity(
         elif ai_score >= 0.6:
             score += 1
 
-    if ai_label in {"missing-element", "layout-shift", "text-truncation"}:
+    if ai_label in {"missing-element", "layout-shift", "text-truncation", "broken-image", "misaligned-fields"}:
         score += 2
-    elif ai_label in {"color-regression", "overlay-obstruction"}:
+    elif ai_label in {"color-regression", "overlay-obstruction", "unreadable-text"}:
         score += 1
 
     if score >= 5:
@@ -95,13 +95,18 @@ def build_ai_explanation(result, ai_assessment: Dict[str, Any]) -> str:
     region_count = len(result.regions)
     largest_area = max((region.area for region in result.regions), default=0)
 
-    label_sentence = {
+    if not ai_label:
+        label_sentence = "The model did not assign a specific defect type."
+    else:
+        label_sentence = {
         "missing-element": "The model believes an expected UI element is missing.",
         "layout-shift": "The model sees a structural layout movement rather than a small cosmetic change.",
         "color-regression": "The model detected a noticeable color shift compared with the baseline.",
         "text-truncation": "The model detected text that looks clipped or shortened.",
         "overlay-obstruction": "The model detected a dark overlay or obstruction over the original content.",
-        "insignificant-change": "The model sees this as a small visual change.",
+        "broken-image": "The model detected one or more images that failed to load and appear as broken placeholders.",
+        "misaligned-fields": "The model detected form fields or UI elements that are visually misaligned from their expected positions.",
+        "unreadable-text": "The model detected text that is unreadable due to low contrast or being obscured by overlapping content.",
     }.get(ai_label, "The model returned a visual change assessment.")
 
     evidence: list[str] = []
@@ -117,7 +122,7 @@ def build_ai_explanation(result, ai_assessment: Dict[str, Any]) -> str:
         evidence.append(f"The largest changed area covers {largest_area} pixels.")
     if score is not None:
         evidence.append(f"AI confidence score is {float(score):.3f}.")
-    if score is not None and threshold is not None and float(score) < float(threshold) and ai_label not in {None, "insignificant-change"}:
+    if score is not None and threshold is not None and float(score) < float(threshold) and ai_label:
         evidence.append("Rule fusion promoted this label because the visual pattern still looked significant.")
 
     sentence = " ".join([label_sentence, *evidence]).strip()
@@ -168,11 +173,13 @@ def _capture_and_save_baseline(
     name: str,
     capture_cfg: CaptureConfig,
     capture_meta: Dict[str, Any],
+    playwright_instance: Any = None,
+    browser_instance: Any = None,
 ) -> None:
     from .browser import capture_website
 
     temp_path = paths.root / "tmp" / f"{manager.normalize_name(name)}-{now_stamp()}.png"
-    capture_website(capture_cfg, temp_path)
+    capture_website(capture_cfg, temp_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
     manager.save_from_image(name=name, source_image_path=temp_path, capture_meta=capture_meta)
     temp_path.unlink(missing_ok=True)
 
@@ -221,20 +228,45 @@ def _run_compare(
     ignore_regions: Sequence[tuple[int, int, int, int]],
     ai_model_path: Path | None,
     suite_name: str | None = None,
+    comparison_mode: str = "ai",
+    playwright_instance: Any = None,
+    browser_instance: Any = None,
+    build_id: str | None = None,
 ) -> tuple[bool, Path, Dict[str, Any]]:
     from .ai_training import assess_result
     from .browser import capture_website
+    from .decision import decide_pass_fail
     from .image_compare import compare_images
     from .reporter import generate_html_report, save_image, write_json
 
     if not manager.exists(case_name):
         raise FileNotFoundError(f"Baseline '{case_name}' not found. Create one first.")
 
+    active_ignore_regions = list(ignore_regions)
+    active_css_selectors = []
+    if manager.exists(case_name):
+        try:
+            meta = manager.load_metadata(case_name)
+            active_css_selectors = list(meta.get("ignore_css_selectors", []))
+            if not active_ignore_regions:
+                saved_regions = meta.get("ignore_regions", [])
+                for r in saved_regions:
+                    if isinstance(r, dict):
+                        active_ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
+                    elif isinstance(r, (list, tuple)) and len(r) == 4:
+                        active_ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
+        except Exception:
+            pass
+
+    if active_css_selectors:
+        orig = list(capture_cfg.hide_selectors or [])
+        capture_cfg.hide_selectors = list(set(orig + active_css_selectors))
+
     run_dir = paths.runs_dir / _run_name_for_capture(case_name, capture_cfg)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     current_path = run_dir / "current.png"
-    capture_website(capture_cfg, current_path)
+    capture_website(capture_cfg, current_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
 
     baseline_image_path = manager.baseline_image_path(case_name)
     result, diff_overlay, binary_diff = compare_images(
@@ -242,7 +274,7 @@ def _run_compare(
         current_path=current_path,
         pixel_threshold=pixel_threshold,
         min_region_area=min_region_area,
-        ignore_regions=ignore_regions,
+        ignore_regions=active_ignore_regions,
     )
 
     baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
@@ -254,16 +286,24 @@ def _run_compare(
     save_image(diff_overlay_path, diff_overlay)
     save_image(binary_diff_path, binary_diff)
 
-    passed = result.mismatch_pct <= threshold_pct
-    decision = _initial_decision_status(passed)
-    ai_assessment = {}
-    if ai_model_path and ai_model_path.exists():
+    ai_assessment: Dict[str, Any] = {}
+    ai_model_available = bool(ai_model_path and ai_model_path.exists())
+    if ai_model_available:
         ai_assessment = assess_result(
             result=result,
             model_path=ai_model_path,
             baseline_image_path=baseline_image_path,
             current_image_path=current_path,
         ).to_dict()
+
+    passed, comparison_decision = decide_pass_fail(
+        comparison_mode=comparison_mode,
+        mismatch_pct=result.mismatch_pct,
+        threshold_pct=threshold_pct,
+        ai_assessment=ai_assessment,
+        ai_model_available=ai_model_available,
+    )
+    decision = _initial_decision_status(passed)
     severity = summarize_severity(
         result.mismatch_pct,
         len(result.regions),
@@ -276,9 +316,11 @@ def _run_compare(
         "case_name": case_name,
         "baseline_name": case_name,
         "suite_name": suite_name,
+        "build_id": build_id,
         "status": "PASS" if passed else "FAIL",
         "threshold_pct": threshold_pct,
-        "ignore_regions": [list(item) for item in ignore_regions],
+        "comparison_decision": comparison_decision,
+        "ignore_regions": [list(item) for item in active_ignore_regions],
         "capture": build_capture_metadata(capture_cfg),
         "result": result.to_dict(),
         "decision": decision,
@@ -315,12 +357,13 @@ def _run_compare(
     )
 
     print(f"[{'PASS' if passed else 'FAIL'}] {case_name}")
-    print(f"Mismatch: {result.mismatch_pct:.4f}% (threshold {threshold_pct:.4f}%)")
+    print(f"Decision: {comparison_decision.get('decision_source')} ({comparison_decision.get('comparison_mode')})")
+    print(f"Mismatch: {result.mismatch_pct:.4f}% (pixel threshold {threshold_pct:.4f}%, pixel_pass={comparison_decision.get('pixel_would_pass')})")
     print(f"Diff regions: {len(result.regions)}")
     if ai_assessment:
         print(
-            f"AI assessment: {ai_assessment['label']} "
-            f"(score={ai_assessment['score']}, threshold={ai_assessment['threshold']})"
+            f"AI assessment: {ai_assessment.get('label') or 'no meaningful change'} "
+            f"(score={ai_assessment.get('score')}, meaningful={ai_assessment.get('meaningful_change')})"
         )
     print(f"Severity: {severity['label']} (score={severity['score']})")
     print(f"Report: {report_path}")
@@ -335,6 +378,10 @@ def _run_compare(
     details: Dict[str, Any] = {
         "mismatch_pct": result.mismatch_pct,
         "threshold_pct": threshold_pct,
+        "comparison_mode": comparison_decision.get("comparison_mode"),
+        "decision_source": comparison_decision.get("decision_source"),
+        "pixel_would_pass": comparison_decision.get("pixel_would_pass"),
+        "meaningful_change": comparison_decision.get("meaningful_change"),
         "diff_regions": len(result.regions),
         "report": str(report_path),
         "decision_status": decision["status"],
@@ -377,6 +424,36 @@ def _run_compare(
                 branch="integrations",
                 status="success" if webhook_result.get("ok") else "failed",
             )
+            
+        # Trigger GitHub commit status if connected
+        github_config = config.get("github", {})
+        if github_config.get("connected"):
+            import subprocess
+            git_url_proc = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(paths.root),
+                capture_output=True,
+                text=True,
+            )
+            git_sha_proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(paths.root),
+                capture_output=True,
+                text=True,
+            )
+            if git_url_proc.returncode == 0 and git_sha_proc.returncode == 0:
+                repo_url = git_url_proc.stdout.strip()
+                sha = git_sha_proc.stdout.strip()
+                state_map = "success" if passed else "failure"
+                desc_msg = f"Visual check: {'PASS' if passed else 'FAIL'}. Mismatch: {result.mismatch_pct:.2f}%"
+                target_url = "http://127.0.0.1:8130/runs"
+                int_manager.post_github_commit_status(
+                    repo_url=repo_url,
+                    sha=sha,
+                    state=state_map,
+                    target_url=target_url,
+                    description=desc_msg
+                )
     except Exception as e:
         print(f"Integration hook failed: {e}")
 
@@ -514,6 +591,7 @@ def cmd_compare(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
         ignore_regions=ignore_regions,
         ai_model_path=ai_model_path,
         suite_name=None,
+        comparison_mode=args.comparison_mode,
     )
     return 0 if passed else 2
 
@@ -580,6 +658,7 @@ def cmd_compare_matrix(args, manager: BaselineManager, paths: WorkspacePaths) ->
                         ignore_regions=ignore_regions,
                         ai_model_path=ai_model_path,
                         suite_name=None,
+                        comparison_mode=args.comparison_mode,
                     )
                     if passed:
                         pass_count += 1
@@ -627,6 +706,9 @@ def _run_suite_case(
     manager: BaselineManager,
     paths: WorkspacePaths,
     ai_model_path: Path | None,
+    playwright_instance: Any = None,
+    browser_instance: Any = None,
+    build_id: str | None = None,
 ) -> tuple[bool, Dict[str, Any]]:
     capture_cfg = _capture_config_from_case(case, args)
     passed, _, details = _run_compare(
@@ -640,6 +722,10 @@ def _run_suite_case(
         ignore_regions=case.ignore_regions,
         ai_model_path=ai_model_path,
         suite_name=getattr(args, "suite", None),
+        comparison_mode=case.comparison_mode,
+        playwright_instance=playwright_instance,
+        browser_instance=browser_instance,
+        build_id=build_id,
     )
     return passed, details
 
@@ -679,10 +765,43 @@ def cmd_create_suite_baselines(args, manager: BaselineManager, paths: WorkspaceP
     return 0 if failed == 0 else 4
 
 
+def get_git_info(project_root: Path) -> Dict[str, str]:
+    import subprocess
+    info = {
+        "branch": "main",
+        "sha": "unknown",
+        "message": "Local comparison run",
+        "author": "Local User"
+    }
+    try:
+        # branch
+        res = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(project_root), capture_output=True, text=True)
+        if res.returncode == 0:
+            info["branch"] = res.stdout.strip()
+        # sha
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(project_root), capture_output=True, text=True)
+        if res.returncode == 0:
+            info["sha"] = res.stdout.strip()
+        # message
+        res = subprocess.run(["git", "log", "-1", "--pretty=%B"], cwd=str(project_root), capture_output=True, text=True)
+        if res.returncode == 0:
+            info["message"] = res.stdout.strip().split('\n')[0]
+        # author
+        res = subprocess.run(["git", "log", "-1", "--pretty=%an"], cwd=str(project_root), capture_output=True, text=True)
+        if res.returncode == 0:
+            info["author"] = res.stdout.strip()
+    except Exception:
+        pass
+    return info
+
+
 def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
     from .ci_reporter import write_junit_xml
     from .reporter import write_json
     from .suite_runner import load_suite
+    from playwright.sync_api import sync_playwright
+    from concurrent.futures import ThreadPoolExecutor
+    import uuid
 
     cases = load_suite(Path(args.suite))
     pass_count = 0
@@ -694,8 +813,43 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
     started_at = datetime.now().isoformat()
     started_perf = time.perf_counter()
     case_rows: list[Dict[str, Any]] = []
+    failed_any = False
 
-    for case in cases:
+    # Build creation
+    build_id = f"build_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    git_info = get_git_info(paths.root.parent)
+    build_meta_dir = paths.builds_dir / build_id
+    build_meta_dir.mkdir(parents=True, exist_ok=True)
+    build_payload = {
+        "build_id": build_id,
+        "suite_name": Path(args.suite).name,
+        "branch": git_info["branch"],
+        "commit_sha": git_info["sha"],
+        "commit_message": git_info["message"],
+        "author": git_info["author"],
+        "status": "pending",
+        "created_at": int(time.time()),
+    }
+    write_json(build_meta_dir / "build.json", build_payload)
+
+    def process_case(case) -> Dict[str, Any]:
+        nonlocal failed_any
+        if failed_any and getattr(args, "fail_fast", False):
+            return {
+                "name": case.name,
+                "status": "SKIP",
+                "message": "Skipped due to fail-fast",
+                "mismatch_pct": None,
+                "threshold_pct": case.threshold_pct,
+                "report": "",
+                "duration_seconds": 0.0,
+                "decision_status": None,
+                "ai_label": None,
+                "ai_score": None,
+                "severity": None,
+                "ai_explanation": None,
+            }
+
         case_started = time.perf_counter()
         row: Dict[str, Any] = {
             "name": case.name,
@@ -712,69 +866,89 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
             "ai_explanation": None,
         }
 
-        if not manager.exists(case.name):
-            if not args.create_missing_baseline:
-                row["status"] = "SKIP"
-                row["message"] = "Missing baseline. Use --create-missing-baseline."
-                row["duration_seconds"] = round(time.perf_counter() - case_started, 4)
-                case_rows.append(row)
-                skip_count += 1
-                fail_count += 1
-                print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
-                if args.fail_fast:
-                    break
-                continue
-
-            try:
-                capture_cfg = _capture_config_from_case(case, args)
-                _capture_and_save_baseline(
-                    manager=manager,
-                    paths=paths,
-                    name=case.name,
-                    capture_cfg=capture_cfg,
-                    capture_meta={**build_capture_metadata(capture_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
-                )
-                print(f"[BASELINE CREATED] {case.name}")
-            except Exception as exc:
-                row["status"] = "ERROR"
-                row["message"] = f"Failed to create baseline: {exc}"
-                row["duration_seconds"] = round(time.perf_counter() - case_started, 4)
-                case_rows.append(row)
-                error_count += 1
-                fail_count += 1
-                print(f"[ERROR] {case.name}: {row['message']}")
-                if args.fail_fast:
-                    break
-                continue
-
         try:
-            passed, details = _run_suite_case(case, args, manager, paths, ai_model_path)
-            row["status"] = "PASS" if passed else "FAIL"
-            row["message"] = ""
-            row["mismatch_pct"] = details.get("mismatch_pct")
-            row["threshold_pct"] = details.get("threshold_pct")
-            row["report"] = details.get("report", "")
-            row["decision_status"] = details.get("decision_status")
-            row["ai_label"] = details.get("ai_label")
-            row["ai_score"] = details.get("ai_score")
-            row["severity"] = details.get("severity")
-            row["ai_explanation"] = details.get("ai_explanation")
-            if passed:
-                pass_count += 1
-            else:
-                fail_count += 1
+            with sync_playwright() as playwright:
+                browser_name = case.browser or "chromium"
+                if browser_name not in {"chromium", "firefox", "webkit"}:
+                    browser_name = "chromium"
+                browser_type = getattr(playwright, browser_name)
+                browser_instance = browser_type.launch(headless=True)
+                try:
+                    if not manager.exists(case.name):
+                        if not getattr(args, "create_missing_baseline", False):
+                            row["status"] = "SKIP"
+                            row["message"] = "Missing baseline. Use --create-missing-baseline."
+                            print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
+                            failed_any = True
+                            return row
+
+                        capture_cfg = _capture_config_from_case(case, args)
+                        _capture_and_save_baseline(
+                            manager=manager,
+                            paths=paths,
+                            name=case.name,
+                            capture_cfg=capture_cfg,
+                            capture_meta={**build_capture_metadata(capture_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
+                            playwright_instance=playwright,
+                            browser_instance=browser_instance,
+                        )
+                        print(f"[BASELINE CREATED] {case.name}")
+
+                    passed, details = _run_suite_case(
+                        case, args, manager, paths, ai_model_path,
+                        playwright_instance=playwright,
+                        browser_instance=browser_instance,
+                        build_id=build_id,
+                    )
+                    row["status"] = "PASS" if passed else "FAIL"
+                    row["mismatch_pct"] = details.get("mismatch_pct")
+                    row["threshold_pct"] = details.get("threshold_pct")
+                    row["report"] = details.get("report", "")
+                    row["decision_status"] = details.get("decision_status")
+                    row["ai_label"] = details.get("ai_label")
+                    row["ai_score"] = details.get("ai_score")
+                    row["severity"] = details.get("severity")
+                    row["ai_explanation"] = details.get("ai_explanation")
+                    if not passed:
+                        failed_any = True
+                finally:
+                    try:
+                        browser_instance.close()
+                    except:
+                        pass
         except Exception as exc:
             row["status"] = "ERROR"
             row["message"] = str(exc)
-            error_count += 1
-            fail_count += 1
+            failed_any = True
             print(f"[ERROR] {case.name}: {exc}")
         finally:
             row["duration_seconds"] = round(time.perf_counter() - case_started, 4)
-            case_rows.append(row)
+        return row
 
-        if args.fail_fast and row["status"] in {"FAIL", "ERROR"}:
-            break
+    max_workers = 4
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        case_rows = list(executor.map(process_case, cases))
+
+    for row in case_rows:
+        if row["status"] == "PASS":
+            pass_count += 1
+        elif row["status"] == "SKIP":
+            skip_count += 1
+            if "Skipped due to" not in row["message"]:
+                fail_count += 1
+        elif row["status"] in {"FAIL", "ERROR"}:
+            fail_count += 1
+            if row["status"] == "ERROR":
+                error_count += 1
+
+    # Update build status
+    build_payload["status"] = "passed" if fail_count == 0 else "failed"
+    build_payload["passed_count"] = pass_count
+    build_payload["failed_count"] = fail_count
+    build_payload["skipped_count"] = skip_count
+    build_payload["error_count"] = error_count
+    build_payload["total_count"] = len(case_rows)
+    write_json(build_meta_dir / "build.json", build_payload)
 
     total_elapsed = round(time.perf_counter() - started_perf, 4)
     summary = {
@@ -882,6 +1056,16 @@ def cmd_evaluate_ai(args, paths: WorkspacePaths) -> int:
     return 0
 
 
+def cmd_generate_pr_comment(args, paths: WorkspacePaths) -> int:
+    from .pr_commenter import main as run_pr_commenter
+    try:
+        run_pr_commenter()
+        return 0
+    except Exception as e:
+        print(f"Error generating PR comment: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_review_run(args, paths: WorkspacePaths) -> int:
     from .review_manager import ReviewManager
 
@@ -959,6 +1143,12 @@ def add_common_capture_args(parser: argparse.ArgumentParser, require_url: bool, 
 def add_ai_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ai-model", help="Path to trained AI model")
     parser.add_argument("--no-ai", action="store_true", help="Disable AI assessment even if a model exists")
+    parser.add_argument(
+        "--comparison-mode",
+        choices=["pixel", "ai", "hybrid"],
+        default="ai",
+        help="PASS/FAIL source: pixel threshold, AI meaningful-change detection, or both (hybrid)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1059,6 +1249,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser = subparsers.add_parser("evaluate-ai", help="Evaluate the trained AI model against stored run data")
     eval_parser.add_argument("--model-path", help="Path to model to evaluate")
 
+    subparsers.add_parser("generate-pr-comment", help="Generate a markdown comment summarizing visual regression results for GitHub Pull Requests")
+
     suite_bootstrap_parser = subparsers.add_parser(
         "create-suite-baselines",
         help="Create baselines for all test cases in suite yaml",
@@ -1128,6 +1320,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_prepare_public_datasets(args, paths)
     if args.command == "evaluate-ai":
         return cmd_evaluate_ai(args, paths)
+    if args.command == "generate-pr-comment":
+        return cmd_generate_pr_comment(args, paths)
     if args.command == "serve-demo":
         return cmd_serve_demo(args)
     if args.command == "serve-dashboard":

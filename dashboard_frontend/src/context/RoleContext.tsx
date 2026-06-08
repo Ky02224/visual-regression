@@ -5,6 +5,7 @@ export type Role = 'admin' | 'developer' | 'viewer';
 interface RoleContextType {
   role: Role;
   userEmail: string | null;
+  userName: string | null;
   authenticated: boolean;
   loading: boolean;
   login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
@@ -21,12 +22,13 @@ const RoleContext = createContext<RoleContextType | undefined>(undefined);
 type MeResponse = {
   ok: boolean;
   authenticated: boolean;
-  user: { email: string; role: Role } | null;
+  user: { email: string; role: Role; name?: string } | null;
 };
 
 export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [role, setRoleState] = useState<Role>('viewer');
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userName, setUserName] = useState<string | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [accessKey, setAccessKey] = useState<string | null>(null);
@@ -34,9 +36,9 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const updateAccessKey = (value: string | null) => {
     setAccessKey(value);
     if (value) {
-      localStorage.setItem('lab-access-key', value);
+      localStorage.setItem('lens-access-key', value);
     } else {
-      localStorage.removeItem('lab-access-key');
+      localStorage.removeItem('lens-access-key');
     }
   };
 
@@ -48,6 +50,7 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setAuthenticated(true);
         setRoleState(data.user.role);
         setUserEmail(data.user.email);
+        setUserName(data.user.name || null);
         setLoading(false);
         return;
       }
@@ -57,6 +60,7 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthenticated(false);
     setRoleState('viewer');
     setUserEmail(null);
+    setUserName(null);
     setLoading(false);
   };
 
@@ -111,6 +115,7 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         role,
         userEmail,
+        userName,
         authenticated,
         loading,
         login,

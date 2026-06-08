@@ -1,20 +1,17 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { 
-  Plus, 
   History, 
   AlertTriangle, 
   CheckCircle2,
-  Filter,
   Smartphone,
   Monitor,
   ChevronRight,
   ChevronDown,
   X,
-  Sparkles,
   Globe,
-  Layers,
   Search,
+  Clock,
   RotateCcw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -22,21 +19,47 @@ import { cn } from '../lib/utils';
 import { DashboardData, TestRun } from '../types';
 import { useRole } from '../context/RoleContext';
 import { useApiData } from '../hooks/useApiData';
+import { ChangeTypeBadge } from '../components/ui/ChangeTypeBadge';
+import { ReviewStatusBadge } from '../components/ui/ReviewStatusBadge';
+import { normalizeReviewStatus, mismatchPctClass, reviewBorderClass, type ReviewStatus } from '../lib/reviewStatus';
+import { ImageFrame } from '../components/ui/ImageFrame';
+import { Button } from '../components/ui/Button';
 
 interface GroupedRuns {
   url: string;
   runs: TestRun[];
 }
 
+function parseUrl(url: string): { host: string; path: string } {
+  try {
+    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
+    return { host: u.host, path: u.pathname + (u.search || '') };
+  } catch {
+    const slash = url.indexOf('/');
+    if (slash !== -1) return { host: url.slice(0, slash), path: url.slice(slash) };
+    return { host: url, path: '/' };
+  }
+}
+
+function relativeTime(ts: string | number | null | undefined): string | null {
+  if (!ts) return null;
+  const d = typeof ts === 'number' ? new Date(ts < 1e12 ? ts * 1000 : ts) : new Date(ts);
+  if (isNaN(d.getTime())) return null;
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
 export function Dashboard() {
-  const { can } = useRole();
+  useRole();
   const { data: dashboardData, loading, error, refetch } = useApiData<DashboardData>('/api/dashboard', {
     ttl: 30000, // 30 second cache
-    onError: (err) => {
-      console.error('Failed to fetch dashboard data:', err);
-    }
+    onError: () => {}
   });
   
+  const [selectedBuildId, setSelectedBuildId] = React.useState<string | null>(null);
   const [groupedRuns, setGroupedRuns] = React.useState<GroupedRuns[]>([]);
   
   React.useEffect(() => {
@@ -44,27 +67,42 @@ export function Dashboard() {
     
     // Group runs by url
     const groups: Record<string, TestRun[]> = {};
-    const runs = dashboardData.runs || [];
-    runs.forEach((r: TestRun) => {
-      const urlStr = (r as any).url || 'Unknown';
+    const runs = (dashboardData.runs || []).filter((r: any) => {
+      if (selectedBuildId) {
+        return r.build_id === selectedBuildId;
+      }
+      return true;
+    });
+
+    runs.forEach((r: any) => {
+      const urlStr = r.url || 'Unknown';
+      const mapped: TestRun = {
+        ...r,
+        id: r.id || r.run,
+        name: r.name || r.case_name || r.id,
+        mismatch: Number(r.mismatch ?? r.mismatch_pct ?? 0),
+        reviewStatus: normalizeReviewStatus(r.review_status ?? r.status),
+        status: r.status,
+        browser: r.browser || 'Unknown',
+        device: r.device || 'Unknown',
+        locale: r.locale || 'Unknown',
+        aiLabel: r.ai_label ?? r.aiLabel,
+      };
       if (!groups[urlStr]) groups[urlStr] = [];
-      groups[urlStr].push(r);
+      groups[urlStr].push(mapped);
     });
         
     const arr = Object.keys(groups).map(url => ({ url, runs: groups[url] }));
     setGroupedRuns(arr);
-  }, [dashboardData]);
+  }, [dashboardData, selectedBuildId]);
 
   const [selectedRun, setSelectedRun] = React.useState<TestRun | null>(null);
   const [expandedUrls, setExpandedUrls] = React.useState<string[]>([]);
   
-  // Set initial selected and expanded when data loads
+  // Auto-expand first group when data loads (but don't auto-select any run)
   React.useEffect(() => {
     if (groupedRuns.length > 0 && expandedUrls.length === 0) {
       setExpandedUrls([groupedRuns[0].url]);
-      if (!selectedRun && groupedRuns[0].runs.length > 0) {
-        setSelectedRun(groupedRuns[0].runs[0]);
-      }
     }
   }, [groupedRuns]);
 
@@ -75,21 +113,18 @@ export function Dashboard() {
   const [statusFilter, setStatusFilter] = React.useState('All');
   const [searchQuery, setSearchQuery] = React.useState('');
 
-  const filteredGroups = React.useMemo(() => {
-    return groupedRuns.map(group => ({
-      ...group,
-      runs: group.runs.filter(run => {
-        const q = searchQuery.toLowerCase();
-        const matchesSearch = (run.name || '').toLowerCase().includes(q) ||
-                             (group.url || '').toLowerCase().includes(q);
-        const matchesStatus = statusFilter === 'All' ||
-                             (statusFilter === 'Failed' && run.status === 'failed') ||
-                             (statusFilter === 'Approved' && run.status === 'passed') ||
-                             (statusFilter === 'Attention' && run.status === 'attention');
-        return matchesSearch && matchesStatus;
-      })
-    })).filter(group => group.runs.length > 0);
-  }, [groupedRuns, searchQuery, statusFilter]);
+  // Refs & extras
+  const searchRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (e.key === '/' && tag !== 'INPUT' && tag !== 'TEXTAREA') { e.preventDefault(); searchRef.current?.focus(); }
+      if (e.key === 'Escape') { setSearchQuery(''); searchRef.current?.blur(); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   const toggleUrl = (url: string) => {
     setExpandedUrls(prev => 
@@ -118,7 +153,12 @@ export function Dashboard() {
           const matchesWebsite = websiteFilter === 'All' || group.url === websiteFilter;
           const matchesDevice = deviceFilter === 'All' || run.device === deviceFilter;
           const matchesLocale = localeFilter === 'All' || run.locale === localeFilter;
-          const matchesStatus = statusFilter === 'All' || run.status === statusFilter.toLowerCase();
+          const rs = run.reviewStatus ?? normalizeReviewStatus((run as any).review_status ?? run.status);
+          const matchesStatus = statusFilter === 'All' ||
+            (statusFilter === 'No changes' && rs === 'no_changes') ||
+            (statusFilter === 'Unreviewed' && rs === 'unreviewed') ||
+            (statusFilter === 'Approved' && rs === 'approved') ||
+            (statusFilter === 'Rejected' && rs === 'rejected');
           return matchesSearch && matchesWebsite && matchesDevice && matchesLocale && matchesStatus;
         })
       }))
@@ -135,11 +175,9 @@ export function Dashboard() {
   if (loading) {
     return (
       <div className="p-8 max-w-7xl mx-auto space-y-8 animate-pulse">
-        <div className="h-12 bg-slate-200/50 rounded-xl w-1/4"></div>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          {[1, 2, 3, 4].map(i => <div key={i} className="h-32 bg-slate-200/50 rounded-2xl"></div>)}
-        </div>
-        <div className="h-96 bg-slate-200/50 rounded-2xl"></div>
+        <div className="h-12 bg-slate-200/50 rounded-md w-1/4"></div>
+        <div className="h-28 bg-slate-200/50 rounded-md"></div>
+        <div className="h-96 bg-slate-200/50 rounded-md"></div>
       </div>
     );
   }
@@ -147,7 +185,7 @@ export function Dashboard() {
   if (error) {
     return (
       <div className="p-8 max-w-7xl mx-auto">
-        <div className="bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-2xl p-6">
+        <div className="bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-md p-6">
           <div className="flex items-start gap-4">
             <AlertTriangle className="w-6 h-6 text-red-600 dark:text-red-400 flex-shrink-0 mt-1" />
             <div className="flex-1">
@@ -175,359 +213,418 @@ export function Dashboard() {
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto corporate-grid min-h-screen transition-colors duration-300">
-      <header className="mb-12 flex justify-between items-end border-b border-slate-200 dark:border-slate-800 pb-8">
-        <div>
-          <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100 mb-2">Visual Change Status</h2>
-          <p className="text-slate-500 font-medium">
-            Monitoring architectural regression across <span className="text-accent font-bold">{m.baseline_count || 0} baselines</span>.
-          </p>
-        </div>
-        <div className="flex gap-2">
-        </div>
-      </header>
+    <>
+    <div className="p-6 max-w-7xl mx-auto min-h-[calc(100vh-4rem)] space-y-6">
+      {selectedBuildId === null ? (
+        <>
+          <header className="mb-8 pb-6 border-b border-slate-200 dark:border-slate-800">
+            <h2 className="text-xl font-semibold mb-1">Builds</h2>
+            <p className="text-slate-500 font-medium">
+              Monitoring visual changes across <span className="text-accent font-bold">{dashboardData?.builds?.length || 0} builds</span>.
+            </p>
+          </header>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-12">
-        <StatCard icon={<Monitor className="w-5 h-5" />} label="Active" value={String(m.baseline_count || 0)} subValue="Baselines" />
-        <StatCard icon={<History className="w-5 h-5" />} label="Total Runs" value={String(m.run_count || 0)} subValue="All Time" />
-        <StatCard 
-          icon={<AlertTriangle className="w-5 h-5" />} 
-          label="Priority" 
-          value={String(m.pending_decisions || 0)} 
-          subValue="Needs Attention" 
-          isAlert={!!m.pending_decisions}
-        />
-        <StatCard icon={<CheckCircle2 className="w-5 h-5" />} label="Overall" value={String(m.approved_decisions || 0)} subValue="Approved decisions" />
-      </div>
-
-      <div className="space-y-12">
-        {/* Results Accordion */}
-        <div className="space-y-6">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-            <div className="flex items-center gap-4 flex-1">
-              <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Execution Log</h3>
-              <div className="relative flex-1 max-w-sm">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-                <input 
-                  type="text"
-                  placeholder="Search case name or URL..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs outline-none focus:ring-2 focus:ring-accent/20 transition-all font-medium"
-                />
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <FilterSelect 
-                label="Website" 
-                options={websiteOptions} 
-                value={websiteFilter} 
-                onChange={setWebsiteFilter} 
-              />
-              <FilterSelect 
-                label="Device" 
-                options={deviceOptions} 
-                value={deviceFilter} 
-                onChange={setDeviceFilter} 
-              />
-              <FilterSelect 
-                label="Locale" 
-                options={localeOptions} 
-                value={localeFilter} 
-                onChange={setLocaleFilter} 
-              />
-              <FilterSelect 
-                label="Status" 
-                options={['All', 'Failed', 'Passed', 'Attention']} 
-                value={statusFilter} 
-                onChange={setStatusFilter} 
-              />
-            </div>
-          </div>
-          
           <div className="grid grid-cols-1 gap-4">
-            {filteredGroupedRuns.map((group) => (
-              <div key={group.url} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm transition-all hover:border-accent/30 dark:hover:border-accent/50">
-                <button 
-                  onClick={() => toggleUrl(group.url)}
-                  className="w-full px-6 py-5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
-                >
-                  <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400">
-                      <Globe className="w-5 h-5" />
-                    </div>
-                    <div className="text-left">
-                      <span className="font-bold text-slate-900 dark:text-slate-100 text-sm block">{group.url}</span>
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                        {group.runs.length} Active Nodes
-                      </span>
-                    </div>
+            {(dashboardData?.builds || []).map((build: any) => (
+              <div
+                key={build.build_id}
+                onClick={() => setSelectedBuildId(build.build_id)}
+                className="bg-white dark:bg-slate-900 rounded-md border border-slate-200 dark:border-slate-800 p-5 flex items-center justify-between cursor-pointer hover:border-indigo-500 dark:hover:border-indigo-500 shadow-sm transition-all"
+              >
+                <div className="space-y-1.5 min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold font-mono">
+                      {build.branch}
+                    </span>
+                    <span className="text-xs text-slate-400 font-mono">
+                      {build.commit_sha?.slice(0, 7) || 'unknown'}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-6">
-                    {group.runs.some(r => r.status === 'failed') && (
-                      <div className="flex -space-x-2">
-                        {[1, 2].map(i => (
-                          <div key={i} className="w-6 h-6 rounded-full border-2 border-white bg-red-50 flex items-center justify-center">
-                            <AlertTriangle className="w-3 h-3 text-red-600" />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {expandedUrls.includes(group.url) ? <ChevronDown className="w-5 h-5 text-slate-300" /> : <ChevronRight className="w-5 h-5 text-slate-300" />}
+                  <h4 className="font-bold text-slate-900 dark:text-slate-100 text-sm truncate max-w-xl">
+                    {build.commit_message || 'Local suite run'}
+                  </h4>
+                  <p className="text-xs text-slate-500 font-medium font-mono">
+                    By <span className="text-slate-700 dark:text-slate-300 font-semibold">{build.author || 'system'}</span> · {relativeTime(build.created_at)}
+                  </p>
+                </div>
+                <div className="flex items-center gap-4 shrink-0 ml-4">
+                  <div className="text-right hidden sm:block">
+                    <p className="text-xs font-semibold text-slate-500">
+                      {build.passed_count || 0} passed / {build.failed_count || 0} failed
+                    </p>
+                    <p className="text-[10px] text-slate-400">Total: {build.total_count || 0} tests</p>
                   </div>
-                </button>
-
-                <AnimatePresence>
-                  {expandedUrls.includes(group.url) && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="border-t border-slate-100 dark:border-slate-800"
-                    >
-                      <div className="divide-y divide-slate-50 dark:divide-slate-800/50">
-                        {group.runs.map((run) => (
-                          <div 
-                            key={run.id}
-                            onClick={() => setSelectedRun(run)}
-                            className={cn(
-                              "px-6 py-4 flex items-center justify-between cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-800/30 group",
-                              selectedRun?.id === run.id ? "bg-blue-50/50 dark:bg-slate-800 border-l-4 border-l-accent" : "border-l-4 border-l-transparent"
-                            )}
-                          >
-                            <div className="flex items-center gap-4">
-                              <div className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-700 shadow-sm group-hover:scale-110 transition-transform">
-                                {(run.device || '').includes('iPhone') ? <Smartphone className="w-4 h-4 text-slate-400" /> : <Monitor className="w-4 h-4 text-slate-400" />}
-                              </div>
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <p className="font-bold text-slate-900 dark:text-slate-200 text-sm">{run.name}</p>
-                                  {run.aiLabel && (
-                                    <span className="flex items-center gap-1 px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded text-[9px] font-bold uppercase tracking-tighter border border-indigo-100">
-                                      <Sparkles className="w-2.5 h-2.5" />
-                                      {run.aiLabel}
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tight">{run.browser} • {run.device}</p>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-8">
-                              <div className="text-right">
-                                <p className={cn("text-sm font-bold font-mono tracking-tighter", run.status === 'failed' ? "text-red-600" : "text-slate-500")}>
-                                  {run.mismatch}%
-                                </p>
-                                <p className="text-[10px] text-slate-400 uppercase font-bold tracking-tight">Mismatch</p>
-                              </div>
-                              <StatusBadge status={run.status} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </motion.div>
+                  {build.status === 'passed' ? (
+                    <span className="px-2.5 py-1 rounded bg-green-50 dark:bg-green-950/20 text-green-600 dark:text-green-400 text-[10px] font-bold uppercase tracking-widest">
+                      Passed
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-1 rounded bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 text-[10px] font-bold uppercase tracking-widest">
+                      Failed
+                    </span>
                   )}
-                </AnimatePresence>
+                  <ChevronRight className="w-5 h-5 text-slate-300" />
+                </div>
               </div>
             ))}
-          </div>
-
-          {!showAll && filteredGroupedRuns.length >= LIST_LIMIT && (
-            <div className="flex justify-center mt-12">
-              <button 
-                onClick={() => setShowAll(true)}
-                className="group relative px-8 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-bold uppercase tracking-[0.2em] text-slate-400 hover:text-accent hover:border-accent transition-all overflow-hidden"
-              >
-                <div className="relative z-10 flex items-center gap-2">
-                  <RotateCcw className="w-3.5 h-3.5 group-hover:rotate-180 transition-transform duration-500" />
-                  Load Complete History
+            {(dashboardData?.builds || []).length === 0 && (
+              <div className="flex flex-col items-center justify-center py-20 text-center bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md">
+                <div className="w-16 h-16 rounded-md bg-slate-50 dark:bg-slate-800/60 flex items-center justify-center mb-5">
+                  <Monitor className="w-8 h-8 text-slate-300 dark:text-slate-600" />
                 </div>
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Detail Panel */}
-        <AnimatePresence mode="wait">
-          {selectedRun && (
-            <motion.div 
-              key={selectedRun.id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-8 shadow-sm relative overflow-hidden"
-            >
-              <div className="absolute top-0 right-0 p-8">
-                <button 
-                  onClick={() => setSelectedRun(null)}
-                  className="w-10 h-10 rounded-full hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-center text-slate-300 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="mb-8">
-                <div className="flex items-center gap-3 mb-3">
-                  <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded text-[10px] font-bold uppercase tracking-widest font-mono">
-                    Node ID: {String(selectedRun.id ?? '').padStart(4, '0')}
-                  </span>
-                  {selectedRun.severity === 'high' && (
-                    <span className="px-2 py-1 bg-red-50 text-red-600 rounded text-[10px] font-bold uppercase tracking-widest">
-                      High Priority
-                    </span>
-                  )}
-                  {selectedRun.aiLabel && (
-                    <span className="px-2 py-1 bg-indigo-50 text-indigo-600 rounded text-[10px] font-bold uppercase tracking-widest border border-indigo-100 flex items-center gap-1.5">
-                      <Sparkles className="w-3 h-3" />
-                      AI Insight: {selectedRun.aiLabel}
-                    </span>
-                  )}
-                </div>
-                <h3 className="text-2xl font-bold text-slate-900 dark:text-slate-100">{selectedRun.name}</h3>
-                {selectedRun.aiInsight && (
-                  <p className="mt-2 text-sm text-slate-500 font-medium italic">
-                    "{selectedRun.aiInsight}"
-                  </p>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-                <div className="lg:col-span-2">
-                  <ScreenshotSlider 
-                    baselineSrc={`/baseline/${(selectedRun as any).baseline_name || selectedRun.name}/baseline.png`} 
-                    actualSrc={`/artifacts/${selectedRun.id}/current.png`} 
-                    compact={/iphone|pixel|android|mobile/i.test((selectedRun.device || '').toLowerCase())}
-                  />
-                </div>
-                <div className="lg:col-span-1">
-                  <ComparisonImage
-                    label="Difference Highlight"
-                    src={`/artifacts/${selectedRun.id}/diff_overlay.png`}
-                    isDiff
-                    compact={/iphone|pixel|android|mobile/i.test((selectedRun.device || '').toLowerCase())}
-                  />
-                </div>
-              </div>
-
-              <div className="p-6 bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-100 dark:border-slate-800 grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
-                <div className="flex justify-between items-center md:col-span-1">
-                  <InfoItem label="Mismatch Score" value={`${selectedRun.mismatch}%`} valueClass={selectedRun.status === 'failed' ? 'text-red-600 text-xl' : 'text-amber-600 text-xl'} />
-                </div>
-                <div className="grid grid-cols-2 gap-4 md:col-span-1">
-                  <InfoItem label="Browser" value={selectedRun.browser} />
-                  <InfoItem label="Device" value={selectedRun.device} />
-                </div>
-              </div>
-
-              <div className="flex gap-3 justify-end">
-                <Link 
-                  to={`/report/${selectedRun.id}`}
-                  className="px-8 py-3 bg-primary text-white rounded-xl shadow-lg shadow-primary/20 hover:bg-slate-800 transition-all font-bold text-sm text-center"
-                >
-                  Deep Analysis
+                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 mb-1">No builds recorded yet</h3>
+                <p className="text-sm text-slate-400 max-w-xs mb-6">Run a suite of tests to create a build.</p>
+                <Link to="/actions" className="px-5 py-2 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-md text-xs font-bold uppercase tracking-widest hover:opacity-80 transition-opacity">
+                  Run Suite
                 </Link>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
-}
-
-function ScreenshotSlider({ baselineSrc, actualSrc, compact }: { baselineSrc: string, actualSrc: string, compact?: boolean }) {
-  const [sliderPos, setSliderPos] = React.useState(50);
-  const containerRef = React.useRef<HTMLDivElement>(null);
-
-  const handleMove = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!containerRef.current) return;
-    const { left, width } = containerRef.current.getBoundingClientRect();
-    const clientX = 'touches' in e ? e.touches[0].clientX : (e as React.MouseEvent).clientX;
-    const x = Math.max(0, Math.min(clientX - left, width));
-    setSliderPos((x / width) * 100);
-  };
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between px-1">
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Baseline vs Current</span>
-      </div>
-      <div 
-        ref={containerRef}
-        onMouseMove={handleMove}
-        onTouchMove={handleMove}
-        className={cn(
-          "relative rounded-xl overflow-hidden border border-slate-200 bg-slate-100 cursor-ew-resize group select-none",
-          compact
-            ? "mx-auto w-full max-w-[260px] h-[500px] sm:max-w-[280px] sm:h-[540px]"
-            : "w-full h-[320px] md:h-[380px]"
-        )}
-      >
-        <img className="absolute inset-0 w-full h-full object-contain pointer-events-none" src={actualSrc} alt="Current" referrerPolicy="no-referrer" />
-        <div 
-          className="absolute inset-y-0 left-0 overflow-hidden" 
-          style={{ width: `${sliderPos}%` }}
-        >
-          <img
-            className="absolute inset-y-0 left-0 w-full h-full object-contain max-w-none pointer-events-none"
-            style={{ width: containerRef.current?.getBoundingClientRect().width || '100%' }}
-            src={baselineSrc}
-            alt="Baseline"
-            referrerPolicy="no-referrer"
-          />
-        </div>
-        <div 
-          className="absolute inset-y-0 bg-white shadow-lg w-0.5"
-          style={{ left: `${sliderPos}%` }}
-        >
-          <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 bg-white rounded-full border border-slate-200 shadow-sm flex items-center justify-center pointer-events-none">
-            <div className="w-0.5 h-3 bg-slate-300 rounded-full mx-0.5" />
-            <div className="w-0.5 h-3 bg-slate-300 rounded-full mx-0.5" />
+            )}
           </div>
-        </div>
-      </div>
+        </>
+      ) : (
+        <>
+          <header className="mb-8 pb-6 border-b border-slate-200 dark:border-slate-800 flex justify-between items-end flex-wrap gap-4">
+            <div>
+              <button onClick={() => setSelectedBuildId(null)} className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline mb-1 block">
+                ← Back to builds
+              </button>
+              <h2 className="text-xl font-bold">
+                Build: {dashboardData?.builds?.find((b: any) => b.build_id === selectedBuildId)?.commit_message || 'Local suite run'}
+              </h2>
+              <p className="text-xs text-slate-500 font-mono mt-1">
+                ID: {selectedBuildId}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Link to="/actions">
+                <Button variant="secondary" size="sm">New run</Button>
+              </Link>
+            </div>
+          </header>
+
+          {/* ── Stats: single card, internal dividers ── */}
+          <div className="mb-8 flex rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden divide-x divide-slate-100 dark:divide-slate-800 shadow-sm">
+            <div className="flex-1 px-8 py-8">
+              <div className="flex items-center gap-2 mb-4">
+                <Monitor className="w-4 h-4 text-slate-400" />
+                <p className="text-xs font-semibold text-slate-400">Total tests</p>
+              </div>
+              <p className="text-4xl font-black tabular-nums text-slate-900 dark:text-slate-100">
+                {groupedRuns.flatMap(g => g.runs).length}
+              </p>
+              <p className="text-xs text-slate-400 mt-1.5">Executed in build</p>
+            </div>
+
+            <div className="flex-1 px-8 py-8">
+              <div className="flex items-center gap-2 mb-4">
+                <AlertTriangle className="w-4 h-4 text-orange-400" />
+                <p className="text-xs font-semibold text-slate-400">Unreviewed</p>
+              </div>
+              <p className="text-4xl font-black tabular-nums text-orange-600 dark:text-orange-400">
+                {groupedRuns.flatMap(g => g.runs).filter(r => r.reviewStatus === 'unreviewed').length}
+              </p>
+              <p className="text-xs text-slate-400 mt-1.5">Requires action</p>
+            </div>
+
+            <div className="flex-1 px-8 py-8">
+              <div className="flex items-center gap-2 mb-4">
+                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                <p className="text-xs font-semibold text-slate-400 font-mono">Passed</p>
+              </div>
+              <p className="text-4xl font-black tabular-nums text-emerald-600 dark:text-emerald-400">
+                {groupedRuns.flatMap(g => g.runs).filter(r => r.reviewStatus === 'no_changes' || r.reviewStatus === 'approved').length}
+              </p>
+              <p className="text-xs text-slate-400 mt-1.5">No changes or approved</p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {/* Section header */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">Visual Snapshots</h3>
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-bold">
+                  {groupedRuns.flatMap(g => g.runs).length}
+                </span>
+              </div>
+            </div>
+
+            {/* Full-width search bar */}
+            <div className="relative">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+              <input
+                ref={searchRef}
+                type="text"
+                placeholder="Search by case name or URL…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-11 pr-12 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md text-sm outline-none focus:ring-2 focus:ring-accent/20 transition-all font-medium shadow-sm"
+              />
+              {searchQuery ? (
+                <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+                  <X className="w-3 h-3" />
+                </button>
+              ) : (
+                <kbd className="absolute right-4 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-[9px] font-bold text-slate-300 dark:text-slate-600 bg-slate-100 dark:bg-slate-800 rounded border border-slate-200 dark:border-slate-700 pointer-events-none">/</kbd>
+              )}
+            </div>
+
+            {/* Filter row: status pills + dropdowns */}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {(['All', 'No changes', 'Unreviewed', 'Approved', 'Rejected'] as const).map(s => (
+                  <button
+                    key={s}
+                    onClick={() => setStatusFilter(s)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
+                      statusFilter === s
+                        ? s === 'All' ? "bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-sm"
+                          : s === 'Rejected' ? "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800 shadow-sm"
+                          : s === 'Unreviewed' ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800 shadow-sm"
+                          : "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800 shadow-sm"
+                        : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600"
+                    )}
+                  >
+                    {s !== 'All' && (
+                      <span className={cn("mr-1 text-[8px]", statusFilter !== s && (s === 'Rejected' ? 'text-red-400' : s === 'Unreviewed' ? 'text-orange-400' : 'text-green-400'))}>●</span>
+                    )}
+                    {s}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <FilterSelect label="Website" options={websiteOptions} value={websiteFilter} onChange={setWebsiteFilter} />
+                <FilterSelect label="Device" options={deviceOptions} value={deviceFilter} onChange={setDeviceFilter} />
+                <FilterSelect label="Locale" options={localeOptions} value={localeFilter} onChange={setLocaleFilter} />
+              </div>
+            </div>
+
+            {/* Run groups */}
+            <div className="grid grid-cols-1 gap-3">
+              {filteredGroupedRuns.map((group) => {
+                const { host, path } = parseUrl(group.url);
+                return (
+                  <div key={group.url} className={cn(
+                    "bg-white dark:bg-slate-900 rounded-md border overflow-hidden shadow-sm transition-all",
+                    group.runs.some(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'rejected')
+                      ? "border-slate-200 dark:border-slate-800 hover:border-red-200 dark:hover:border-red-900/50"
+                      : group.runs.some(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'unreviewed')
+                      ? "border-slate-200 dark:border-slate-800 hover:border-orange-200 dark:hover:border-orange-900/50"
+                      : "border-slate-200 dark:border-slate-800 hover:border-green-200 dark:hover:border-green-900/50"
+                  )}>
+                    <button
+                      onClick={() => toggleUrl(group.url)}
+                      className="w-full px-5 py-4 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-9 h-9 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 flex-shrink-0">
+                          <Globe className="w-4 h-4" />
+                        </div>
+                        <div className="text-left min-w-0">
+                          <span className="font-bold text-slate-900 dark:text-slate-100 text-sm block">{host}</span>
+                          <span className="text-[11px] text-slate-400 truncate block max-w-[460px] font-mono">{path || '/'}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0 ml-4">
+                        {(() => {
+                          const fc = group.runs.filter(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'rejected').length;
+                          const ac = group.runs.filter(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'unreviewed').length;
+                          const pc = group.runs.filter(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'no_changes').length;
+                          return (
+                            <div className="flex items-center gap-1.5">
+                              {fc > 0 && <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-[9px] font-bold"><span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />{fc}</span>}
+                              {ac > 0 && <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 text-[9px] font-bold"><span className="w-1.5 h-1.5 rounded-full bg-orange-500" />{ac}</span>}
+                              {pc > 0 && <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 text-[9px] font-bold"><span className="w-1.5 h-1.5 rounded-full bg-green-500" />{pc}</span>}
+                            </div>
+                          );
+                        })()}
+                        {expandedUrls.includes(group.url) ? <ChevronDown className="w-4 h-4 text-slate-300" /> : <ChevronRight className="w-4 h-4 text-slate-300" />}
+                      </div>
+                    </button>
+
+                    <AnimatePresence>
+                      {expandedUrls.includes(group.url) && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          className="border-t border-slate-100 dark:border-slate-800"
+                        >
+                          <div className="divide-y divide-slate-50 dark:divide-slate-800/50">
+                            {group.runs.map((run) => (
+                              <div
+                                key={run.id}
+                                onClick={() => setSelectedRun(selectedRun?.id === run.id ? null : run)}
+                                className={cn(
+                                  "px-5 py-3.5 flex items-center justify-between cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-800/30 group border-l-[3px]",
+                                  selectedRun?.id === run.id
+                                    ? "bg-blue-50/50 dark:bg-slate-800/60 border-l-accent"
+                                    : reviewBorderClass(run.reviewStatus ?? normalizeReviewStatus(run.status))
+                                )}
+                              >
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                  <div className="w-14 shrink-0 rounded-md overflow-hidden border border-[var(--outline)]">
+                                    <ImageFrame src={`/artifacts/${run.id}/current.png`} alt="" aspectRatio="16/10" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <p className="font-semibold text-slate-900 dark:text-slate-200 text-sm truncate">{run.name}</p>
+                                      <ChangeTypeBadge label={(run as any).ai_label ?? run.aiLabel} />
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 font-medium">{run.browser} · {run.device}</p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-3 flex-shrink-0">
+                                  {relativeTime((run as any).timestamp || (run as any).created_at) && (
+                                    <span className="hidden md:flex items-center gap-1 text-[10px] text-slate-400 font-medium">
+                                      <Clock className="w-3 h-3" />{relativeTime((run as any).timestamp || (run as any).created_at)}
+                                    </span>
+                                  )}
+                                  <div className="text-right">
+                                    <p className={cn("text-sm font-bold font-mono", mismatchPctClass(Number(run.mismatch)))}>
+                                      {run.mismatch}%
+                                    </p>
+                                    <p className="text-[9px] text-slate-400 uppercase font-bold tracking-tight">Mismatch</p>
+                                  </div>
+                                  <ReviewStatusBadge status={run.reviewStatus ?? normalizeReviewStatus(run.status)} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Empty state: filters returned nothing */}
+            {filteredGroupedRuns.length === 0 && !loading && (
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <div className="w-16 h-16 rounded-md bg-slate-50 dark:bg-slate-800/60 flex items-center justify-center mb-5">
+                  <Search className="w-8 h-8 text-slate-300 dark:text-slate-600" />
+                </div>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 mb-1">No runs match your filters</h3>
+                <p className="text-sm text-slate-400 max-w-xs mb-6">Try adjusting or clearing filters to see all results.</p>
+                <button
+                  onClick={() => { setSearchQuery(''); setStatusFilter('All'); setWebsiteFilter('All'); setDeviceFilter('All'); setLocaleFilter('All'); }}
+                  className="px-5 py-2 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-md text-xs font-bold uppercase tracking-widest hover:opacity-80 transition-opacity"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
+
+    {/* Right-side detail drawer */}
+    <AnimatePresence>
+      {selectedRun && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 bg-black/20 dark:bg-black/40 z-40"
+            onClick={() => setSelectedRun(null)}
+          />
+          <motion.div
+            initial={{ x: '100%' }}
+            animate={{ x: 0 }}
+            exit={{ x: '100%' }}
+            transition={{ type: 'spring', damping: 30, stiffness: 280 }}
+            className="fixed right-0 top-16 bottom-0 w-full max-w-[520px] bg-[var(--surface)] dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 z-50 overflow-y-auto shadow-2xl"
+          >
+            <div className="p-6">
+              <div className="flex items-start justify-between mb-5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-2 py-1 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded text-[10px] font-bold uppercase tracking-widest font-mono">
+                    Run {String(selectedRun.id ?? '').padStart(4, '0')}
+                  </span>
+                  {selectedRun.severity === 'high' && (
+                    <span className="px-2 py-1 bg-red-50 text-red-600 rounded text-[10px] font-bold uppercase tracking-widest">High Priority</span>
+                  )}
+                  
+                </div>
+                <button
+                  onClick={() => setSelectedRun(null)}
+                  className="w-8 h-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-slate-400 transition-colors flex-shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-1">{selectedRun.name}</h3>
+              
+              <div className="mb-5" />
+              <div className="flex flex-wrap items-center gap-2 mb-4">
+                <ChangeTypeBadge label={(selectedRun as any).ai_label ?? selectedRun.aiLabel} />
+                <ReviewStatusBadge status={selectedRun.reviewStatus ?? normalizeReviewStatus(selectedRun.status)} />
+              </div>
+              <div className="rounded-md overflow-hidden border border-[var(--outline)] mb-4">
+                <ImageFrame src={`/artifacts/${selectedRun.id}/current.png`} alt="Preview" aspectRatio="16/10" />
+              </div>
+              <div className="flex items-center justify-between text-sm mb-4 px-1">
+                <span className="text-[var(--on-surface-variant)]">Mismatch</span>
+                <span className={cn("font-mono font-semibold", mismatchPctClass(Number(selectedRun.mismatch)))}>{selectedRun.mismatch}%</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-sm mb-6 px-1">
+                <div><p className="text-xs text-[var(--on-surface-variant)]">Browser</p><p className="font-medium">{selectedRun.browser}</p></div>
+                <div><p className="text-xs text-[var(--on-surface-variant)]">Device</p><p className="font-medium">{selectedRun.device}</p></div>
+              </div>
+              <Link to={`/report/${selectedRun.id}`}>
+                <Button variant="primary" size="lg" className="w-full">Open review</Button>
+              </Link>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+    </>
   );
 }
 
-function ComparisonImage({ label, src, isDiff, compact }: { label: string, src: string, isDiff?: boolean, compact?: boolean }) {
-  return (
-    <div className="space-y-2 h-full flex flex-col">
-      <div className="flex items-center justify-between px-1">
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{label}</span>
-      </div>
-      <div className={cn(
-        "flex-1 rounded-xl overflow-hidden border group cursor-zoom-in relative",
-        compact ? "mx-auto w-full max-w-[260px] min-h-[500px] sm:max-w-[280px] sm:min-h-[540px]" : "min-h-[320px] md:min-h-[380px]",
-        isDiff ? "bg-slate-900 border-slate-800" : "bg-slate-100 border-slate-200"
-      )}>
-        <img className="w-full h-full object-contain transition-transform duration-500 group-hover:scale-105" src={src} alt={label} referrerPolicy="no-referrer" />
-        <div className="absolute inset-0 bg-primary/0 group-hover:bg-primary/5 transition-colors" />
-      </div>
-    </div>
-  );
-}
+function StatCard({ icon, label, value, subValue, isAlert, variant = 'default' }: { icon: React.ReactNode, label: string, value: string, subValue: string, isAlert?: boolean, variant?: 'default' | 'success' | 'warning' | 'danger' }) {
+  const valueColor = {
+    default: 'text-slate-900 dark:text-white',
+    success: 'text-emerald-600 dark:text-emerald-400',
+    warning: 'text-orange-600 dark:text-orange-400',
+    danger: 'text-red-600 dark:text-red-400',
+  }[variant];
 
-function StatCard({ icon, label, value, subValue, isAlert }: { icon: React.ReactNode, label: string, value: string, subValue: string, isAlert?: boolean }) {
+  const accentBg = {
+    default: 'bg-slate-100 dark:bg-slate-800 text-slate-500',
+    success: 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600',
+    warning: 'bg-orange-50 dark:bg-orange-900/20 text-orange-600',
+    danger: 'bg-red-50 dark:bg-red-900/20 text-red-600',
+  }[variant];
+
+  const topBorder = {
+    default: '',
+    success: 'border-t-[3px] border-t-emerald-500',
+    warning: isAlert ? 'border-t-[3px] border-t-orange-500' : '',
+    danger: 'border-t-[3px] border-t-red-500',
+  }[variant];
+
   return (
     <div className={cn(
-      "bg-white dark:bg-slate-900 p-8 rounded-2xl border border-slate-200 dark:border-slate-800 transition-all hover:shadow-xl dark:shadow-slate-900/50 hover:-translate-y-1 group",
-      isAlert && "border-t-4 border-t-red-600"
+      "bg-white dark:bg-slate-900 p-6 rounded-md border border-slate-200 dark:border-slate-800 transition-all hover:shadow-md group",
+      topBorder,
+      isAlert && 'shadow-orange-100 dark:shadow-none'
     )}>
-      <div className="flex justify-between items-start mb-6">
-        <div className={cn(
-          "w-12 h-12 rounded-xl flex items-center justify-center transition-colors bg-slate-50 dark:bg-slate-800 text-slate-400 group-hover:bg-accent group-hover:text-white",
-          isAlert && "group-hover:bg-red-600"
-        )}>
+      <div className="flex items-center justify-between mb-4">
+        <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">{label}</span>
+        <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center", accentBg)}>
           {icon}
         </div>
-        <span className={cn("text-[10px] font-bold uppercase tracking-[0.2em] text-slate-300", isAlert && "text-red-600/50 group-hover:text-red-600")}>
-          {label}
-        </span>
       </div>
       <div>
-        <span className="text-4xl font-bold text-slate-900 dark:text-white tracking-tighter font-mono">{value}</span>
-        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">{subValue}</p>
+        <span className={cn("text-4xl font-bold tracking-tighter font-mono", valueColor)}>{value}</span>
+        <p className="text-[11px] font-medium text-slate-400 mt-1.5">{subValue}</p>
       </div>
     </div>
   );
@@ -552,23 +649,23 @@ function StatusBadge({ status }: { status: TestRun['status'] }) {
   switch (status) {
     case 'failed':
       return (
-        <div className="flex items-center gap-2 px-3 py-1 bg-error-container/20 rounded-full">
-          <div className="w-1.5 h-1.5 rounded-full bg-error animate-pulse shadow-[0_0_8px_rgba(255,0,0,0.6)]" />
-          <span className="text-error text-[10px] font-bold uppercase tracking-widest">Failed</span>
+        <div className="flex items-center gap-2 px-3 py-1 bg-red-50 dark:bg-red-900/20 rounded-full">
+          <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+          <span className="text-red-600 dark:text-red-400 text-[10px] font-bold uppercase tracking-widest">Failed</span>
         </div>
       );
     case 'attention':
       return (
-        <div className="flex items-center gap-2 px-3 py-1 bg-amber-50 rounded-full">
-          <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-          <span className="text-amber-700 text-[10px] font-bold uppercase tracking-widest">Attention</span>
+        <div className="flex items-center gap-2 px-3 py-1 bg-orange-50 dark:bg-orange-900/20 rounded-full">
+          <div className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+          <span className="text-orange-600 dark:text-orange-400 text-[10px] font-bold uppercase tracking-widest">Attention</span>
         </div>
       );
     case 'passed':
       return (
-        <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 rounded-full">
-          <div className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_rgba(37,99,235,0.6)]" />
-          <span className="text-accent text-[10px] font-bold uppercase tracking-widest">Passed</span>
+        <div className="flex items-center gap-2 px-3 py-1 bg-green-50 dark:bg-green-900/20 rounded-full">
+          <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+          <span className="text-green-600 dark:text-green-400 text-[10px] font-bold uppercase tracking-widest">Passed</span>
         </div>
       );
     default:
@@ -584,3 +681,4 @@ function InfoItem({ label, value, valueClass }: { label: string, value: string, 
     </div>
   );
 }
+

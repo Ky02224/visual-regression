@@ -1,4 +1,7 @@
+/** @deprecated Use ReviewStatus for list/review UI */
 export type Status = 'passed' | 'failed' | 'attention' | 'error';
+
+export type ReviewStatus = 'no_changes' | 'unreviewed' | 'approved' | 'rejected';
 export type Severity = 'critical' | 'high' | 'medium' | 'low';
 export type AILabel = 
   | 'missing-element' 
@@ -6,7 +9,9 @@ export type AILabel =
   | 'color-regression' 
   | 'text-truncation' 
   | 'overlay-obstruction' 
-  | 'insignificant-change';
+  | 'broken-image'
+  | 'misaligned-fields'
+  | 'unreadable-text';
 
 export interface Baseline {
   id: string;
@@ -30,7 +35,9 @@ export interface BaselineVersion {
 export interface TestRun {
   id: string;
   name: string;
+  /** Legacy — prefer reviewStatus */
   status: Status;
+  reviewStatus?: ReviewStatus;
   mismatch: number;
   lastRun: string;
   browser: string;

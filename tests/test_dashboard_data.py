@@ -67,7 +67,8 @@ def test_build_dashboard_snapshot(tmp_path: Path):
     assert snapshot["metrics"]["browser_coverage"] == 1
     assert snapshot["metrics"]["device_coverage"] == 2
     assert snapshot["metrics"]["locale_coverage"] == 1
-    assert snapshot["runs"][0]["ai_label"] == "meaningful-change"
+    assert snapshot["runs"][0]["ai_label"] is None
+    assert snapshot["runs"][0]["review_status"] == "unreviewed"
     assert snapshot["runs"][0]["baseline_image_href"].endswith("/baseline/home/baseline.png")
     assert snapshot["runs"][0]["severity"]["label"] == "high"
     assert snapshot["runs"][0]["decision_status"] == "pending"

@@ -1,24 +1,11 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { 
-  LayoutDashboard, 
-  PlayCircle, 
-  Ruler, 
-  Layers, 
-  FileText,
-  Cpu,
-  Users,
-  Lock,
-  LogOut,
-  Shield,
-  UserCheck,
-  Eye,
-} from 'lucide-react';
+import { LayoutDashboard, PlayCircle, Ruler, Layers, FileText, Cpu, Users, Lock, LogOut, Shield, UserCheck, Eye } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useRole } from '../context/RoleContext';
+import { useSidebar } from '../context/SidebarContext';
 
 const restrictedItems = ['Actions', 'Baselines', 'Integrations'];
-
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', to: '/' },
   { icon: PlayCircle, label: 'Actions', to: '/actions' },
@@ -27,110 +14,69 @@ const navItems = [
   { icon: Cpu, label: 'Integrations', to: '/integrations' },
 ];
 
-const ROLE_ICON: Record<string, React.ReactNode> = {
-  admin: <Shield className="w-3 h-3" />,
-  developer: <UserCheck className="w-3 h-3" />,
-  viewer: <Eye className="w-3 h-3" />,
-};
-
 const ROLE_COLOR: Record<string, string> = {
-  admin: 'bg-rose-500/20 text-rose-400',
-  developer: 'bg-blue-500/20 text-blue-400',
-  viewer: 'bg-white/10 text-white/50',
+  admin: 'bg-rose-100 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400',
+  developer: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-400',
+  viewer: 'bg-stone-100 text-stone-600 dark:bg-zinc-800 dark:text-zinc-400',
 };
 
 export function Sidebar() {
-  const { role, userEmail, logout } = useRole();
+  const { role, userEmail, userName, logout } = useRole();
+  const { collapsed } = useSidebar();
+
   return (
-    <aside className="h-screen w-64 fixed left-0 top-0 flex flex-col bg-sidebar-bg/95 backdrop-blur-xl border-r border-white/10 dark:border-white/5 z-40 font-sans antialiased text-sm tracking-tight transition-colors duration-300 shadow-2xl">
-      <div className="p-8">
-        <div className="flex items-center gap-4">
-          <div className="w-10 h-10 rounded-xl bg-accent flex items-center justify-center text-white shadow-lg shadow-accent/20">
-            <Layers className="w-5 h-5" />
-          </div>
+    <aside className={cn('h-screen fixed left-0 top-0 flex flex-col bg-[var(--sidebar-bg)] border-r border-[var(--outline)] z-40 transition-all duration-200', collapsed ? 'w-16' : 'w-64')}>
+      <div className={cn('flex items-center', collapsed ? 'p-3 justify-center' : 'p-5 gap-3')}>
+        <div className="w-9 h-9 rounded-md bg-indigo-600 flex items-center justify-center text-white shrink-0"><Layers className="w-5 h-5" /></div>
+        {!collapsed && (
           <div>
-            <h1 className="text-lg font-bold tracking-tighter text-white leading-tight font-mono">THE<br/>LENS</h1>
+            <p className="text-sm font-semibold text-[var(--on-surface)] leading-tight">The Lens</p>
+            <p className="text-[11px] text-[var(--on-surface-variant)]">Visual regression</p>
           </div>
-        </div>
+        )}
       </div>
-
-      <div className="px-4 mb-4">
-        <div className="h-px bg-white/10 w-full" />
-      </div>
-
-      <nav className="flex-1 px-4 space-y-1.5 overflow-y-auto custom-scrollbar">
-        <p className="px-4 py-2 text-[10px] font-bold uppercase tracking-[0.2em] text-white/30 font-mono">Navigation</p>
+      <nav className="flex-1 px-2 space-y-0.5 overflow-y-auto">
+        {!collapsed && <p className="px-3 py-2 text-xs text-[var(--on-surface-variant)]">Navigation</p>}
         {navItems.map((item) => {
           const isRestricted = role === 'viewer' && restrictedItems.includes(item.label);
-
           if (isRestricted) {
             return (
-              <div
-                key={item.to}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl opacity-40 cursor-not-allowed text-white/30"
-                title="Admin or Developer privileges required"
-              >
-                <item.icon className="w-5 h-5" />
-                <span className="font-medium">{item.label}</span>
-                <Lock className="ml-auto w-3 h-3 opcity-50" />
+              <div key={item.to} className={cn('flex items-center rounded-md opacity-40 cursor-not-allowed text-[var(--on-surface-variant)]', collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2')} title={item.label}>
+                <item.icon className="w-5 h-5 shrink-0" />
+                {!collapsed && <><span className="text-sm">{item.label}</span><Lock className="ml-auto w-3 h-3" /></>}
               </div>
             );
           }
-
           return (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) => cn(
-                "flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 group",
-                isActive 
-                  ? "bg-white/10 text-white shadow-sm" 
-                  : "text-white/50 hover:text-white hover:bg-white/5"
-              )}
-            >
-              <item.icon className={cn(
-                "w-5 h-5 transition-transform duration-300 group-hover:scale-110",
-                "group-[.active]:text-accent"
-              )} />
-              <span className="font-medium">{item.label}</span>
-              {item.label === 'Actions' && (
-                <div className="ml-auto w-1.5 h-1.5 rounded-full bg-accent animate-pulse shadow-[0_0_8px_rgba(37,99,235,0.6)]" />
-              )}
+            <NavLink key={item.to} to={item.to} title={collapsed ? item.label : undefined} className={({ isActive }) => cn('flex items-center rounded-md text-sm transition-colors border-l-2', collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2', isActive ? 'bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300 border-indigo-600' : 'text-[var(--on-surface-variant)] hover:bg-stone-100 dark:hover:bg-zinc-800 border-transparent')}>
+              <item.icon className="w-5 h-5 shrink-0" />
+              {!collapsed && <span>{item.label}</span>}
             </NavLink>
           );
         })}
-
         {role === 'admin' && (
           <>
-            <div className="px-4 pt-4 pb-1"><div className="h-px bg-white/10 w-full" /></div>
-            <p className="px-4 py-2 text-[10px] font-bold uppercase tracking-[0.2em] text-white/30 font-mono">Administration</p>
-            <NavLink to="/users"
-              className={({ isActive }) => cn(
-                'flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 group',
-                isActive ? 'bg-white/10 text-white shadow-sm' : 'text-white/50 hover:text-white hover:bg-white/5'
-              )}>
-              <Users className="w-5 h-5 transition-transform duration-300 group-hover:scale-110" />
-              <span className="font-medium">Users</span>
+            {!collapsed && <p className="px-3 pt-4 pb-2 text-xs text-[var(--on-surface-variant)]">Administration</p>}
+            <NavLink to="/users" title={collapsed ? 'Users' : undefined} className={({ isActive }) => cn('flex items-center rounded-md text-sm border-l-2', collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2', isActive ? 'bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300 border-indigo-600' : 'text-[var(--on-surface-variant)] hover:bg-stone-100 dark:hover:bg-zinc-800 border-transparent')}>
+              <Users className="w-5 h-5 shrink-0" />
+              {!collapsed && <span>Users</span>}
             </NavLink>
           </>
         )}
       </nav>
-
-      <div className="p-4 mt-auto border-t border-white/5 space-y-3">
-        <div className="flex items-center gap-3 px-2">
-          <div className="w-8 h-8 rounded-full bg-accent/20 flex items-center justify-center text-accent font-bold text-sm flex-shrink-0">
-            {userEmail ? userEmail[0].toUpperCase() : '?'}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-white truncate">{userEmail ?? 'Unknown'}</p>
-            <span className={cn('inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded-full mt-0.5', ROLE_COLOR[role] ?? ROLE_COLOR.viewer)}>
-              {ROLE_ICON[role]}{role}
-            </span>
-          </div>
+      <div className="mt-auto border-t border-[var(--outline)] p-3">
+        <div className={cn('flex items-center', collapsed ? 'justify-center' : 'gap-3 px-1 mb-2')}>
+          <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 flex items-center justify-center text-sm font-semibold shrink-0">{(userName || userEmail || '?')[0].toUpperCase()}</div>
+          {!collapsed && (
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium truncate">{userName || userEmail}</p>
+              <span className={cn('inline-block text-[10px] font-medium px-1.5 py-0.5 rounded mt-0.5', ROLE_COLOR[role] ?? ROLE_COLOR.viewer)}>{role}</span>
+            </div>
+          )}
         </div>
-        <button onClick={() => logout()}
-          className="w-full flex items-center gap-2 px-4 py-2.5 rounded-xl text-white/40 hover:text-white hover:bg-white/5 transition-all duration-300 text-xs font-bold">
-          <LogOut className="w-4 h-4" />Sign Out
+        <button onClick={() => logout()} className={cn('flex items-center rounded-md text-xs text-[var(--on-surface-variant)] hover:bg-stone-100 dark:hover:bg-zinc-800 transition-colors', collapsed ? 'justify-center p-2 w-full' : 'gap-2 px-3 py-2 w-full')}>
+          <LogOut className="w-4 h-4" />
+          {!collapsed && 'Sign out'}
         </button>
       </div>
     </aside>

@@ -3,6 +3,7 @@
     "en-US": {
       brand: "Northstar Ops",
       locale: "English (US)",
+      dashboardBody: "Visual baseline health, browser matrix status and reviewer queue for the next deployment window.",
       homeTitle: "Operations control in one visual workspace",
       homeBody: "Monitor releases, UI health, deployment risk and manual approvals across all customer touchpoints.",
       loginTitle: "Sign in to continue",
@@ -25,6 +26,7 @@
     "ms-MY": {
       brand: "Northstar Ops",
       locale: "Bahasa Melayu",
+      dashboardBody: "Status kesihatan visual baseline, matriks pelayar dan barisan semakan untuk tetingkap deployment seterusnya.",
       homeTitle: "Pusat operasi dalam satu ruang visual",
       homeBody: "Pantau release, kestabilan UI, risiko deployment dan kelulusan manual merentas semua touchpoint pelanggan.",
       loginTitle: "Log masuk untuk teruskan",
@@ -47,6 +49,7 @@
     "zh-CN": {
       brand: "Northstar Ops",
       locale: "简体中文",
+      dashboardBody: "视觉基线健康状态、浏览器矩阵状态及下次部署窗口的审核队列。",
       homeTitle: "在一个可视化工作台管理运营",
       homeBody: "统一查看发布状态、UI 健康度、部署风险和人工审批结果。",
       loginTitle: "登录以继续",
@@ -84,6 +87,13 @@
   if (localeBadge) {
     localeBadge.textContent = locale.locale;
   }
+
+  document.querySelectorAll('a[href]').forEach(function(link) {
+    var href = link.getAttribute('href');
+    if (href && !href.startsWith('http') && href.indexOf('?') === -1) {
+      link.setAttribute('href', href + '?lang=' + lang);
+    }
+  });
 
   if (defect) {
     document.body.classList.add(defect);

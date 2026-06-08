@@ -57,6 +57,7 @@ class AIAssessment:
     label: str
     threshold: float
     model_name: str
+    meaningful_change: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

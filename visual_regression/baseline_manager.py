@@ -127,6 +127,30 @@ class BaselineManager:
             raise FileNotFoundError(f"metadata not found for baseline '{name}'")
         return JsonCache.read(path)
 
+    def save_ignore_regions(self, name: str, ignore_regions: List[Dict[str, int]]) -> None:
+        baseline_name = self.normalize_name(name)
+        metadata_file = self.metadata_path(baseline_name)
+        if not metadata_file.exists():
+            raise FileNotFoundError(f"metadata not found for baseline '{name}'")
+        lock_path = self.baseline_dir(baseline_name) / ".lock"
+        with FileLock(lock_path, timeout=10.0):
+            metadata = self.load_metadata(baseline_name)
+            metadata["ignore_regions"] = ignore_regions
+            metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            JsonCache.clear(metadata_file)
+
+    def save_ignore_css_selectors(self, name: str, css_selectors: List[str]) -> None:
+        baseline_name = self.normalize_name(name)
+        metadata_file = self.metadata_path(baseline_name)
+        if not metadata_file.exists():
+            raise FileNotFoundError(f"metadata not found for baseline '{name}'")
+        lock_path = self.baseline_dir(baseline_name) / ".lock"
+        with FileLock(lock_path, timeout=10.0):
+            metadata = self.load_metadata(baseline_name)
+            metadata["ignore_css_selectors"] = css_selectors
+            metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            JsonCache.clear(metadata_file)
+
     def list_baselines(self) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         for child in sorted(self.paths.baselines_dir.iterdir()):
@@ -188,6 +212,8 @@ class BaselineManager:
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "capture": data.get("capture", {}),
+            "ignore_regions": data.get("ignore_regions", []),
+            "ignore_css_selectors": data.get("ignore_css_selectors", []),
             "history": data.get("history", []),
             "current_image_href": f"/baseline/{baseline_name}/baseline.png",
             "metadata_href": f"/baseline/{baseline_name}/metadata.json",

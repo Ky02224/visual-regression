@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      recreate_baselines:
+        description: 'Force recreate baselines? (yes/no)'
+        required: false
+        default: 'no'
 
 jobs:
   visual-test:
@@ -16,32 +21,64 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: 'pip'
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          python -m playwright install chromium
 
-      - name: Start demo portal
-        run: python -m visual_regression.cli serve-demo --port 8123 &
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install chromium
 
-      - name: Wait for demo portal
+      - name: Restore baseline cache
+        id: baseline-cache
+        uses: actions/cache@v4
+        with:
+          path: .visual-regression/baselines
+          key: baselines-${{ hashFiles('suite.demo.yaml', 'demo_portal/**') }}
+          restore-keys: baselines-
+
+      - name: Start dashboard server
+        run: python -m visual_regression serve-dashboard --port 8130 &
+
+      - name: Wait for dashboard server
         run: |
           python - <<'PY'
           import time, urllib.request
           for _ in range(30):
               try:
-                  urllib.request.urlopen("http://127.0.0.1:8123/index.html", timeout=3)
-                  print("Demo portal ready."); break
+                  urllib.request.urlopen("http://127.0.0.1:8130/api/dashboard", timeout=3)
+                  print("Dashboard ready."); break
               except: time.sleep(1)
           PY
 
-      - name: Bootstrap baselines
-        run: python -m visual_regression.cli create-suite-baselines --suite suite.demo.yaml --overwrite
+      - name: Create baselines (first run or forced)
+        if: steps.baseline-cache.outputs.cache-hit != 'true' || github.event.inputs.recreate_baselines == 'yes'
+        run: python -m visual_regression create-suite-baselines --suite suite.demo.yaml --overwrite
 
       - name: Run visual regression suite
-        run: python -m visual_regression.cli run-suite --suite suite.demo.yaml --no-junit
+        run: python -m visual_regression run-suite --suite suite.demo.yaml --no-junit
+
+      - name: Generate PR Comment
+        if: always()
+        run: python -m visual_regression generate-pr-comment
+
+      - name: Post PR Comment
+        if: always() && github.event_name == 'pull_request' && hashFiles('pr_comment.md') != ''
+        run: gh pr comment ${{ github.event.number }} --body-file pr_comment.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload visual artifacts
         if: always()

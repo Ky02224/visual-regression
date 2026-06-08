@@ -1,7 +1,10 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { cn } from '../lib/utils';
 import { Activity } from 'lucide-react';
+import { PageHeader } from '../components/ui/PageHeader';
+import { Panel } from '../components/ui/Panel';
+import { Badge } from '../components/ui/Badge';
+import { EmptyState } from '../components/ui/EmptyState';
 
 function suiteLabel(batch: any) {
   const raw = batch.suite || batch.suite_name || batch.file || 'Manual Run';
@@ -9,112 +12,52 @@ function suiteLabel(batch: any) {
   const tail = normalized.split('/').pop() || normalized;
   return tail.replace(/\.(ya?ml|json)$/i, '');
 }
-
-function totalRuns(batch: any) {
-  return batch.total ?? batch.total_cases ?? batch.total_runs ?? 0;
-}
-
-function passedRuns(batch: any) {
-  return batch.passed ?? batch.passed_cases ?? 0;
-}
-
-function failedRuns(batch: any) {
-  const hardFailed = batch.failed ?? batch.failed_cases ?? 0;
-  const errorCount = batch.errors ?? 0;
-  return hardFailed + errorCount;
-}
-
-function batchTimestamp(batch: any) {
-  return batch.finished_at || batch.started_at || batch.timestamp || null;
+function totalRuns(batch: any) { return batch.total ?? batch.total_cases ?? batch.total_runs ?? 0; }
+function passedRuns(batch: any) { return batch.passed ?? batch.passed_cases ?? 0; }
+function failedRuns(batch: any) { return (batch.failed ?? batch.failed_cases ?? 0) + (batch.errors ?? 0); }
+function batchTimestamp(batch: any): Date | null {
+  const raw = batch.finished_at || batch.started_at || batch.timestamp;
+  if (!raw) return null;
+  if (typeof raw === 'number') return new Date(raw * 1000);
+  return new Date(raw);
 }
 
 export function Summaries() {
   const [summaries, setSummaries] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
-
   React.useEffect(() => {
-    fetch('/api/dashboard')
-      .then(res => res.json())
-      .then(data => {
-        setSummaries(data.recent_summaries || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    fetch('/api/dashboard').then(res => res.json()).then(data => { setSummaries(data.recent_summaries || []); setLoading(false); }).catch(() => setLoading(false));
   }, []);
-
-  if (loading) {
-    return <div className="p-20 text-center text-slate-400 font-bold uppercase tracking-widest animate-pulse">Analyzing laboratory records...</div>;
-  }
-
-  if (!summaries.length) {
-    return (
-      <div className="p-10 max-w-4xl mx-auto">
-        <header className="mb-10">
-          <h2 className="text-3xl font-bold tracking-tight text-on-surface dark:text-slate-100 mb-2">Batch Summaries</h2>
-          <p className="text-on-surface-variant dark:text-slate-400 font-medium">Run a batch comparison to populate this page with recent summary data.</p>
-        </header>
-        <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm p-10 text-center">
-          <div className="mx-auto mb-4 w-14 h-14 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
-            <Activity className="w-6 h-6 text-slate-500" />
-          </div>
-          <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-2">No batch summaries yet</h3>
-          <p className="text-slate-500 dark:text-slate-400 max-w-xl mx-auto">
-            Recent suite runs will appear here once a batch execution finishes and writes a summary file.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
+  if (loading) return <div className="p-8 max-w-6xl mx-auto"><div className="animate-shimmer h-10 w-48 rounded-md mb-6" /><div className="space-y-2">{[1,2,3].map(i => <div key={i} className="animate-shimmer h-14 rounded-md" />)}</div></div>;
+  if (!summaries.length) return <div className="p-8 max-w-6xl mx-auto"><PageHeader title="Batch summaries" description="Run a batch comparison to populate this page." /><Panel><EmptyState icon={<Activity className="w-8 h-8" />} title="No batch summaries yet" description="Recent suite runs will appear here once a batch execution finishes." /></Panel></div>;
   return (
-    <div className="p-10 max-w-6xl mx-auto">
-      <header className="mb-10">
-        <h2 className="text-3xl font-bold tracking-tight text-on-surface dark:text-slate-100 mb-2">Batch Summaries</h2>
-        <p className="text-on-surface-variant dark:text-slate-400 font-medium">History of laboratory test runs and execution results.</p>
-      </header>
-
-      <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+    <div className="p-8 max-w-6xl mx-auto">
+      <PageHeader title="Batch summaries" description="History of batch runs and their results." />
+      <Panel className="overflow-hidden p-0">
         <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-50 dark:bg-slate-950/50 border-b border-slate-200 dark:border-slate-800">
-              <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Suite Name</th>
-              <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Total Run</th>
-              <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Timestamp</th>
-              <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">Status</th>
-              <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400 text-center">Result</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-            {summaries.map((batch, index) => (
-              <tr key={index} className="hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-                <td className="px-6 py-4 font-mono text-sm font-bold">
-                  <Link
-                    to={`/suite/${encodeURIComponent(suiteLabel(batch))}`}
-                    className="text-primary dark:text-blue-400 hover:underline"
-                  >
-                    {suiteLabel(batch)}
-                  </Link>
-                </td>
-                <td className="px-6 py-4 text-sm text-on-surface-variant dark:text-slate-400 font-bold">{totalRuns(batch)}</td>
-                <td className="px-6 py-4 text-sm text-on-surface-variant dark:text-slate-400">{batchTimestamp(batch) ? new Date(batchTimestamp(batch)).toLocaleString() : 'N/A'}</td>
-                <td className="px-6 py-4">
-                  <span className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
-                    failedRuns(batch) === 0 ? "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400" : "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400"
-                  )}>
-                    {failedRuns(batch) === 0 ? 'Passed' : 'Regressions'}
-                  </span>
-                </td>
-                <td className="px-6 py-4 text-center">
-                  <span className="text-sm font-bold text-on-surface dark:text-slate-200">
-                    {passedRuns(batch)} / {totalRuns(batch)}
-                  </span>
-                </td>
-              </tr>
-            ))}
+          <thead><tr className="border-b border-[var(--outline)] bg-stone-50 dark:bg-zinc-900/50">
+            <th className="px-4 py-3 text-xs font-medium text-[var(--on-surface-variant)]">Suite name</th>
+            <th className="px-4 py-3 text-xs font-medium text-[var(--on-surface-variant)]">Total runs</th>
+            <th className="px-4 py-3 text-xs font-medium text-[var(--on-surface-variant)]">Timestamp</th>
+            <th className="px-4 py-3 text-xs font-medium text-[var(--on-surface-variant)]">Status</th>
+            <th className="px-4 py-3 text-xs font-medium text-[var(--on-surface-variant)] text-center">Result</th>
+          </tr></thead>
+          <tbody className="divide-y divide-[var(--outline)]">
+            {summaries.map((batch, index) => {
+              const failed = failedRuns(batch); const passed = passedRuns(batch); const ts = batchTimestamp(batch); const allPassed = failed === 0;
+              return (
+                <tr key={index} className="hover:bg-stone-50 dark:hover:bg-zinc-800/40 transition-colors">
+                  <td className="px-4 py-3 font-mono text-sm"><Link to={`/suite/${encodeURIComponent(suiteLabel(batch))}`} className="text-indigo-600 dark:text-indigo-400 hover:underline">{suiteLabel(batch)}</Link></td>
+                  <td className="px-4 py-3 text-sm">{totalRuns(batch)}</td>
+                  <td className="px-4 py-3 text-xs text-[var(--on-surface-variant)]">{ts ? ts.toLocaleString() : '—'}</td>
+                  <td className="px-4 py-3"><Badge status={allPassed ? 'passed' : 'failed'}>{allPassed ? 'Passed' : 'Failed'}</Badge></td>
+                  <td className="px-4 py-3 text-center text-sm font-mono"><span className="text-green-600">{passed}</span> / <span className="text-red-600">{failed}</span></td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
-      </div>
+      </Panel>
     </div>
   );
 }

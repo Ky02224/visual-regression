@@ -25,6 +25,7 @@ class SuiteCase:
     extra_headers: Dict[str, str] = field(default_factory=dict)
     hide_selectors: List[str] = field(default_factory=list)
     wait_for_selector: str | None = None
+    comparison_mode: str = "ai"
 
 
 def _parse_viewport(value) -> Tuple[int, int]:
@@ -63,10 +64,18 @@ def _parse_selectors(value) -> List[str]:
 
 
 def load_suite(path: Path) -> List[SuiteCase]:
+    from .decision import normalize_comparison_mode
+
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     tests = payload.get("tests")
     if not isinstance(tests, list) or not tests:
         raise ValueError("Suite file must contain a non-empty 'tests' list")
+
+    defaults = payload.get("defaults") or {}
+    if defaults and not isinstance(defaults, dict):
+        raise ValueError("Suite 'defaults' must be a mapping")
+
+    default_comparison_mode = normalize_comparison_mode(defaults.get("comparison_mode"), default="ai")
 
     cases: List[SuiteCase] = []
     for raw in tests:
@@ -75,20 +84,24 @@ def load_suite(path: Path) -> List[SuiteCase]:
         case = SuiteCase(
             name=str(raw["name"]),
             url=str(raw["url"]),
-            browser=str(raw.get("browser", "chromium")),
-            device=raw.get("device"),
-            viewport=_parse_viewport(raw.get("viewport", "1440x900")),
-            wait_ms=int(raw.get("wait_ms", 1200)),
-            threshold_pct=float(raw.get("threshold_pct", 0.5)),
-            pixel_threshold=int(raw.get("pixel_threshold", 20)),
-            min_region_area=int(raw.get("min_region_area", 120)),
-            ignore_regions=_parse_ignore(raw.get("ignore_regions", [])),
-            locale=raw.get("locale"),
-            timezone_id=raw.get("timezone_id"),
-            color_scheme=str(raw.get("color_scheme", "light")),
-            extra_headers=_parse_headers(raw.get("extra_headers")),
-            hide_selectors=_parse_selectors(raw.get("hide_selectors")),
-            wait_for_selector=raw.get("wait_for_selector"),
+            browser=str(raw.get("browser", defaults.get("browser", "chromium"))),
+            device=raw.get("device", defaults.get("device")),
+            viewport=_parse_viewport(raw.get("viewport", defaults.get("viewport", "1440x900"))),
+            wait_ms=int(raw.get("wait_ms", defaults.get("wait_ms", 1200))),
+            threshold_pct=float(raw.get("threshold_pct", defaults.get("threshold_pct", 0.5))),
+            pixel_threshold=int(raw.get("pixel_threshold", defaults.get("pixel_threshold", 20))),
+            min_region_area=int(raw.get("min_region_area", defaults.get("min_region_area", 120))),
+            ignore_regions=_parse_ignore(raw.get("ignore_regions", defaults.get("ignore_regions", []))),
+            locale=raw.get("locale", defaults.get("locale")),
+            timezone_id=raw.get("timezone_id", defaults.get("timezone_id")),
+            color_scheme=str(raw.get("color_scheme", defaults.get("color_scheme", "light"))),
+            extra_headers=_parse_headers(raw.get("extra_headers", defaults.get("extra_headers"))),
+            hide_selectors=_parse_selectors(raw.get("hide_selectors", defaults.get("hide_selectors"))),
+            wait_for_selector=raw.get("wait_for_selector", defaults.get("wait_for_selector")),
+            comparison_mode=normalize_comparison_mode(
+                raw.get("comparison_mode", default_comparison_mode),
+                default=default_comparison_mode,
+            ),
         )
         cases.append(case)
     return cases

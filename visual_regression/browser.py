@@ -4,6 +4,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
+from typing import Any
 from playwright.sync_api import Playwright, sync_playwright
 
 from .config import CaptureConfig
@@ -13,14 +14,47 @@ _DISABLE_ANIMATION_CSS = """
 *,
 *::before,
 *::after {
-  animation-delay: 0s !important;
-  animation-duration: 0s !important;
-  animation-iteration-count: 1 !important;
-  transition-delay: 0s !important;
-  transition-duration: 0s !important;
+  transition: none !important;
+  animation: none !important;
   caret-color: transparent !important;
 }
 """
+
+_PREPARE_PAGE_JS = """
+// Freeze HTML5 videos
+document.querySelectorAll('video').forEach(video => {
+  try {
+    video.pause();
+    video.currentTime = 0;
+  } catch (e) {}
+});
+
+// Hide visual masks / ignored dynamic elements
+document.querySelectorAll('.visual-mask, [data-visual-mask], .percy-ignore, [data-percy-ignore]').forEach(el => {
+  try {
+    el.style.visibility = 'hidden';
+  } catch (e) {}
+});
+
+// Auto-hide cookie consent banners, privacy policies, and terms dialogs
+const cookieSelectors = [
+  'div[class*="cookie" i]', 'div[id*="cookie" i]',
+  'div[class*="consent" i]', 'div[id*="consent" i]',
+  'div[class*="privacy" i]', 'div[id*="privacy" i]',
+  '[class*="cookie-banner" i]', '[id*="cookie-banner" i]',
+  '.cookie-consent', '#cookie-consent', '.privacy-banner',
+  'div[class*="gdpr" i]', 'div[id*="gdpr" i]',
+  'dialog[class*="cookie" i]', 'dialog[id*="cookie" i]'
+];
+cookieSelectors.forEach(sel => {
+  try {
+    document.querySelectorAll(sel).forEach(el => {
+      el.style.setProperty('display', 'none', 'important');
+    });
+  } catch (e) {}
+});
+"""
+
 
 
 def _build_context_options(playwright: Playwright, cfg: CaptureConfig) -> dict:
@@ -43,19 +77,24 @@ def _build_context_options(playwright: Playwright, cfg: CaptureConfig) -> dict:
     return options
 
 
-def capture_website(cfg: CaptureConfig, output_path: Path) -> None:
+def capture_website(
+    cfg: CaptureConfig,
+    output_path: Path,
+    playwright_instance: Playwright | None = None,
+    browser_instance: Any = None,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with sync_playwright() as playwright:
-        if cfg.browser not in {"chromium", "firefox", "webkit"}:
-            raise ValueError("browser must be one of: chromium, firefox, webkit")
-
-        browser_type = getattr(playwright, cfg.browser)
-        browser = browser_type.launch(headless=True)
-        context = browser.new_context(**_build_context_options(playwright, cfg))
-
+    if playwright_instance and browser_instance:
+        context = browser_instance.new_context(**_build_context_options(playwright_instance, cfg))
         page = context.new_page()
-        page.goto(cfg.url, wait_until=cfg.wait_until, timeout=cfg.navigation_timeout_ms)
+        try:
+            page.goto(cfg.url, wait_until=cfg.wait_until or "networkidle", timeout=cfg.navigation_timeout_ms)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                print(f"[Warning] Navigation timeout on {cfg.url}. Proceeding to capture screenshot anyway.")
+            else:
+                raise e
         if cfg.disable_animations:
             page.add_style_tag(content=_DISABLE_ANIMATION_CSS)
         if cfg.hide_selectors:
@@ -66,6 +105,56 @@ def capture_website(cfg: CaptureConfig, output_path: Path) -> None:
         if cfg.wait_ms > 0:
             page.wait_for_timeout(cfg.wait_ms)
 
+        # Trigger lazy loaded assets
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            page.wait_for_timeout(300)
+            page.evaluate("window.scrollTo(0, 0);")
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+
+        page.evaluate(_PREPARE_PAGE_JS)
+        page.screenshot(path=str(output_path), full_page=cfg.full_page)
+        context.close()
+        return
+
+    with sync_playwright() as playwright:
+        if cfg.browser not in {"chromium", "firefox", "webkit"}:
+            raise ValueError("browser must be one of: chromium, firefox, webkit")
+
+        browser_type = getattr(playwright, cfg.browser)
+        browser = browser_type.launch(headless=True)
+        context = browser.new_context(**_build_context_options(playwright, cfg))
+
+        page = context.new_page()
+        try:
+            page.goto(cfg.url, wait_until=cfg.wait_until or "networkidle", timeout=cfg.navigation_timeout_ms)
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                print(f"[Warning] Navigation timeout on {cfg.url}. Proceeding to capture screenshot anyway.")
+            else:
+                raise e
+        if cfg.disable_animations:
+            page.add_style_tag(content=_DISABLE_ANIMATION_CSS)
+        if cfg.hide_selectors:
+            selector_rules = "\n".join([f"{selector} {{ visibility: hidden !important; }}" for selector in cfg.hide_selectors])
+            page.add_style_tag(content=selector_rules)
+        if cfg.wait_for_selector:
+            page.wait_for_selector(cfg.wait_for_selector, timeout=cfg.navigation_timeout_ms)
+        if cfg.wait_ms > 0:
+            page.wait_for_timeout(cfg.wait_ms)
+
+        # Trigger lazy loaded assets
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+            page.wait_for_timeout(300)
+            page.evaluate("window.scrollTo(0, 0);")
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+
+        page.evaluate(_PREPARE_PAGE_JS)
         page.screenshot(path=str(output_path), full_page=cfg.full_page)
 
         context.close()

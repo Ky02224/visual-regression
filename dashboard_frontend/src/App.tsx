@@ -6,7 +6,6 @@ import { Actions } from './pages/Actions';
 import { Baselines } from './pages/Baselines';
 import { Summaries } from './pages/Summaries';
 import { ReportAnalysis } from './pages/ReportAnalysis';
-import { Projects } from './pages/Projects';
 import { Integrations } from './pages/Integrations';
 import { SuiteResults } from './pages/SuiteResults';
 import { Login } from './pages/Login';
@@ -35,7 +34,6 @@ export default function App() {
               <Route path="/summaries" element={<Summaries />} />
               <Route path="/integrations" element={<Integrations />} />
               <Route path="/report/:id" element={<ReportAnalysis />} />
-              <Route path="/projects" element={<Projects />} />
               <Route path="/suite/:suiteName" element={<SuiteResults />} />
               <Route path="/users" element={<UserManagement />} />
             </Route>

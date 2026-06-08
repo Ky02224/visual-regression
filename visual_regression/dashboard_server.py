@@ -5,11 +5,58 @@ import mimetypes
 import subprocess
 import sys
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import parse_qs, quote_plus, urlparse
+
+_task_executor = ThreadPoolExecutor(max_workers=4)
+_tasks_status: Dict[str, Dict[str, Any]] = {}
+
+import threading
+
+_ai_review_queue_lock = threading.Lock()
+_ai_review_queue_count = 0
+_ai_training_in_progress = False
+_last_ai_train_time = 0.0
+
+def _run_background_ai_training(paths: WorkspacePaths):
+    global _ai_training_in_progress, _last_ai_train_time
+    try:
+        from .ai_training import train_model
+        print("[AI Trainer] Starting background automatic training loop...", flush=True)
+        model_path = paths.models_dir / "visual_ai.pt"
+        train_model(
+            paths=paths,
+            model_path=model_path,
+            epochs=5,
+            batch_size=16,
+            samples_per_image=4,
+            pretrained_backbone=True
+        )
+        print("[AI Trainer] Background training successfully completed! Model weights updated.", flush=True)
+    except Exception as e:
+        print(f"[AI Trainer Error] Background training failed: {e}", flush=True)
+    finally:
+        with _ai_review_queue_lock:
+            _ai_training_in_progress = False
+            _last_ai_train_time = time.time()
+
+def queue_ai_training_sample(paths: WorkspacePaths):
+    global _ai_review_queue_count, _ai_training_in_progress, _last_ai_train_time
+    with _ai_review_queue_lock:
+        _ai_review_queue_count += 1
+        curr_time = time.time()
+        # Trigger when we have at least 5 new reviews, training is not running,
+        # and at least 30 seconds have passed since the last training run.
+        if _ai_review_queue_count >= 5 and not _ai_training_in_progress and (curr_time - _last_ai_train_time) > 30:
+            _ai_review_queue_count = 0
+            _ai_training_in_progress = True
+            threading.Thread(target=_run_background_ai_training, args=(paths,), daemon=True).start()
+
 
 from .config import WorkspacePaths
 from .baseline_manager import BaselineManager
@@ -87,6 +134,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             relative = parsed.removeprefix("/baseline/")
             return self._safe_path(self.paths.baselines_dir, relative)
             
+        # Demo portal pages
+        if parsed.startswith("/demo/"):
+            relative = parsed.removeprefix("/demo/")
+            return str(self.project_root / "demo_portal" / relative)
+
         # Assets (JS/CSS/images from vite)
         if parsed.startswith("/assets/"):
             return self._safe_path(frontend_dir, parsed.lstrip("/"))
@@ -135,6 +187,80 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "stdout": process.stdout,
             "stderr": process.stderr,
         }
+
+    def _run_cli_action_async(self, args: list[str]) -> str:
+        task_id = str(uuid.uuid4())
+        _tasks_status[task_id] = {
+            "status": "pending",
+            "stdout": "",
+            "stderr": "",
+            "returncode": None,
+            "cmd": " ".join(args),
+            "created_at": time.time(),
+        }
+        
+        def job():
+            _tasks_status[task_id]["status"] = "running"
+            try:
+                process = subprocess.run(
+                    [sys.executable, "-m", "visual_regression.cli", *args],
+                    cwd=str(self.project_root),
+                    capture_output=True,
+                    text=True,
+                )
+                _tasks_status[task_id].update({
+                    "status": "completed" if process.returncode == 0 else "failed",
+                    "stdout": process.stdout,
+                    "stderr": process.stderr,
+                    "returncode": process.returncode
+                })
+                self._invalidate_dashboard_cache()
+            except Exception as e:
+                _tasks_status[task_id].update({
+                    "status": "failed",
+                    "stderr": str(e),
+                    "returncode": -1
+                })
+                
+        _task_executor.submit(job)
+        return task_id
+
+    def _parse_multipart(self) -> Dict[str, Any]:
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/form-data"):
+            return {}
+        
+        from email.parser import BytesParser
+        from email.policy import default
+        
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        
+        headers_str = f"Content-Type: {content_type}\r\nContent-Length: {length}\r\n\r\n"
+        msg = BytesParser(policy=default).parsebytes(headers_str.encode("utf-8") + body)
+        
+        parts = {}
+        if msg.is_multipart():
+            for part in msg.get_payload():
+                disp = part.get("Content-Disposition", "")
+                import re
+                name_match = re.search(r'name="([^"]+)"', disp)
+                if not name_match:
+                    continue
+                name = name_match.group(1)
+                
+                filename_match = re.search(r'filename="([^"]+)"', disp)
+                if filename_match:
+                    filename = filename_match.group(1)
+                    parts[name] = {
+                        "filename": filename,
+                        "content": part.get_payload(decode=True),
+                        "content_type": part.get_content_type()
+                    }
+                else:
+                    payload = part.get_payload(decode=True)
+                    parts[name] = payload.decode("utf-8") if payload else ""
+        return parts
 
     def _send_error_json(self, message: str, status: int = 400, **extra: Any) -> None:
         payload = {"ok": False, "error": message}
@@ -202,12 +328,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/tasks/status":
+                query = parse_qs(parsed.query)
+                task_id = query.get("id", [None])[0]
+                if not task_id:
+                    return self._send_error_json("Missing task id", status=400)
+                status = _tasks_status.get(task_id)
+                if not status:
+                    return self._send_error_json("Task not found", status=404)
+                return self._send_json({"ok": True, "task": status})
+
             if parsed.path == "/api/auth/me":
                 user = self._session_user()
                 if not user:
                     return self._send_json({"ok": True, "authenticated": False, "user": None})
                 return self._send_json(
-                    {"ok": True, "authenticated": True, "user": {"email": user.email, "role": user.role}}
+                    {"ok": True, "authenticated": True, "user": {"email": user.email, "role": user.role, "name": user.display_name}}
                 )
             if parsed.path == "/api/integrations/github/status":
                 manager = IntegrationsManager(self.paths.root)
@@ -281,6 +417,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 run_dir = manager.resolve_run_dir(run)
                 payload = manager.load_run_payload(run_dir)
                 payload["report_href"] = f"/artifacts/{run_dir.name}/report.html"
+                from .dashboard_data import _normalize_review_status, _sanitize_ai_label
+
+                result = payload.get("result") or {}
+                decision = payload.get("decision") or payload.get("review") or {}
+                payload["review_status"] = _normalize_review_status(
+                    payload.get("status"),
+                    decision.get("status"),
+                    mismatch_pct=result.get("mismatch_pct"),
+                    threshold_pct=payload.get("threshold_pct"),
+                )
+                ai_assessment = dict(payload.get("ai_assessment") or {})
+                ai_assessment["label"] = _sanitize_ai_label(ai_assessment.get("label"))
+                payload["ai_assessment"] = ai_assessment
                 return self._send_json(payload)
 
             if parsed.path == "/api/baseline":
@@ -308,6 +457,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "github_configured": settings["configured"],
                 })
 
+            if parsed.path == "/api/audit":
+                user = self._session_user()
+                if not user or user.role not in {"admin", "developer"}:
+                    return self._send_auth_required()
+                limit = int(parse_qs(parsed.query).get("limit", ["200"])[0])
+                logs = self.store.get_audit_logs(limit=limit)
+                return self._send_json({"logs": logs})
+
             if parsed.path == "/api/integrations/activity":
                 manager = IntegrationsManager(self.paths.root)
                 config = manager.get_config()
@@ -333,6 +490,209 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            if self.path == "/api/runs/upload":
+                if not self._is_authorized() and not self._session_user():
+                    return self._send_forbidden()
+                
+                parts = self._parse_multipart()
+                name = parts.get("name")
+                current_image_part = parts.get("current_image")
+                
+                if not name or not current_image_part:
+                    return self._send_error_json("Missing 'name' or 'current_image'", status=400)
+                
+                manager = BaselineManager(self.paths)
+                if not manager.exists(name):
+                    return self._send_error_json(f"Baseline '{name}' does not exist", status=404)
+                
+                image_bytes = current_image_part["content"]
+                
+                from .cli import _copy_baseline_into_run, _slug_part, now_stamp_precise, summarize_severity, build_ai_explanation, resolve_ai_model_path, build_capture_metadata, _initial_decision_status
+                from .image_compare import compare_images, parse_ignore_regions
+                from .decision import decide_pass_fail
+                from .reporter import generate_html_report, save_image, write_json
+                from .ai_training import assess_result
+                
+                now_str = now_stamp_precise()
+                browser_part = _slug_part(parts.get("browser"), "upload-client")
+                device_part = _slug_part(parts.get("device"), "desktop")
+                locale_part = _slug_part(parts.get("locale"), "default")
+                run_name = f"{now_str}_{BaselineManager.normalize_name(name)}_{browser_part}_{device_part}_{locale_part}"
+                
+                run_dir = self.paths.runs_dir / run_name
+                run_dir.mkdir(parents=True, exist_ok=True)
+                
+                current_path = run_dir / "current.png"
+                current_path.write_bytes(image_bytes)
+                
+                baseline_image_path = manager.baseline_image_path(name)
+                
+                try:
+                    threshold_pct = float(parts.get("threshold_pct", 0.1))
+                except ValueError:
+                    threshold_pct = 0.1
+                try:
+                    pixel_threshold = int(parts.get("pixel_threshold", 10))
+                except ValueError:
+                    pixel_threshold = 10
+                try:
+                    min_region_area = int(parts.get("min_region_area", 20))
+                except ValueError:
+                    min_region_area = 20
+                comparison_mode = parts.get("comparison_mode", "ai")
+                no_ai = parts.get("no_ai") == "true"
+                ignore_regions_raw = parts.get("ignore_region", "")
+                ignore_regions_list = [r.strip() for r in ignore_regions_raw.split(";") if r.strip()] if ignore_regions_raw else []
+                ignore_regions = parse_ignore_regions(ignore_regions_list)
+                if not ignore_regions:
+                    try:
+                        meta = manager.load_metadata(name)
+                        saved_regions = meta.get("ignore_regions", [])
+                        for r in saved_regions:
+                            if isinstance(r, dict):
+                                ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
+                            elif isinstance(r, (list, tuple)) and len(r) == 4:
+                                ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
+                    except Exception:
+                        pass
+                
+                result, diff_overlay, binary_diff = compare_images(
+                    baseline_path=baseline_image_path,
+                    current_path=current_path,
+                    pixel_threshold=pixel_threshold,
+                    min_region_area=min_region_area,
+                    ignore_regions=ignore_regions,
+                )
+                
+                baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
+                diff_overlay_path = run_dir / "diff_overlay.png"
+                binary_diff_path = run_dir / "binary_diff.png"
+                report_path = run_dir / "report.html"
+                json_path = run_dir / "result.json"
+                
+                save_image(diff_overlay_path, diff_overlay)
+                save_image(binary_diff_path, binary_diff)
+                
+                ai_model_path = resolve_ai_model_path(self.paths, None, no_ai)
+                ai_assessment = {}
+                ai_model_available = bool(ai_model_path and ai_model_path.exists())
+                if ai_model_available:
+                    ai_assessment = assess_result(
+                        result=result,
+                        model_path=ai_model_path,
+                        baseline_image_path=baseline_image_path,
+                        current_image_path=current_path,
+                    ).to_dict()
+                
+                passed, comparison_decision = decide_pass_fail(
+                    comparison_mode=comparison_mode,
+                    mismatch_pct=result.mismatch_pct,
+                    threshold_pct=threshold_pct,
+                    ai_assessment=ai_assessment,
+                    ai_model_available=ai_model_available,
+                )
+                
+                decision = _initial_decision_status(passed)
+                severity = summarize_severity(
+                    result.mismatch_pct,
+                    len(result.regions),
+                    ai_assessment.get("score"),
+                    ai_assessment.get("label"),
+                )
+                ai_explanation = build_ai_explanation(result, ai_assessment)
+                
+                from .config import CaptureConfig
+                mock_cfg = CaptureConfig(
+                    name=name,
+                    url="http://upload-api-url",
+                    browser=parts.get("browser", "upload-client"),
+                    device=parts.get("device", "desktop"),
+                    viewport=(1440, 900),
+                    wait_ms=0,
+                    wait_until="",
+                    navigation_timeout_ms=30000,
+                    full_page=True,
+                    disable_animations=True,
+                    locale=parts.get("locale", "default"),
+                    timezone_id="UTC",
+                    color_scheme="light",
+                    extra_headers={},
+                    hide_selectors=[],
+                    wait_for_selector=None,
+                )
+                
+                output_payload = {
+                    "case_name": name,
+                    "baseline_name": name,
+                    "suite_name": None,
+                    "status": "PASS" if passed else "FAIL",
+                    "threshold_pct": threshold_pct,
+                    "comparison_decision": comparison_decision,
+                    "ignore_regions": [list(item) for item in ignore_regions],
+                    "capture": build_capture_metadata(mock_cfg),
+                    "result": result.to_dict(),
+                    "decision": decision,
+                    "ai_assessment": ai_assessment,
+                    "ai_explanation": ai_explanation,
+                    "severity": severity,
+                    "artifacts": {
+                        "baseline": str(baseline_for_report),
+                        "current": str(current_path),
+                        "diff_overlay": str(diff_overlay_path),
+                        "binary_diff": str(binary_diff_path),
+                        "report": str(report_path),
+                    },
+                }
+                write_json(json_path, output_payload)
+                
+                generate_html_report(
+                    report_path=report_path,
+                    test_name=name,
+                    baseline_image=Path("baseline.png"),
+                    current_image=Path("current.png"),
+                    diff_image=Path("diff_overlay.png"),
+                    binary_image=Path("binary_diff.png"),
+                    result=result,
+                    threshold_pct=threshold_pct,
+                    ignore_regions=ignore_regions,
+                    capture=build_capture_metadata(mock_cfg),
+                    review=decision,
+                    decision_history=[decision],
+                    ai_assessment=ai_assessment,
+                    ai_explanation=ai_explanation,
+                    severity=severity,
+                    status=output_payload["status"],
+                )
+                
+                sha = parts.get("sha")
+                if sha:
+                    integrations_manager = IntegrationsManager(self.paths.root)
+                    github_config = integrations_manager.get_config().get("github", {})
+                    if github_config.get("connected"):
+                        repo_url = self._github_repo_url()
+                        if repo_url:
+                            target_url = f"{self._dashboard_base_url()}/runs"
+                            state_map = "success" if passed else "failure"
+                            desc_msg = f"Visual check: {output_payload['status']}. Mismatch: {result.mismatch_pct:.2f}%"
+                            integrations_manager.post_github_commit_status(
+                                repo_url=repo_url,
+                                sha=sha,
+                                state=state_map,
+                                target_url=target_url,
+                                description=desc_msg
+                            )
+                
+                self._invalidate_dashboard_cache()
+                return self._send_json({
+                    "ok": True, 
+                    "passed": passed, 
+                    "run_id": run_name, 
+                    "mismatch_pct": result.mismatch_pct, 
+                    "ai_label": ai_assessment.get("label"),
+                    "severity": severity.get("label"),
+                    "report_href": f"/artifacts/{run_name}/report.html"
+                })
+
             if self.path == "/api/auth/login":
                 payload = self._read_json()
                 email = str(payload.get("email", "")).strip()
@@ -396,7 +756,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     decider=decider,
                     comment=str(payload.get("comment", "")),
                 )
+                actor = self._session_user()
+                self.store.audit(
+                    actor.email if actor else decider,
+                    actor.role if actor else None,
+                    f"decision.{decision_value}",
+                    {"run": run_ref, "decider": decider, "comment": str(payload.get("comment", ""))},
+                )
                 self._invalidate_dashboard_cache()
+                queue_ai_training_sample(self.paths)
                 return self._send_json({"ok": True, "decision": decision})
 
             if self.path == "/api/run/delete":
@@ -442,6 +810,38 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True, **result})
+
+            if self.path == "/api/ignore-regions":
+                if not self._is_authorized() and not self._require_role({"admin", "viewer"}):
+                    return self._send_forbidden()
+                payload = self._read_json()
+                name = str(payload.get("name", "")).strip()
+                ignore_regions = payload.get("ignore_regions", [])
+                if not name:
+                    return self._send_error_json("Missing baseline name", status=400)
+                manager = BaselineManager(self.paths)
+                try:
+                    manager.save_ignore_regions(name, ignore_regions)
+                    self._invalidate_dashboard_cache()
+                    return self._send_json({"ok": True, "ignore_regions": ignore_regions})
+                except Exception as e:
+                    return self._send_error_json(str(e), status=500)
+
+            if self.path == "/api/ignore-css-selectors":
+                if not self._is_authorized() and not self._require_role({"admin", "viewer"}):
+                    return self._send_forbidden()
+                payload = self._read_json()
+                name = str(payload.get("name", "")).strip()
+                ignore_css_selectors = payload.get("ignore_css_selectors", [])
+                if not name:
+                    return self._send_error_json("Missing baseline name", status=400)
+                manager = BaselineManager(self.paths)
+                try:
+                    manager.save_ignore_css_selectors(name, ignore_css_selectors)
+                    self._invalidate_dashboard_cache()
+                    return self._send_json({"ok": True, "ignore_css_selectors": ignore_css_selectors})
+                except Exception as e:
+                    return self._send_error_json(str(e), status=500)
 
             if self.path == "/api/actions/create-demo-baselines":
                 # These are demo actions, but we still check for the base 'technician' or 'admin' access
@@ -596,6 +996,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                                 "threshold_pct": "--threshold-pct",
                                 "pixel_threshold": "--pixel-threshold",
                                 "min_region_area": "--min-region-area",
+                                "comparison_mode": "--comparison-mode",
                             },
                         )
                     )
@@ -634,6 +1035,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                             "threshold_pct": "--threshold-pct",
                             "pixel_threshold": "--pixel-threshold",
                             "min_region_area": "--min-region-area",
+                            "comparison_mode": "--comparison-mode",
                         },
                     )
                 )
@@ -726,10 +1128,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 email = str(payload.get("email", "")).strip()
                 password = str(payload.get("password", "")).strip()
                 role = str(payload.get("role", "viewer")).strip()
+                name = str(payload.get("name", "")).strip()
                 if not email or not password:
                     return self._send_error_json("Email and password are required", status=400)
                 try:
-                    self.store.create_user(email, password, role=role)
+                    self.store.create_user(email, password, role=role, display_name=name)
                 except ValueError as exc:
                     return self._send_error_json(str(exc), status=400)
                 except Exception:
@@ -756,6 +1159,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 actor = self._session_user()
                 if actor and actor.email == email.lower():
                     return self._send_error_json("Cannot delete your own account", status=400)
+                all_users = self.store.list_users()
+                target = next((u for u in all_users if u.get("email", "").lower() == email.lower()), None)
+                if target and target.get("role") == "admin":
+                    admin_count = sum(1 for u in all_users if u.get("role") == "admin")
+                    if admin_count <= 1:
+                        return self._send_error_json("Cannot delete the last admin account", status=400)
                 self.store.delete_user(email)
                 self.store.audit(
                     actor.email if actor else None,
@@ -778,16 +1187,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 role = payload.get("role")
                 disabled = payload.get("disabled")
                 password = payload.get("password")
+                display_name = payload.get("display_name")
                 if role is not None:
                     role = str(role).strip()
                 if password is not None:
                     password = str(password).strip() or None
+                if display_name is not None:
+                    display_name = str(display_name).strip()
                 try:
                     self.store.update_user(
                         email,
                         role=role if role else None,
                         disabled=bool(disabled) if disabled is not None else None,
                         password=password,
+                        display_name=display_name,
                     )
                 except ValueError as exc:
                     return self._send_error_json(str(exc), status=400)
@@ -820,6 +1233,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: int) -> None:
     store = SqliteStore(paths.db_path)
     store.ensure_bootstrap_users()
+    
+    # Pre-warm AI model asynchronously in background to avoid cold-start delays
+    def warmup():
+        try:
+            from .ai_training import _load_legacy_or_hybrid_model
+            model_path = paths.models_dir / "visual_ai.pt"
+            if model_path.exists():
+                print("[AI Warmup] Pre-loading visual AI model in background...", flush=True)
+                _load_legacy_or_hybrid_model(model_path)
+                print("[AI Warmup] Visual AI model pre-loaded successfully!", flush=True)
+        except Exception as e:
+            print(f"[AI Warmup Warning] Failed to pre-load model: {e}", flush=True)
+            
+    import threading
+    threading.Thread(target=warmup, daemon=True).start()
     
     handler = partial(DashboardHandler, project_root=project_root, paths=paths, port=port)
     server = ThreadingHTTPServer((host, port), handler)

@@ -9,7 +9,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _utc_epoch() -> int:
@@ -40,6 +40,7 @@ def verify_password(password: str, salt_hex: str, digest_hex: str) -> bool:
 class AuthUser:
     email: str
     role: str
+    display_name: str = ""
 
 
 class SqliteStore:
@@ -82,6 +83,10 @@ class SqliteStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);")
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';")
+            except Exception:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -265,7 +270,7 @@ class SqliteStore:
                 )
         self.audit(None, None, "bootstrap.users", {"admin": admin_email, "user": dev_email})
 
-    def create_user(self, email: str, password: str, role: str) -> None:
+    def create_user(self, email: str, password: str, role: str, display_name: str = "") -> None:
         email = email.strip().lower()
         if role not in {"admin", "developer", "viewer"}:
             raise ValueError("Invalid role")
@@ -273,15 +278,15 @@ class SqliteStore:
         now = _utc_epoch()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO users(email, role, password_salt, password_hash, disabled, created_at) VALUES(?,?,?,?,0,?);",
-                (email, role, salt_hex, digest_hex, now),
+                "INSERT INTO users(email, role, password_salt, password_hash, disabled, created_at, display_name) VALUES(?,?,?,?,0,?,?);",
+                (email, role, salt_hex, digest_hex, now, display_name.strip()),
             )
 
     def authenticate(self, email: str, password: str) -> Optional[AuthUser]:
         email = email.strip().lower()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT email, role, password_salt, password_hash, disabled FROM users WHERE email=?;",
+                "SELECT email, role, password_salt, password_hash, disabled, display_name FROM users WHERE email=?;",
                 (email,),
             ).fetchone()
         if not row:
@@ -290,7 +295,7 @@ class SqliteStore:
             return None
         if not verify_password(password, str(row["password_salt"]), str(row["password_hash"])):
             return None
-        return AuthUser(email=str(row["email"]), role=str(row["role"]))
+        return AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
 
     def create_session(self, email: str, ttl_seconds: int = 60 * 60 * 12) -> str:
         email = email.strip().lower()
@@ -324,7 +329,7 @@ class SqliteStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT u.email AS email, u.role AS role, s.expires_at AS expires_at
+                SELECT u.email AS email, u.role AS role, u.display_name AS display_name, s.expires_at AS expires_at
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token = ?;
@@ -336,12 +341,12 @@ class SqliteStore:
             if int(row["expires_at"]) < now:
                 conn.execute("DELETE FROM sessions WHERE token=?;", (token,))
                 return None
-            return AuthUser(email=str(row["email"]), role=str(row["role"]))
+            return AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
 
     def list_users(self) -> list:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, email, role, disabled, created_at FROM users ORDER BY created_at ASC;"
+                "SELECT id, email, role, disabled, created_at, display_name FROM users ORDER BY created_at ASC;"
             ).fetchall()
         return [
             {
@@ -350,6 +355,7 @@ class SqliteStore:
                 "role": str(row["role"]),
                 "disabled": bool(int(row["disabled"] or 0)),
                 "created_at": int(row["created_at"]),
+                "display_name": str(row["display_name"] or ""),
             }
             for row in rows
         ]
@@ -366,10 +372,14 @@ class SqliteStore:
         role: Optional[str] = None,
         disabled: Optional[bool] = None,
         password: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         email = email.strip().lower()
         updates: list = []
         params: list = []
+        if display_name is not None:
+            updates.append("display_name=?")
+            params.append(display_name.strip())
         if role is not None:
             if role not in {"admin", "developer", "viewer"}:
                 raise ValueError("Invalid role")
@@ -400,4 +410,27 @@ class SqliteStore:
                 "INSERT INTO audit_logs(timestamp, actor_email, actor_role, action, detail_json) VALUES(?,?,?,?,?);",
                 (_utc_epoch(), actor_email, actor_role, action, payload),
             )
+
+    def get_audit_logs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, timestamp, actor_email, actor_role, action, detail_json FROM audit_logs ORDER BY timestamp DESC LIMIT ?;",
+                (limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            detail = {}
+            try:
+                detail = json.loads(row[5] or "{}")
+            except Exception:
+                pass
+            result.append({
+                "id": row[0],
+                "timestamp": row[1],
+                "actor_email": row[2],
+                "actor_role": row[3],
+                "action": row[4],
+                "detail": detail,
+            })
+        return result
 

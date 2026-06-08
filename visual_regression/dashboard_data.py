@@ -39,6 +39,47 @@ class _DashboardCache:
         cls._cache_time = 0.0
 
 
+def _sanitize_ai_label(label: str | None) -> str | None:
+    """Drop deprecated / empty labels so UI shows no ChangeTypeBadge."""
+    if not label:
+        return None
+    normalized = str(label).strip().lower().replace("_", "-")
+    if normalized in {"insignificant-change", "meaningful-change", "no-defect", "none"}:
+        return None
+    return str(label).strip()
+
+
+def _normalize_review_status(
+    raw_status: str | None,
+    decision_status: str | None,
+    mismatch_pct: float | None = None,
+    threshold_pct: float | None = None,
+) -> str:
+    """Percy-style review state: no_changes | unreviewed | approved | rejected."""
+    decision = str(decision_status or "pending").strip().lower()
+    if decision == "approved":
+        return "approved"
+    if decision == "rejected":
+        return "rejected"
+    threshold = float(threshold_pct if threshold_pct is not None else 0.5)
+    mismatch = float(mismatch_pct or 0.0)
+    if raw_status == "PASS" or mismatch <= threshold:
+        return "no_changes"
+    return "unreviewed"
+
+
+def _normalize_run_status(raw_status: str | None, decision_status: str | None) -> str:
+    """Legacy status field for suite summaries / CI (maps review state)."""
+    review = _normalize_review_status(raw_status, decision_status)
+    if review == "no_changes":
+        return "passed"
+    if review == "unreviewed":
+        return "attention"
+    if review == "rejected":
+        return "failed"
+    return "passed"
+
+
 def _latest_suite_summary(paths: WorkspacePaths) -> Dict[str, Any] | None:
     summaries = sorted(paths.reports_dir.glob("suite-summary-*.json"), reverse=True)
     for path in summaries:
@@ -118,15 +159,21 @@ def _load_all_baselines_indexed(paths: WorkspacePaths) -> Dict[str, Dict[str, An
                 )
             
             # Build baseline details entry
+            capture = data.get("capture", {})
             indexed[baseline_name] = {
                 "name": baseline_name,
                 "created_at": data.get("created_at"),
                 "updated_at": data.get("updated_at"),
-                "capture": data.get("capture", {}),
+                "capture": capture,
+                "browser": capture.get("browser"),
+                "device": capture.get("device"),
+                "locale": capture.get("locale"),
+                "url": capture.get("url"),
                 "history": data.get("history", []),
                 "current_image_href": f"/baseline/{baseline_name}/baseline.png",
                 "metadata_href": f"/baseline/{baseline_name}/metadata.json",
                 "versions": versions,
+                "version_count": len(versions),
             }
         except Exception:
             continue
@@ -163,6 +210,15 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
         capture = payload.get("capture", {})
         severity = payload.get("severity", {})
         baseline_name = payload.get("baseline_name") or payload.get("case_name")
+        threshold_pct = payload.get("threshold_pct")
+        mismatch_pct = result.get("mismatch_pct")
+        review_status = _normalize_review_status(
+            payload.get("status"),
+            decision.get("status"),
+            mismatch_pct=mismatch_pct,
+            threshold_pct=threshold_pct,
+        )
+        ai_label = _sanitize_ai_label(ai_assessment.get("label"))
         
         # Look up baseline from pre-loaded index (O(1) lookup, no file I/O)
         baseline_details = baselines_indexed.get(baseline_name) if baseline_name else None
@@ -173,15 +229,17 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
                 "id": run_dir.name,
                 "case_name": payload.get("case_name"),
                 "name": payload.get("case_name"),
-                "status": payload.get("status"),
-                "decision_status": decision.get("status"),
+                "review_status": review_status,
+                "status": _normalize_run_status(payload.get("status"), decision.get("status")),
+                "decision_status": decision.get("status") or "pending",
                 "decider": decision.get("reviewer") or decision.get("decider"),
                 "decision_comment": decision.get("comment"),
                 "decided_at": decision.get("timestamp"),
                 "mismatch_pct": result.get("mismatch_pct"),
                 "mismatch": result.get("mismatch_pct"),
                 "diff_regions": len(result.get("regions", [])),
-                "ai_label": ai_assessment.get("label"),
+                "ai_label": ai_label,
+                "ignore_regions": payload.get("ignore_regions") or [],
                 "ai_score": ai_assessment.get("score"),
                 "ai_explanation": payload.get("ai_explanation"),
                 "severity": severity,
@@ -192,10 +250,29 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
                 "baseline_name": baseline_name,
                 "baseline_image_href": baseline_details.get("current_image_href") if baseline_details else None,
                 "suite_name": payload.get("suite_name"),
+                "build_id": payload.get("build_id"),
                 "report_href": f"/artifacts/{run_dir.name}/report.html",
             }
         )
     return runs
+
+
+def _load_builds(paths: WorkspacePaths) -> List[Dict[str, Any]]:
+    builds: List[Dict[str, Any]] = []
+    if not paths.builds_dir.exists():
+        return builds
+    for build_dir in sorted(paths.builds_dir.iterdir(), key=lambda p: p.name, reverse=True):
+        if not build_dir.is_dir():
+            continue
+        meta_file = build_dir / "build.json"
+        if not meta_file.exists():
+            continue
+        try:
+            payload = json.loads(meta_file.read_text(encoding="utf-8"))
+            builds.append(payload)
+        except Exception:
+            continue
+    return builds
 
 
 def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[str, Any]:
@@ -228,6 +305,7 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     
     # Load runs with pre-indexed baselines (prevents N+1)
     runs = _load_runs(paths, baselines_indexed)
+    builds = _load_builds(paths)
     
     models = _load_model_metadata(paths)
     latest_suite = _latest_suite_summary(paths)
@@ -235,18 +313,22 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     
     # Compute filter values from runs and baselines
     browser_values = {item.get("browser") for item in runs if item.get("browser")}
-    browser_values.update(item.get("browser") for item in baselines if item.get("browser"))
+    browser_values.update(item.get("capture", {}).get("browser") for item in baselines if item.get("capture", {}).get("browser"))
     locale_values = {item.get("locale") for item in runs if item.get("locale")}
-    locale_values.update(item.get("locale") for item in baselines if item.get("locale"))
+    locale_values.update(item.get("capture", {}).get("locale") for item in baselines if item.get("capture", {}).get("locale"))
     device_values = {item.get("device") or "desktop" for item in runs if item.get("browser")}
-    device_values.update(item.get("device") or "desktop" for item in baselines if item.get("browser"))
+    device_values.update(item.get("capture", {}).get("device") or "desktop" for item in baselines if item.get("capture", {}).get("browser"))
 
     metrics = {
         "baseline_count": len(baselines),
         "run_count": len(runs),
-        "failed_runs": sum(1 for item in runs if item.get("status") == "FAIL"),
-        "pending_decisions": sum(1 for item in runs if (item.get("decision_status") or "pending") == "pending"),
-        "approved_decisions": sum(1 for item in runs if item.get("decision_status") == "approved"),
+        "build_count": len(builds),
+        "failed_runs": sum(1 for item in runs if item.get("review_status") == "unreviewed"),
+        "unreviewed_runs": sum(1 for item in runs if item.get("review_status") == "unreviewed"),
+        "rejected_runs": sum(1 for item in runs if item.get("review_status") == "rejected"),
+        "no_changes_runs": sum(1 for item in runs if item.get("review_status") == "no_changes"),
+        "pending_decisions": sum(1 for item in runs if item.get("review_status") == "unreviewed"),
+        "approved_decisions": sum(1 for item in runs if item.get("review_status") == "approved"),
         "model_count": len(models),
         "browser_coverage": len(browser_values),
         "device_coverage": len(device_values),
@@ -259,6 +341,7 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
         **metrics,
         "baselines": baselines,
         "runs": runs,
+        "builds": builds,
         "models": models,
         "latest_suite": latest_suite,
         "recent_summaries": recent_summaries,

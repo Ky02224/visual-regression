@@ -1,9 +1,9 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Layers, Lock, Mail, ArrowRight } from 'lucide-react';
-import { motion } from 'motion/react';
-import { cn } from '../lib/utils';
+import { Layers } from 'lucide-react';
 import { useRole } from '../context/RoleContext';
+import { Button } from '../components/ui/Button';
+import { Input } from '../components/ui/Input';
 
 export function Login() {
   const [email, setEmail] = React.useState('');
@@ -23,90 +23,28 @@ export function Login() {
     setError(null);
     const result = await login(email, password);
     setSubmitting(false);
-    if (!result.ok) {
-      setError(result.error || 'Login failed');
-      return;
-    }
+    if (!result.ok) { setError(result.error || 'Login failed'); return; }
     navigate('/', { replace: true });
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 font-sans antialiased selection:bg-primary/20">
-      {/* Ambient Background Effects */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-400/5 rounded-full blur-[120px]" />
+    <div className="min-h-screen flex items-center justify-center p-6 bg-gradient-to-b from-stone-50 to-stone-100 dark:from-zinc-900 dark:to-zinc-950">
+      <div className="w-full max-w-md panel p-8 shadow-sm">
+        <div className="flex flex-col items-center text-center mb-8">
+          <div className="w-11 h-11 rounded-md bg-indigo-600 flex items-center justify-center text-white mb-4"><Layers className="w-6 h-6" /></div>
+          <h1 className="text-xl font-semibold text-[var(--on-surface)]">The Lens</h1>
+          <p className="text-sm text-[var(--on-surface-variant)] mt-1">Catch visual changes before deploy</p>
+        </div>
+        <h2 className="text-lg font-semibold mb-1">Sign in</h2>
+        <p className="text-sm text-[var(--on-surface-variant)] mb-6">Enter your credentials to continue</p>
+        <form className="space-y-4" onSubmit={onSubmit}>
+          <Input label="Username" type="text" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin" autoComplete="username" />
+          <Input label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" />
+          {error && <div className="rounded-md border border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-900 px-3 py-2 text-sm text-red-700 dark:text-red-400">{error}</div>}
+          <Button type="submit" variant="primary" size="lg" className="w-full" disabled={submitting}>{submitting ? 'Signing in…' : 'Sign in'}</Button>
+        </form>
+        <p className="text-center mt-6 text-xs text-[var(--on-surface-variant)]">Need access? Contact your administrator.</p>
       </div>
-
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-md"
-      >
-        <div className="text-center mb-10">
-          <div className="w-16 h-16 bg-white rounded-2xl shadow-xl flex items-center justify-center mx-auto mb-6 ghost-border">
-            <div className="w-10 h-10 rounded-lg signature-gradient flex items-center justify-center text-white">
-              <Layers className="w-6 h-6" />
-            </div>
-          </div>
-          <h1 className="text-3xl font-bold tracking-tight text-blue-900 mb-2">The Analytical Lens</h1>
-          <p className="text-on-surface-variant font-medium">Precision Visual Regression Laboratory</p>
-        </div>
-
-        <div className="bg-white rounded-3xl p-10 shadow-2xl shadow-primary/5 ghost-border relative overflow-hidden">
-          <form className="space-y-6" onSubmit={onSubmit}>
-            <div className="space-y-2">
-              <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant px-1">Username</label>
-              <div className="relative">
-                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-variant" />
-                <input 
-                  type="text" 
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="admin"
-                  className="w-full bg-slate-50 border border-slate-100 rounded-xl py-3.5 pl-12 pr-4 text-sm focus:bg-white focus:ring-2 focus:ring-primary/10 outline-none transition-all"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex justify-between px-1">
-                <label className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Password</label>
-              </div>
-              <div className="relative">
-                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-variant" />
-                <input 
-                  type="password" 
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••••••"
-                  className="w-full bg-slate-50 border border-slate-100 rounded-xl py-3.5 pl-12 pr-4 text-sm focus:bg-white focus:ring-2 focus:ring-primary/10 outline-none transition-all"
-                />
-              </div>
-            </div>
-
-            {error && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full py-4 signature-gradient text-white rounded-xl font-bold shadow-xl shadow-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 group disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {submitting ? 'Signing in...' : 'Initialize Session'}
-              <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-            </button>
-
-          </form>
-        </div>
-
-        <p className="text-center mt-8 text-sm text-on-surface-variant">
-          Don't have an account? <span className="font-semibold text-on-surface">Contact your administrator</span> to create one.
-        </p>
-      </motion.div>
     </div>
   );
 }

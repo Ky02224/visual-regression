@@ -63,10 +63,10 @@ function NoticeBanner({ notice }: { notice: Notice | null }) {
   return (
     <div
       className={cn(
-        'rounded-2xl border px-4 py-3 text-sm font-medium',
-        notice.tone === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-700',
-        notice.tone === 'error' && 'border-rose-200 bg-rose-50 text-rose-700',
-        notice.tone === 'info' && 'border-blue-200 bg-blue-50 text-blue-700',
+        'rounded-md border px-4 py-3 text-sm font-medium',
+        notice.tone === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800/40 dark:bg-emerald-950/30 dark:text-emerald-300',
+        notice.tone === 'error' && 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/40 dark:bg-rose-950/30 dark:text-rose-300',
+        notice.tone === 'info' && 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800/40 dark:bg-blue-950/30 dark:text-blue-300',
       )}
     >
       {notice.message}
@@ -117,22 +117,30 @@ export function Integrations() {
   }, [searchParams, setSearchParams]);
 
   return (
-    <div className="min-h-screen p-8 corporate-grid">
+    <div className="min-h-screen p-8">
       <div className="mx-auto max-w-6xl space-y-10">
         <header className="space-y-3 border-b border-slate-200 pb-8 dark:border-slate-800">
-          <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+          <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold font-medium text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
             <Link2 className="h-3.5 w-3.5" />
             Integrations
           </div>
           <div>
-            <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">CI/CD Integrations</h2>
-            <p className="mt-2 max-w-3xl text-sm font-medium text-slate-500 dark:text-slate-400">
+            <h2 className="text-3xl font-bold text-[var(--on-surface)]">CI/CD Integrations</h2>
+            <p className="mt-2 max-w-3xl text-sm font-medium text-[var(--on-surface-variant)]">
               Connect your dashboard to GitHub and webhook-based alerts so failed visual regressions can flow into a real release workflow.
             </p>
           </div>
         </header>
 
         <NoticeBanner notice={pageNotice} />
+
+        <div className="rounded-md border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+          <h3 className="text-sm font-semibold text-[var(--on-surface)]">Ignore regions (dynamic UI)</h3>
+          <p className="mt-2 text-sm text-[var(--on-surface-variant)] leading-relaxed">
+            For ads, clocks, or other moving pixels, add <code className="rounded bg-slate-100 px-1 text-xs dark:bg-slate-800">ignore_regions: [[x, y, width, height], …]</code> to each case in your suite YAML.
+            Those rectangles are masked before compare (same workflow as Percy ignore regions). Re-run the suite after editing — no approve/reject needed.
+          </p>
+        </div>
 
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
           <GitHubConnectionModule />
@@ -157,6 +165,7 @@ function GitHubConnectionModule() {
   const [loading, setLoading] = React.useState(true);
   const [connecting, setConnecting] = React.useState(false);
   const [disconnecting, setDisconnecting] = React.useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = React.useState(false);
 
   const loadStatus = React.useCallback(async () => {
     setLoading(true);
@@ -199,7 +208,7 @@ function GitHubConnectionModule() {
   };
 
   const handleDisconnect = async () => {
-    if (!window.confirm('Disconnect GitHub from this dashboard?')) return;
+    setConfirmDisconnect(false);
     setDisconnecting(true);
     setNotice(null);
     try {
@@ -225,20 +234,20 @@ function GitHubConnectionModule() {
   };
 
   return (
-    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section className="rounded-md border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
             <Github className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">GitHub OAuth</h3>
-            <p className="text-xs font-medium text-slate-400">Connect a GitHub account so this dashboard can identify the linked engineering workflow.</p>
+            <h3 className="text-lg font-bold text-[var(--on-surface)]">GitHub OAuth</h3>
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">Connect a GitHub account so this dashboard can identify the linked engineering workflow.</p>
           </div>
         </div>
         <div
           className={cn(
-            'rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]',
+            'rounded-full px-3 py-1 text-[11px] font-semibold font-medium',
             status?.connected
               ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
               : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300'
@@ -250,16 +259,16 @@ function GitHubConnectionModule() {
 
       <NoticeBanner notice={notice} />
 
-      <div className="mt-5 rounded-3xl border border-slate-100 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-950">
+      <div className="mt-5 rounded-md border border-slate-100 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-950">
         {loading ? (
-          <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Loading GitHub connection...</p>
+          <p className="text-sm font-medium text-[var(--on-surface-variant)]">Loading GitHub connection...</p>
         ) : !status?.configured ? (
           <div className="space-y-3">
             <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">GitHub OAuth is not configured on the dashboard server yet.</p>
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">
               Set <code className="font-mono">GITHUB_OAUTH_CLIENT_ID</code> and <code className="font-mono">GITHUB_OAUTH_CLIENT_SECRET</code> before using this feature.
             </p>
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">
               Redirect URI: <code className="font-mono">{status?.redirect_uri || 'http://127.0.0.1:8130/api/integrations/github/callback'}</code>
             </p>
           </div>
@@ -267,15 +276,15 @@ function GitHubConnectionModule() {
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-4">
               {status.avatar_url ? (
-                <img src={status.avatar_url} alt={status.login || 'GitHub avatar'} className="h-14 w-14 rounded-2xl object-cover ring-1 ring-slate-200 dark:ring-slate-700" />
+                <img src={status.avatar_url} alt={status.login || 'GitHub avatar'} className="h-14 w-14 rounded-md object-cover ring-1 ring-slate-200 dark:ring-slate-700" />
               ) : (
-                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                <div className="flex h-14 w-14 items-center justify-center rounded-md bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                   <Github className="h-6 w-6" />
                 </div>
               )}
               <div className="space-y-1">
-                <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{status.login || 'Connected account'}</p>
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                <p className="text-sm font-bold text-[var(--on-surface)]">{status.login || 'Connected account'}</p>
+                <p className="text-xs font-medium text-[var(--on-surface-variant)]">
                   {status.connected_at ? `Connected ${new Date(status.connected_at * 1000).toLocaleString()}` : 'Connected'}
                 </p>
                 {status.profile_url && (
@@ -287,14 +296,24 @@ function GitHubConnectionModule() {
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={handleDisconnect}
-              disabled={role !== 'admin' || disconnecting}
-              className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600"
-            >
-              {disconnecting ? 'Disconnecting...' : 'Disconnect'}
-            </button>
+            {confirmDisconnect ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[var(--on-surface-variant)]">Disconnect GitHub?</span>
+                <button type="button" onClick={() => setConfirmDisconnect(false)} className="rounded-xl border border-[var(--outline)] px-3 py-1.5 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition">Cancel</button>
+                <button type="button" onClick={handleDisconnect} disabled={disconnecting} className="rounded-xl bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-700 transition disabled:opacity-50">
+                  {disconnecting ? 'Disconnecting...' : 'Confirm'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmDisconnect(true)}
+                disabled={role !== 'admin' || disconnecting}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold font-medium text-slate-700 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600"
+              >
+                Disconnect
+              </button>
+            )}
           </div>
         ) : (
           <div className="space-y-4">
@@ -302,7 +321,7 @@ function GitHubConnectionModule() {
               Start the GitHub OAuth flow to bind this dashboard to the GitHub identity you use for CI/CD and release review.
             </p>
             {status.repo_url && (
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              <p className="text-xs font-medium text-[var(--on-surface-variant)]">
                 Local repo: <span className="font-mono">{status.repo_url}</span>
               </p>
             )}
@@ -310,7 +329,7 @@ function GitHubConnectionModule() {
               type="button"
               onClick={handleConnect}
               disabled={role !== 'admin' || connecting}
-              className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
+              className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold font-medium text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
             >
               {connecting ? 'Redirecting...' : 'Connect GitHub'}
             </button>
@@ -328,6 +347,7 @@ function ApiTokensModule() {
   const [showKey, setShowKey] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [rotating, setRotating] = React.useState(false);
+  const [confirmRotate, setConfirmRotate] = React.useState(false);
   const [revealing, setRevealing] = React.useState(false);
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const [activityCount, setActivityCount] = React.useState(0);
@@ -381,7 +401,7 @@ function ApiTokensModule() {
   };
 
   const handleRotate = async () => {
-    if (!window.confirm('Rotate the API key now? Existing CI secrets will stop working until you update them.')) return;
+    setConfirmRotate(false);
     setRotating(true);
     setNotice(null);
     try {
@@ -413,29 +433,29 @@ function ApiTokensModule() {
   const currentKey = showKey ? (revealedKey || maskedKey) : maskedKey;
 
   return (
-    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section className="rounded-md border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
             <Key className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">API access token</h3>
-            <p className="text-xs font-medium text-slate-400">Use this secret in GitHub Actions, Jenkins, or any pipeline that needs to call the dashboard.</p>
+            <h3 className="text-lg font-bold text-[var(--on-surface)]">API access token</h3>
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">Use this secret in GitHub Actions, Jenkins, or any pipeline that needs to call the dashboard.</p>
           </div>
         </div>
-        <div className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:border-slate-700 dark:text-slate-300">
+        <div className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold font-medium text-slate-500 dark:border-slate-700 dark:text-slate-300">
           {activityCount} activity entries
         </div>
       </div>
 
       <NoticeBanner notice={notice} />
 
-      <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-950 p-5 dark:border-slate-700">
+      <div className="mt-5 rounded-md border border-slate-200 bg-slate-950 p-5 dark:border-slate-700">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.26em] text-slate-500">Production key</p>
-            <p className="mt-1 text-xs font-medium text-slate-400">Store this in your CI secret manager, not directly in code.</p>
+            <p className="text-[10px] font-bold font-medium text-slate-500">Production key</p>
+            <p className="mt-1 text-xs font-medium text-[var(--on-surface-variant)]">Store this in your CI secret manager, not directly in code.</p>
           </div>
           <div className="flex items-center gap-2">
             <CopyIconButton value={showKey ? revealedKey : ''} label="Copy API key" disabled={!showKey || !revealedKey} />
@@ -450,24 +470,34 @@ function ApiTokensModule() {
             </button>
           </div>
         </div>
-        <code className="block overflow-x-auto rounded-2xl bg-slate-900 px-4 py-4 text-sm text-blue-300">
+        <code className="block overflow-x-auto rounded-md bg-slate-900 px-4 py-4 text-sm text-blue-300">
           {loading ? 'Loading token...' : currentKey}
         </code>
       </div>
 
-      <div className="mt-5 flex items-center justify-between gap-4 rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
+      <div className="mt-5 flex items-center justify-between gap-4 rounded-md border border-slate-100 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
         <div className="flex items-center gap-3 text-sm font-medium text-slate-600 dark:text-slate-300">
           <ShieldCheck className="h-4 w-4 text-emerald-500" />
           Only admin can reveal or rotate the live token.
         </div>
-        <button
-          type="button"
-          onClick={handleRotate}
-          disabled={role !== 'admin' || rotating}
-          className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
-        >
-          {rotating ? 'Rotating...' : 'Rotate key'}
-        </button>
+        {confirmRotate ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[var(--on-surface-variant)]">This will break existing CI secrets.</span>
+            <button type="button" onClick={() => setConfirmRotate(false)} className="rounded-xl border border-[var(--outline)] px-3 py-1.5 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition">Cancel</button>
+            <button type="button" onClick={handleRotate} disabled={rotating} className="rounded-xl bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-700 transition disabled:opacity-50">
+              {rotating ? 'Rotating...' : 'Confirm Rotate'}
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmRotate(true)}
+            disabled={role !== 'admin' || rotating}
+            className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold font-medium text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
+          >
+            Rotate key
+          </button>
+        )}
       </div>
     </section>
   );
@@ -553,19 +583,19 @@ function WebhooksModule() {
   };
 
   return (
-    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section className="rounded-md border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
             <Webhook className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Regression-detected webhook</h3>
-            <p className="text-xs font-medium text-slate-400">Connect one endpoint that should be notified whenever a failed visual regression is detected.</p>
+            <h3 className="text-lg font-bold text-[var(--on-surface)]">Regression-detected webhook</h3>
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">Connect one endpoint that should be notified whenever a failed visual regression is detected.</p>
           </div>
         </div>
         <div className={cn(
-          'rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]',
+          'rounded-full px-3 py-1 text-[11px] font-semibold font-medium',
           connected ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300'
         )}>
           {connected ? 'Connected' : 'Not connected'}
@@ -576,20 +606,20 @@ function WebhooksModule() {
 
       <div className="mt-5 space-y-5">
         <div className="space-y-2">
-          <label className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Webhook URL</label>
+          <label className="text-[11px] font-semibold font-medium text-slate-500">Webhook URL</label>
           <input
             type="url"
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             placeholder="https://hooks.slack.com/services/..."
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-blue-500 dark:focus:ring-blue-950"
+            className="w-full rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-blue-500 dark:focus:ring-blue-950"
           />
         </div>
 
-        <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Event</p>
-          <p className="mt-2 text-sm font-bold text-slate-900 dark:text-slate-100">regression.detected</p>
-          <p className="mt-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+        <div className="rounded-md border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
+          <p className="text-[11px] font-semibold font-medium text-slate-500">Event</p>
+          <p className="mt-2 text-sm font-bold text-[var(--on-surface)]">regression.detected</p>
+          <p className="mt-2 text-xs font-medium text-[var(--on-surface-variant)]">
             The platform sends this event only when a compare result or suite case fails against the approved baseline.
           </p>
         </div>
@@ -600,7 +630,7 @@ function WebhooksModule() {
           type="button"
           onClick={handleSave}
           disabled={role !== 'admin' || saving}
-          className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
+          className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold font-medium text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800"
         >
           {saving ? 'Saving...' : 'Save webhook'}
         </button>
@@ -608,7 +638,7 @@ function WebhooksModule() {
           type="button"
           onClick={handleTest}
           disabled={role !== 'admin' || testing || !url}
-          className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-700 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600"
+          className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold font-medium text-slate-700 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-slate-600"
         >
           {testing ? 'Testing...' : 'Test webhook'}
         </button>
@@ -681,15 +711,15 @@ jobs:
   };
 
   return (
-    <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="flex flex-col justify-between gap-6 border-b border-slate-100 p-8 dark:border-slate-800 md:flex-row md:items-center">
         <div className="flex items-center gap-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
             <Cpu className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Pipeline generator</h3>
-            <p className="text-xs font-medium text-slate-400">Copy a starter config and drop your token into your CI secret store.</p>
+            <h3 className="text-lg font-bold text-[var(--on-surface)]">Pipeline generator</h3>
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">Copy a starter config and drop your token into your CI secret store.</p>
           </div>
         </div>
 
@@ -700,7 +730,7 @@ jobs:
               type="button"
               onClick={() => setActiveTab(tab)}
               className={cn(
-                'rounded-xl px-4 py-2 text-xs font-bold uppercase tracking-[0.18em] transition',
+                'rounded-xl px-4 py-2 text-xs font-bold font-medium transition',
                 activeTab === tab
                   ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
                   : 'border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-white'
@@ -715,10 +745,10 @@ jobs:
       </div>
 
       <div className="space-y-4 p-8">
-        <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-200">
+        <div className="rounded-md border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-200">
           Tip: add your live token as <code className="font-mono">LENS_API_KEY</code> in your CI/CD secret settings instead of hardcoding it into the file.
         </div>
-        <div className="relative rounded-3xl bg-slate-950 p-6">
+        <div className="relative rounded-md bg-slate-950 p-6">
           <button
             type="button"
             onClick={copySnippet}
@@ -754,15 +784,15 @@ function PipelineFeedModule() {
   }, [fetchActivity]);
 
   return (
-    <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <section className="rounded-md border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-8 flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
             <Terminal className="h-5 w-5" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Recent integration activity</h3>
-            <p className="text-xs font-medium text-slate-400">See webhook saves, key rotations, and CI-triggered events in one place.</p>
+            <h3 className="text-lg font-bold text-[var(--on-surface)]">Recent integration activity</h3>
+            <p className="text-xs font-medium text-[var(--on-surface-variant)]">See webhook saves, key rotations, and CI-triggered events in one place.</p>
           </div>
         </div>
         <button
@@ -777,19 +807,19 @@ function PipelineFeedModule() {
 
       <div className="space-y-4">
         {loading && runs.length === 0 && (
-          <div className="rounded-2xl border-2 border-dashed border-slate-200 px-6 py-10 text-center text-xs font-bold uppercase tracking-[0.2em] text-slate-400 dark:border-slate-700 dark:text-slate-500">
+          <div className="rounded-md border-2 border-dashed border-slate-200 px-6 py-10 text-center text-xs font-bold font-medium text-[var(--on-surface-variant)] dark:border-slate-700 dark:text-slate-500">
             Loading integration activity...
           </div>
         )}
 
         {!loading && runs.length === 0 && (
-          <div className="rounded-2xl border-2 border-dashed border-slate-200 px-6 py-10 text-center text-sm font-medium text-slate-500 dark:border-slate-700 dark:text-slate-400">
+          <div className="rounded-md border-2 border-dashed border-slate-200 px-6 py-10 text-center text-sm font-medium text-slate-500 dark:border-slate-700 dark:text-[var(--on-surface-variant)]">
             No integration activity yet. Save a webhook, rotate a key, or run CI/CD once to populate this feed.
           </div>
         )}
 
         {runs.map((run) => (
-          <div key={run.id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-100 p-4 transition hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/70">
+          <div key={run.id} className="flex items-center justify-between gap-4 rounded-md border border-slate-100 p-4 transition hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/70">
             <div className="flex items-center gap-4">
               <div className={cn(
                 'flex h-10 w-10 items-center justify-center rounded-full',
@@ -799,12 +829,12 @@ function PipelineFeedModule() {
               </div>
               <div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{run.message}</span>
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                  <span className="text-sm font-bold text-[var(--on-surface)]">{run.message}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
                     {run.branch}
                   </span>
                 </div>
-                <div className="mt-1 flex items-center gap-3 text-xs font-medium text-slate-400">
+                <div className="mt-1 flex items-center gap-3 text-xs font-medium text-[var(--on-surface-variant)]">
                   <span className="font-mono">#{run.id}</span>
                   <span className="inline-flex items-center gap-1">
                     <Clock className="h-3 w-3" />
