@@ -314,6 +314,39 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             value = payload.get(key)
             if value is None or value == "":
                 continue
+
+            # Normalize browser values (e.g. Chrome -> chromium, Safari -> webkit)
+            if key in {"browser", "browsers"}:
+                if isinstance(value, str):
+                    val_lower = value.strip().lower()
+                    if val_lower == "chrome":
+                        value = "chromium"
+                    elif val_lower == "safari":
+                        value = "webkit"
+                    else:
+                        value = val_lower
+                elif isinstance(value, list):
+                    value = [
+                        "chromium" if str(item).strip().lower() == "chrome"
+                        else "webkit" if str(item).strip().lower() == "safari"
+                        else str(item).strip().lower()
+                        for item in value
+                    ]
+
+            # Normalize device values (e.g. Desktop -> empty string to use default desktop)
+            if key in {"device", "devices"}:
+                if isinstance(value, str):
+                    if value.strip().lower() == "desktop":
+                        value = ""
+                elif isinstance(value, list):
+                    value = [
+                        "" if str(item).strip().lower() == "desktop" else str(item)
+                        for item in value
+                    ]
+
+            if value == "":
+                continue
+
             if isinstance(value, bool):
                 if value:
                     args.append(cli_name)
