@@ -80,10 +80,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: List visual regression files
+        if: always()
+        run: |
+          echo "=== Files in workspace ==="
+          ls -la
+          if [ -d .visual-regression ]; then
+            echo "=== Files in .visual-regression ==="
+            find .visual-regression
+          else
+            echo ".visual-regression directory does not exist!"
+          fi
+
       - name: Upload visual artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: visual-regression-artifacts
-          path: .visual-regression/
+          path: .visual-regression
 
