@@ -77,13 +77,13 @@ export function Actions() {
         <PageHeader title="System actions" description="Capture, sync, and compare visual baselines." />
 
         {/* Tab Navigation */}
-        <div className="flex flex-wrap gap-2 p-1.5 bg-[var(--surface)] border border-[var(--outline)] rounded-md shadow-sm">
+        <div className="flex flex-wrap items-center gap-2 p-1.5 bg-[var(--surface)] border border-[var(--outline)] rounded-md shadow-sm">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as ActionTab)}
               className={cn(
-                "flex items-center gap-2.5 px-6 py-3 rounded-xl text-[10px] font-bold font-medium transition-all duration-300",
+                "flex items-center gap-2.5 px-6 py-3 rounded-xl text-xs font-semibold transition-all duration-300",
                 activeTab === tab.id 
                   ? "bg-primary text-white shadow-lg shadow-primary/20" 
                   : "text-[var(--on-surface-variant)] hover:text-primary hover:bg-slate-50 dark:hover:bg-slate-800"
