@@ -1,6 +1,6 @@
 # Visual Regression Workbench
 
-Website-first visual regression platform for QA, frontend engineers and release owners.
+Website-first visual regression platform for QA, frontend engineers and release owners. (Triggering CI test run)
 
 ## What It Includes
 
