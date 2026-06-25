@@ -23,6 +23,11 @@ jobs:
           python-version: "3.11"
           cache: 'pip'
 
+      - name: Download AI Model from Release
+        run: |
+          mkdir -p .visual-regression/models
+          curl -L "https://github.com/Ky02224/visual-regression/releases/download/v1.0.0/visual_ai.pt" -o .visual-regression/models/visual_ai.pt
+
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@v4
