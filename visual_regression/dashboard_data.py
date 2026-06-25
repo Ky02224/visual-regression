@@ -261,10 +261,20 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
     return runs
 
 
-def _load_builds(paths: WorkspacePaths) -> List[Dict[str, Any]]:
+def _load_builds(paths: WorkspacePaths, runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     builds: List[Dict[str, Any]] = []
     if not paths.builds_dir.exists():
         return builds
+        
+    # Group runs by build_id to optimize counting
+    runs_by_build: Dict[str, List[Dict[str, Any]]] = {}
+    for run in runs:
+        b_id = run.get("build_id")
+        if b_id:
+            if b_id not in runs_by_build:
+                runs_by_build[b_id] = []
+            runs_by_build[b_id].append(run)
+
     for build_dir in sorted(paths.builds_dir.iterdir(), key=lambda p: p.name, reverse=True):
         if not build_dir.is_dir():
             continue
@@ -273,6 +283,20 @@ def _load_builds(paths: WorkspacePaths) -> List[Dict[str, Any]]:
             continue
         try:
             payload = json.loads(meta_file.read_text(encoding="utf-8"))
+            b_id = payload.get("build_id")
+            
+            # Compute counts dynamically from runs if runs exist
+            if b_id and b_id in runs_by_build:
+                b_runs = runs_by_build[b_id]
+                unreviewed_count = sum(1 for r in b_runs if r.get("review_status") == "unreviewed")
+                rejected_count = sum(1 for r in b_runs if r.get("review_status") == "rejected")
+                approved_count = sum(1 for r in b_runs if r.get("review_status") in ("approved", "no_changes"))
+                
+                payload["passed_count"] = approved_count
+                payload["failed_count"] = unreviewed_count + rejected_count
+                payload["total_count"] = len(b_runs)
+                payload["status"] = "passed" if payload["failed_count"] == 0 else "failed"
+                
             builds.append(payload)
         except Exception:
             continue
@@ -309,7 +333,7 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     
     # Load runs with pre-indexed baselines (prevents N+1)
     runs = _load_runs(paths, baselines_indexed)
-    builds = _load_builds(paths)
+    builds = _load_builds(paths, runs)
     
     models = _load_model_metadata(paths)
     latest_suite = _latest_suite_summary(paths)
