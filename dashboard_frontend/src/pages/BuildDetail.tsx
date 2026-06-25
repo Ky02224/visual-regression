@@ -236,14 +236,39 @@ export function BuildDetail() {
           {filteredGroups.map(group => {
             const { host, path } = parseUrl(group.url);
             const isExpanded = expandedUrls.includes(group.url);
+
+            const fc = group.runs.filter(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'rejected').length;
+            const ac = group.runs.filter(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'unreviewed').length;
+            const pc = group.runs.filter(r => {
+              const rs = r.reviewStatus ?? normalizeReviewStatus(r.status);
+              return rs === 'no_changes' || rs === 'approved';
+            }).length;
+
             return (
-              <div key={group.url} className="bg-white dark:bg-slate-900 rounded-md border border-slate-200 dark:border-slate-800 overflow-hidden shadow-sm">
+              <div
+                key={group.url}
+                className={cn(
+                  "bg-white dark:bg-slate-900 rounded-md border overflow-hidden shadow-sm transition-all border-l-[4px]",
+                  fc > 0
+                    ? "border-slate-200 dark:border-slate-800 hover:border-red-200 dark:hover:border-red-900/50 border-l-red-500"
+                    : ac > 0
+                    ? "border-slate-200 dark:border-slate-800 hover:border-orange-200 dark:hover:border-orange-900/50 border-l-orange-500"
+                    : "border-slate-200 dark:border-slate-800 hover:border-green-200 dark:hover:border-green-900/50 border-l-green-500"
+                )}
+              >
                 <button
                   onClick={() => setExpandedUrls(prev => isExpanded ? prev.filter(u => u !== group.url) : [...prev, group.url])}
                   className="w-full px-5 py-4 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 flex-shrink-0">
+                    <div className={cn(
+                      "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
+                      fc > 0
+                        ? "bg-red-50 dark:bg-red-950/30 text-red-500"
+                        : ac > 0
+                        ? "bg-orange-50 dark:bg-orange-950/30 text-orange-500"
+                        : "bg-green-50 dark:bg-green-950/30 text-green-500"
+                    )}>
                       <Globe className="w-4 h-4" />
                     </div>
                     <div className="text-left min-w-0">
@@ -251,8 +276,27 @@ export function BuildDetail() {
                       <span className="text-[11px] text-slate-400 truncate block max-w-[460px] font-mono">{path || '/'}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 ml-4">
-                    <span className="text-[10px] font-bold text-slate-400">{group.runs.length} snapshot{group.runs.length !== 1 ? 's' : ''}</span>
+                  <div className="flex items-center gap-3 flex-shrink-0 ml-4">
+                    <div className="flex items-center gap-1.5">
+                      {fc > 0 && (
+                        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-[9px] font-bold">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                          {fc} failed
+                        </span>
+                      )}
+                      {ac > 0 && (
+                        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 text-[9px] font-bold">
+                          <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                          {ac} changes
+                        </span>
+                      )}
+                      {pc > 0 && (
+                        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 text-[9px] font-bold">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                          {pc} passed
+                        </span>
+                      )}
+                    </div>
                     {isExpanded ? <ChevronDown className="w-4 h-4 text-slate-300" /> : <ChevronRight className="w-4 h-4 text-slate-300" />}
                   </div>
                 </button>
