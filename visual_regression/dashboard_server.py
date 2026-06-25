@@ -499,6 +499,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
+            
+            # Dynamically inject visual defect in CI to test pipeline failure/interception
+            if parsed.path == "/demo/styles.css":
+                import os
+                if os.environ.get("GITHUB_ACTIONS") == "true":
+                    css_path = Path(self.translate_path(self.path))
+                    if css_path.is_file():
+                        content = css_path.read_text(encoding="utf-8")
+                        content = content.replace("--brand: #0f5f8f;", "--brand: #ef4444;")
+                        content_bytes = content.encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/css; charset=utf-8")
+                        self.send_header("Content-Length", str(len(content_bytes)))
+                        self.end_headers()
+                        self.wfile.write(content_bytes)
+                        return
+
             if parsed.path.startswith("/artifacts/") or parsed.path.startswith("/baseline/"):
                 if not self._session_user() and not self._is_authorized():
                     return self._send_forbidden()
