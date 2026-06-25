@@ -1012,9 +1012,12 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
             row["duration_seconds"] = round(time.perf_counter() - case_started, 4)
         return row
 
-    max_workers = 4
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        case_rows = list(executor.map(process_case, cases))
+    if agent_nodes:
+        max_workers = 4
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            case_rows = list(executor.map(process_case, cases))
+    else:
+        case_rows = [process_case(c) for c in cases]
 
     for row in case_rows:
         if row["status"] == "PASS":
