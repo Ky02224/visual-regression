@@ -121,8 +121,6 @@ def build_ai_explanation(result, ai_assessment: Dict[str, Any]) -> str:
         evidence.append(f"{region_count} focused changed regions were found.")
     if largest_area >= 10000:
         evidence.append(f"The largest changed area covers {largest_area} pixels.")
-    if score is not None:
-        evidence.append(f"AI confidence score is {float(score):.3f}.")
     if score is not None and threshold is not None and float(score) < float(threshold) and ai_label:
         evidence.append("Rule fusion promoted this label because the visual pattern still looked significant.")
 
