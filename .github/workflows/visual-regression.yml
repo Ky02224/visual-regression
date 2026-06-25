@@ -39,7 +39,7 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: python -m playwright install chromium
+        run: python -m playwright install --with-deps chromium
 
       - name: Restore baseline cache
         id: baseline-cache
