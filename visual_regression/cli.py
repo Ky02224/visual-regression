@@ -404,11 +404,8 @@ def _run_compare(
     print(f"Mismatch: {result.mismatch_pct:.4f}% (pixel threshold {threshold_pct:.4f}%, pixel_pass={comparison_decision.get('pixel_would_pass')})")
     print(f"Diff regions: {len(result.regions)}")
     if ai_assessment:
-        print(
-            f"AI assessment: {ai_assessment.get('label') or 'no meaningful change'} "
-            f"(score={ai_assessment.get('score')}, meaningful={ai_assessment.get('meaningful_change')})"
-        )
-    print(f"Severity: {severity['label']} (score={severity['score']})")
+        print(f"AI assessment: {ai_assessment.get('label') or 'no meaningful change'}")
+    print(f"Severity: {severity['label']}")
     print(f"Report: {report_path}")
     if result.regions:
         print("Changed regions:")
