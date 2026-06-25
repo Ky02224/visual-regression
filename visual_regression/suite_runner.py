@@ -25,6 +25,7 @@ class SuiteCase:
     extra_headers: Dict[str, str] = field(default_factory=dict)
     wait_for_selector: str | None = None
     comparison_mode: str = "ai"
+    hide_selectors: List[str] = field(default_factory=list)
 
 
 def _parse_viewport(value) -> Tuple[int, int]:
@@ -97,6 +98,7 @@ def load_suite(path: Path) -> List[SuiteCase]:
                 raw.get("comparison_mode", default_comparison_mode),
                 default=default_comparison_mode,
             ),
+            hide_selectors=_parse_selectors(raw.get("hide_selectors", defaults.get("hide_selectors", []))),
         )
         cases.append(case)
     return cases
