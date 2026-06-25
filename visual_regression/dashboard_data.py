@@ -61,9 +61,13 @@ def _normalize_review_status(
         return "approved"
     if decision == "rejected":
         return "rejected"
+    if raw_status == "PASS":
+        return "no_changes"
+    if raw_status == "FAIL":
+        return "unreviewed"
     threshold = float(threshold_pct if threshold_pct is not None else 0.5)
     mismatch = float(mismatch_pct or 0.0)
-    if raw_status == "PASS" or mismatch <= threshold:
+    if mismatch <= threshold:
         return "no_changes"
     return "unreviewed"
 
