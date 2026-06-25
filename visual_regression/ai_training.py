@@ -550,7 +550,7 @@ def _detect_structural_shift(
         if max_val > 0.92:
             dx = (sx1 + max_loc[0]) - rx
             dy = (sy1 + max_loc[1]) - ry
-            if dx != 0 or dy != 0:
+            if abs(dx) > 2 or abs(dy) > 2:
                 return True, dx, dy
     except Exception:
         pass
@@ -700,6 +700,11 @@ def _apply_hard_feature_veto(
     if baseline_crop.size and current_crop.size:
         color_delta = float(np.mean(np.abs(baseline_crop.astype(np.float32) - current_crop.astype(np.float32))))
         current_brightness = float(np.mean(current_crop))
+
+    # Localized color change without layout movement should be color-regression
+    largest_is_shift, _, _ = _detect_structural_shift(largest, baseline_image, current_image)
+    if not largest_is_shift and color_delta >= 22.0 and largest_ratio <= 0.04 and region_count <= 4:
+        return "color-regression"
 
     if label == "misaligned-fields":
         if not (3 <= region_count <= 10):
@@ -1256,8 +1261,8 @@ def assess_result(
                 label = _heuristic_defect_label(result, baseline_image, current_image)
                 if label:
                     score = max(score, threshold)
-            else:
-                label = _apply_hard_feature_veto(label, result, baseline_image, current_image)
+            
+            label = _apply_hard_feature_veto(label, result, baseline_image, current_image)
     if _should_suppress_ai_label(result, label, score, threshold):
         label = ""
     return _build_ai_assessment(score, label, threshold, model_path.name)
