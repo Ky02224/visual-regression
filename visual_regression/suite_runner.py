@@ -23,7 +23,6 @@ class SuiteCase:
     timezone_id: str | None = None
     color_scheme: str = "light"
     extra_headers: Dict[str, str] = field(default_factory=dict)
-    hide_selectors: List[str] = field(default_factory=list)
     wait_for_selector: str | None = None
     comparison_mode: str = "ai"
 
@@ -56,11 +55,8 @@ def _parse_headers(value) -> Dict[str, str]:
 
 
 def _parse_selectors(value) -> List[str]:
-    if not value:
-        return []
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError("hide_selectors must be a list")
-    return [str(item) for item in value]
+    """Deprecated: hide_selectors is no longer supported. Kept for YAML forward-compat."""
+    return []
 
 
 def load_suite(path: Path) -> List[SuiteCase]:
@@ -75,7 +71,7 @@ def load_suite(path: Path) -> List[SuiteCase]:
     if defaults and not isinstance(defaults, dict):
         raise ValueError("Suite 'defaults' must be a mapping")
 
-    default_comparison_mode = normalize_comparison_mode(defaults.get("comparison_mode"), default="ai")
+    default_comparison_mode = normalize_comparison_mode(defaults.get("comparison_mode"), default="hybrid")
 
     cases: List[SuiteCase] = []
     for raw in tests:
@@ -96,7 +92,6 @@ def load_suite(path: Path) -> List[SuiteCase]:
             timezone_id=raw.get("timezone_id", defaults.get("timezone_id")),
             color_scheme=str(raw.get("color_scheme", defaults.get("color_scheme", "light"))),
             extra_headers=_parse_headers(raw.get("extra_headers", defaults.get("extra_headers"))),
-            hide_selectors=_parse_selectors(raw.get("hide_selectors", defaults.get("hide_selectors"))),
             wait_for_selector=raw.get("wait_for_selector", defaults.get("wait_for_selector")),
             comparison_mode=normalize_comparison_mode(
                 raw.get("comparison_mode", default_comparison_mode),

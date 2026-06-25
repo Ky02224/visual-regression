@@ -1,7 +1,8 @@
-playwright>=1.40.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-PyYAML>=6.0.0
-scikit-image>=0.22.0
+playwright==1.51.0
+opencv-python==4.13.0.92
+numpy==2.2.2
+PyYAML==6.0.3
+scikit-image==0.26.0
+# torch/torchvision keep >= because CUDA suffix varies per machine (e.g. +cu124 vs +cpu)
 torch>=2.6.0
 torchvision>=0.21.0

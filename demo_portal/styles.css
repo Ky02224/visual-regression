@@ -271,6 +271,54 @@ body {
   transform: translateY(18px);
 }
 
+/* Extra simulated defects for testing all 9 AI classifications */
+.text-truncation .hero p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.unreadable-text .hero h1 {
+  color: #f2f5f8 !important;
+  text-shadow: none !important;
+}
+
+.misaligned-fields .field:nth-child(5) input {
+  margin-left: 45px;
+  width: calc(100% - 45px);
+}
+
+.overlay-obstruction::after {
+  content: "⚠️ Overlay Blocked";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 24px;
+  font-weight: bold;
+  position: fixed;
+  top: 150px;
+  left: 320px;
+  width: 500px;
+  height: 300px;
+  background: rgba(15, 95, 143, 0.85);
+  border: 4px solid #c96b1a;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+  z-index: 9999;
+}
+
+.broken-image .topbar::before {
+  content: "❌ broken_logo.png";
+  font-size: 11px;
+  color: #ff3b30;
+  background: #ffe5e5;
+  border: 1px dashed #ff3b30;
+  padding: 4px 8px;
+  margin-right: 12px;
+  border-radius: 4px;
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;

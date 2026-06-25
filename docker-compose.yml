@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  visual-regression:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: visual-regression-app
+    ports:
+      - "8130:8130"
+    volumes:
+      # Persist the sqlite database, runs, reports, and models
+      - visual_regression_data:/app/.visual-regression
+    environment:
+      - PORT=8130
+      - HOST=0.0.0.0
+    restart: unless-stopped
+
+volumes:
+  visual_regression_data:

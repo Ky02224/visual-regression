@@ -22,7 +22,7 @@ export function ReportAnalysis() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const navState = location.state as { from?: string; suiteName?: string } | null;
+  const navState = location.state as { from?: string; suiteName?: string; buildId?: string } | null;
   const { can, role, userName, userEmail } = useRole();
   const [data, setData] = React.useState<any>(null);
   const [loading, setLoading] = React.useState(true);
@@ -34,20 +34,45 @@ export function ReportAnalysis() {
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [thumbView, setThumbView] = React.useState<ThumbView>('current');
   const [mainView, setMainView] = React.useState<ThumbView | 'compare'>('compare');
-  const [viewMode, setViewMode] = React.useState<ComparisonViewMode>('side-by-side');
+  const [viewMode, setViewMode] = React.useState<ComparisonViewMode>('slider');
   const [showDiffOverlay, setShowDiffOverlay] = React.useState(false);
   const [zoom, setZoom] = React.useState<ZoomLevel>('fit');
   const [allRuns, setAllRuns] = React.useState<any[]>([]);
   const [isDrawing, setIsDrawing] = React.useState(false);
   const [localIgnoreRegions, setLocalIgnoreRegions] = React.useState<{ x: number; y: number; width: number; height: number }[]>([]);
-  const [localIgnoreCss, setLocalIgnoreCss] = React.useState<string[]>([]);
-  const [newCssSelector, setNewCssSelector] = React.useState('');
   const imageRef = React.useRef<HTMLImageElement>(null);
-  const [dragStart, setDragStart] = React.useState<{ x: number; y: number } | null>(null);
-  const [currentDragRect, setCurrentDragRect] = React.useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // All drag tracking in refs — avoids React closure/stale-state issues entirely
+  const isDrawingRef = React.useRef(false);
+  const dragStartRef = React.useRef<{ x: number; y: number } | null>(null);
+  const dragRectRef = React.useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const previewDivRef = React.useRef<HTMLDivElement>(null); // live preview overlay div
+  const localRegionsRef = React.useRef<{ x: number; y: number; width: number; height: number }[]>([]);
+  const saveIgnoreRegionsRef = React.useRef<((r: typeof localIgnoreRegions) => void) | null>(null);
+  React.useEffect(() => { isDrawingRef.current = isDrawing; }, [isDrawing]);
+  React.useEffect(() => { localRegionsRef.current = localIgnoreRegions; }, [localIgnoreRegions]);
+  const [imageVersion, setImageVersion] = React.useState(0);
+
+  const fetchData = React.useCallback((silent = false) => {
+    if (!id) return;
+    if (!silent) {
+      setLoading(true);
+    }
+    setLoadError(false);
+    fetch(`/api/run?id=${id}`)
+      .then(res => { if (!res.ok) throw new Error('not found'); return res.json(); })
+      .then(run => {
+        setData(run);
+        setInsight(run.ai_explanation || 'No automated summary for this run.');
+        setImageVersion(v => v + 1);
+        setLoading(false);
+      })
+      .catch(() => { setLoadError(true); setLoading(false); });
+  }, [id]);
 
   React.useEffect(() => {
-    if (data) {
+    // Only sync from backend data when NOT in drawing mode
+    // (avoids overwriting locally-drawn regions before they are confirmed by the backend)
+    if (data && !isDrawing) {
       const parsed = (data.ignore_regions ?? []).map((r: any) => {
         if (Array.isArray(r)) {
           return { x: r[0], y: r[1], width: r[2], height: r[3] };
@@ -55,60 +80,30 @@ export function ReportAnalysis() {
         return r;
       });
       setLocalIgnoreRegions(parsed);
-      setLocalIgnoreCss(data.ignore_css_selectors ?? []);
     }
-  }, [data]);
+  }, [data, isDrawing]);
 
-  const saveIgnoreCssOnBackend = async (cssList: string[]) => {
-    try {
-      await fetch('/api/ignore-css-selectors', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: data?.baseline_name,
-          ignore_css_selectors: cssList
-        })
-      });
-      clearApiCacheEntry('/api/dashboard');
-      fetchData();
-    } catch (err) {
-      console.error("Failed to save CSS ignore selectors", err);
-    }
-  };
 
-  const addCssSelector = () => {
-    const val = newCssSelector.trim();
-    if (val && !localIgnoreCss.includes(val)) {
-      const updated = [...localIgnoreCss, val];
-      setLocalIgnoreCss(updated);
-      saveIgnoreCssOnBackend(updated);
-      setNewCssSelector('');
-    }
-  };
-
-  const deleteCssSelector = (index: number) => {
-    const updated = localIgnoreCss.filter((_, i) => i !== index);
-    setLocalIgnoreCss(updated);
-    saveIgnoreCssOnBackend(updated);
-  };
-
-  const saveIgnoreRegionsOnBackend = async (regions: typeof localIgnoreRegions) => {
+  const saveIgnoreRegionsOnBackend = React.useCallback(async (regions: typeof localIgnoreRegions) => {
     try {
       await fetch('/api/ignore-regions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: data?.baseline_name,
+          run_id: id,
           ignore_regions: regions
         })
       });
       clearApiCacheEntry('/api/dashboard');
-      // reload details
-      fetchData();
+      fetchData(true);
     } catch (err) {
       console.error("Failed to save ignore regions", err);
     }
-  };
+  }, [data, id, fetchData]);
+
+  // Keep a ref to saveIgnoreRegionsOnBackend so it's always fresh inside event listeners
+  React.useEffect(() => { saveIgnoreRegionsRef.current = saveIgnoreRegionsOnBackend; }, [saveIgnoreRegionsOnBackend]);
 
   const deleteIgnoreRegion = (index: number) => {
     const updated = localIgnoreRegions.filter((_, i) => i !== index);
@@ -116,52 +111,76 @@ export function ReportAnalysis() {
     saveIgnoreRegionsOnBackend(updated);
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDrawing || !imageRef.current) return;
-    const rect = imageRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    setDragStart({ x, y });
-    setCurrentDragRect({ x, y, width: 0, height: 0 });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDrawing || !dragStart || !imageRef.current) return;
-    const rect = imageRef.current.getBoundingClientRect();
-    const currentX = e.clientX - rect.left;
-    const currentY = e.clientY - rect.top;
-
-    const x = Math.min(dragStart.x, currentX);
-    const y = Math.min(dragStart.y, currentY);
-    const width = Math.abs(dragStart.x - currentX);
-    const height = Math.abs(dragStart.y - currentY);
-
-    setCurrentDragRect({ x, y, width, height });
-  };
-
-  const handleMouseUp = () => {
-    if (!isDrawing || !dragStart || !currentDragRect || !imageRef.current) return;
-    const img = imageRef.current;
-    const rect = img.getBoundingClientRect();
-    const scaleX = img.naturalWidth / rect.width;
-    const scaleY = img.naturalHeight / rect.height;
-
-    const newRegion = {
-      x: Math.round(currentDragRect.x * scaleX),
-      y: Math.round(currentDragRect.y * scaleY),
-      width: Math.round(currentDragRect.width * scaleX),
-      height: Math.round(currentDragRect.height * scaleY),
-    };
-
-    if (newRegion.width > 3 && newRegion.height > 3) {
-      const updated = [...localIgnoreRegions, newRegion];
-      setLocalIgnoreRegions(updated);
-      saveIgnoreRegionsOnBackend(updated);
+  // Update the live preview div directly via DOM — no React re-render needed during drag
+  const updatePreviewDiv = (r: { x: number; y: number; width: number; height: number } | null) => {
+    const el = previewDivRef.current;
+    if (!el) return;
+    if (!r) {
+      el.style.display = 'none';
+      return;
     }
-
-    setDragStart(null);
-    setCurrentDragRect(null);
+    el.style.display = 'block';
+    el.style.left = `${r.x}px`;
+    el.style.top = `${r.y}px`;
+    el.style.width = `${r.width}px`;
+    el.style.height = `${r.height}px`;
   };
+
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDrawingRef.current || !imageRef.current) return;
+    e.preventDefault();
+    const rect = imageRef.current.getBoundingClientRect();
+    const start = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    dragStartRef.current = start;
+    dragRectRef.current = { x: start.x, y: start.y, width: 0, height: 0 };
+    updatePreviewDiv(dragRectRef.current);
+  };
+
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDrawingRef.current || !dragStartRef.current || !imageRef.current) return;
+    const rect = imageRef.current.getBoundingClientRect();
+    const curX = e.clientX - rect.left;
+    const curY = e.clientY - rect.top;
+    const start = dragStartRef.current;
+    const r = {
+      x: Math.min(start.x, curX),
+      y: Math.min(start.y, curY),
+      width: Math.abs(start.x - curX),
+      height: Math.abs(start.y - curY),
+    };
+    dragRectRef.current = r;
+    updatePreviewDiv(r);
+  };
+
+  // Global mouseup registered once; reads fresh values from refs only
+  React.useEffect(() => {
+    const onGlobalMouseUp = () => {
+      if (!isDrawingRef.current || !dragStartRef.current) return;
+      const r = dragRectRef.current;
+      const img = imageRef.current;
+      dragStartRef.current = null;
+      dragRectRef.current = null;
+      updatePreviewDiv(null);
+      if (!r || !img) return;
+      const displayRect = img.getBoundingClientRect();
+      if (displayRect.width === 0 || displayRect.height === 0) return;
+      const scaleX = img.naturalWidth / displayRect.width;
+      const scaleY = img.naturalHeight / displayRect.height;
+      const newRegion = {
+        x: Math.round(r.x * scaleX),
+        y: Math.round(r.y * scaleY),
+        width: Math.round(r.width * scaleX),
+        height: Math.round(r.height * scaleY),
+      };
+      if (newRegion.width > 3 && newRegion.height > 3) {
+        const updated = [...localRegionsRef.current, newRegion];
+        setLocalIgnoreRegions(updated);
+        if (saveIgnoreRegionsRef.current) saveIgnoreRegionsRef.current(updated);
+      }
+    };
+    window.addEventListener('mouseup', onGlobalMouseUp);
+    return () => window.removeEventListener('mouseup', onGlobalMouseUp);
+  }, []);
 
   const renderIgnoreRegionsOverlay = () => {
     if (!imageRef.current) return null;
@@ -197,17 +216,12 @@ export function ReportAnalysis() {
             )}
           </div>
         ))}
-        {currentDragRect && (
-          <div
-            className="absolute border-2 border-dashed border-red-400 bg-red-400/10"
-            style={{
-              left: `${currentDragRect.x}px`,
-              top: `${currentDragRect.y}px`,
-              width: `${currentDragRect.width}px`,
-              height: `${currentDragRect.height}px`,
-            }}
-          />
-        )}
+        {/* Live drag preview — updated via direct DOM, NOT React state */}
+        <div
+          ref={previewDivRef}
+          className="absolute border-2 border-dashed border-red-400 bg-red-400/10 pointer-events-none"
+          style={{ display: 'none', left: 0, top: 0, width: 0, height: 0 }}
+        />
       </div>
     );
   };
@@ -227,6 +241,21 @@ export function ReportAnalysis() {
     );
   }, [allRuns, data]);
 
+  const buildRuns = React.useMemo(() => {
+    if (!data || !data.build_id) return [];
+    return allRuns.filter((r: any) => r.build_id === data.build_id);
+  }, [allRuns, data]);
+
+  const buildReviewStats = React.useMemo(() => {
+    if (buildRuns.length === 0) return { reviewed: 0, total: 0 };
+    const total = buildRuns.length;
+    const unreviewed = buildRuns.filter((r: any) => {
+      const rs = normalizeReviewStatus(r.review_status ?? r.status);
+      return rs === 'unreviewed';
+    }).length;
+    return { reviewed: total - unreviewed, total };
+  }, [buildRuns]);
+
   const uniqueBrowsers = React.useMemo(() => {
     return Array.from(new Set(relatedRuns.map((r: any) => r.browser).filter(Boolean)));
   }, [relatedRuns]);
@@ -242,6 +271,8 @@ export function ReportAnalysis() {
 
       if (e.key === 'd') {
         setShowDiffOverlay(prev => !prev);
+      } else if (e.key === 'i') {
+        setIsDrawing(prev => !prev);
       } else if (e.key === 'a') {
         submitReview('approved');
       } else if (e.key === 'r') {
@@ -265,20 +296,6 @@ export function ReportAnalysis() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [data, allRuns, id]);
-
-  const fetchData = () => {
-    if (!id) return;
-    setLoading(true);
-    setLoadError(false);
-    fetch(`/api/run?id=${id}`)
-      .then(res => { if (!res.ok) throw new Error('not found'); return res.json(); })
-      .then(run => {
-        setData(run);
-        setInsight(run.ai_explanation || 'No automated summary for this run.');
-        setLoading(false);
-      })
-      .catch(() => { setLoadError(true); setLoading(false); });
-  };
 
   React.useEffect(() => { fetchData(); }, [id]);
 
@@ -346,7 +363,7 @@ export function ReportAnalysis() {
 
   const baselineUrl = `/baseline/${data.baseline_name}/baseline.png`;
   const currentUrl = `/artifacts/${id}/current.png`;
-  const diffUrl = `/artifacts/${id}/diff_overlay.png`;
+  const diffUrl = `/artifacts/${id}/diff_overlay.png?v=${imageVersion}`;
 
 
   const reviewStatus = normalizeReviewStatus(data.review_status ?? decision.status ?? status);
@@ -360,6 +377,8 @@ export function ReportAnalysis() {
           <div>
             {navState?.from === 'suite' && navState.suiteName ? (
               <Link to={`/suite/${navState.suiteName}`} className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">← Back to suite</Link>
+            ) : navState?.from === 'build' && navState.buildId ? (
+              <Link to={`/build/${navState.buildId}`} className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">← Back to build</Link>
             ) : (
               <Link to="/" className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">← Back to dashboard</Link>
             )}
@@ -408,60 +427,48 @@ export function ReportAnalysis() {
               )}
             </div>
           </Panel>
-          <Panel title="Ignore CSS selectors">
-            <div className="space-y-3">
-              <div className="flex gap-1">
-                <input
-                  type="text"
-                  placeholder="e.g. .dynamic-timer"
-                  value={newCssSelector}
-                  onChange={(e) => setNewCssSelector(e.target.value)}
-                  className="flex-1 text-xs px-2 py-1 rounded border border-[var(--outline)] bg-[var(--surface)] text-[var(--on-surface)]"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      addCssSelector();
-                    }
-                  }}
-                />
-                <Button variant="secondary" className="text-xs py-1 px-2" onClick={addCssSelector}>
-                  Add
-                </Button>
-              </div>
-              {localIgnoreCss.length > 0 ? (
-                <ul className="space-y-1.5 max-h-32 overflow-y-auto">
-                  {localIgnoreCss.map((sel, idx) => (
-                    <li key={idx} className="text-xs font-mono text-[var(--on-surface-variant)] flex items-center justify-between bg-stone-50 dark:bg-zinc-800 px-2 py-1 rounded">
-                      <span className="truncate max-w-[150px]">{sel}</span>
-                      <button
-                        onClick={() => deleteCssSelector(idx)}
-                        className="text-red-500 hover:text-red-700 font-bold ml-2 cursor-pointer"
-                        title="Remove selector"
-                      >
-                        ×
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-xs text-[var(--on-surface-variant)] leading-relaxed">
-                  Type a CSS selector and click Add to hide matching elements before capturing screens.
-                </p>
-              )}
-            </div>
-          </Panel>
           <Panel title="Changed regions">
             {regions.length > 0 ? (
               <ul className="space-y-2 max-h-48 overflow-y-auto">
-                {regions.map((r: any, idx: number) => (
-                  <li key={idx} className="text-xs p-2 rounded-md bg-stone-50 dark:bg-zinc-800/50 border border-[var(--outline)]">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-medium">{r.label || `Region ${idx + 1}`}</span>
-                      {r.change_type && <ChangeTypeBadge label={r.change_type} />}
-                    </div>
-                    <p className="text-[var(--on-surface-variant)] mt-0.5">[{r.x}, {r.y}] · {r.width}×{r.height}px</p>
-                  </li>
-                ))}
+                {(() => {
+                  const getRegionPriorityInfo = (r: any) => {
+                    const area = r.area || (r.width * r.height) || 0;
+                    const meanDelta = r.mean_delta || 0;
+                    const score = area * meanDelta;
+                    
+                    let priorityLabel = 'Low';
+                    let badgeColor = 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-800';
+                    
+                    if (score > 40000 || meanDelta > 120 || area > 80000) {
+                      priorityLabel = 'Critical';
+                      badgeColor = 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-800';
+                    } else if (score > 4000 || meanDelta > 30 || area > 10000) {
+                      priorityLabel = 'Warning';
+                      badgeColor = 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-800';
+                    }
+                    return { score, label: priorityLabel, badgeColor };
+                  };
+
+                  const sortedRegions = [...regions].map((r: any) => {
+                    const info = getRegionPriorityInfo(r);
+                    return { ...r, ...info };
+                  }).sort((a: any, b: any) => b.score - a.score);
+
+                  return sortedRegions.map((r: any, idx: number) => (
+                    <li key={idx} className="text-xs p-2 rounded-md bg-stone-50 dark:bg-zinc-800/50 border border-[var(--outline)]">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-medium">{r.label || `Region ${idx + 1}`}</span>
+                          {r.change_type && <ChangeTypeBadge label={r.change_type} />}
+                        </div>
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${r.badgeColor}`}>
+                          {r.label}
+                        </span>
+                      </div>
+                      <p className="text-[var(--on-surface-variant)] mt-0.5">[{r.x}, {r.y}] · {r.width}×{r.height}px</p>
+                    </li>
+                  ));
+                })()}
               </ul>
             ) : (
               <p className="text-xs text-[var(--on-surface-variant)]">No regions detected</p>
@@ -496,6 +503,18 @@ export function ReportAnalysis() {
               </Panel>
             )}
           </div>
+
+          <div className="pt-4 border-t border-[var(--outline)] space-y-2">
+            <h4 className="text-[10px] font-bold text-[var(--on-surface-variant)] uppercase tracking-wider px-1">Keyboard Shortcuts</h4>
+            <div className="grid grid-cols-2 gap-y-2.5 gap-x-3 text-[11px] p-2 bg-stone-50 dark:bg-zinc-900 rounded-md border border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-1.5"><kbd className="px-1.5 py-0.5 font-bold bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded text-[9px] shadow-sm">i</kbd> <span className="text-[var(--on-surface-variant)] font-medium">Draw Mode</span></div>
+              <div className="flex items-center gap-1.5"><kbd className="px-1.5 py-0.5 font-bold bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded text-[9px] shadow-sm">d</kbd> <span className="text-[var(--on-surface-variant)] font-medium">Toggle Diff</span></div>
+              <div className="flex items-center gap-1.5"><kbd className="px-1.5 py-0.5 font-bold bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded text-[9px] shadow-sm">Space</kbd> <span className="text-[var(--on-surface-variant)] font-medium">Flip View</span></div>
+              <div className="flex items-center gap-1.5"><kbd className="px-1.5 py-0.5 font-bold bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded text-[9px] shadow-sm">a</kbd> <span className="text-[var(--on-surface-variant)] font-medium">Approve</span></div>
+              <div className="flex items-center gap-1.5"><kbd className="px-1.5 py-0.5 font-bold bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded text-[9px] shadow-sm">r</kbd> <span className="text-[var(--on-surface-variant)] font-medium">Reject</span></div>
+              <div className="flex items-center gap-1.5"><kbd className="px-1.5 py-0.5 font-bold bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded text-[9px] shadow-sm">←/→</kbd> <span className="text-[var(--on-surface-variant)] font-medium">Prev/Next</span></div>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -524,9 +543,28 @@ export function ReportAnalysis() {
         <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-[var(--outline)] bg-[var(--surface)]">
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{data.case_name || data.baseline_name}</p>
-            <p className="text-xs text-[var(--on-surface-variant)]">Severity: {severity}{!isPass && ` · ${diffPct} diff`}</p>
+            <p className="text-xs text-[var(--on-surface-variant)] flex items-center gap-2 flex-wrap">
+              <span>Severity: {severity}{!isPass && ` · ${diffPct} diff`}</span>
+              {buildReviewStats.total > 0 && (
+                <>
+                  <span className="text-slate-350 dark:text-slate-700 font-normal">|</span>
+                  <span className="font-semibold text-emerald-600 dark:text-emerald-450">Reviewed: {buildReviewStats.reviewed} / {buildReviewStats.total}</span>
+                </>
+              )}
+            </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => window.open(`/api/runs/${id}/export`, '_blank')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-stone-100 dark:bg-zinc-800 text-[var(--on-surface-variant)] hover:bg-stone-200 dark:hover:bg-zinc-700 border border-[var(--outline)] transition-colors"
+              title="Export as shareable HTML file"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Export
+            </button>
             <Button
               variant="secondary"
               size="lg"
@@ -617,13 +655,12 @@ export function ReportAnalysis() {
                 <span>Drawing Mode: Click and drag on the baseline image to draw ignore regions.</span>
                 <span className="text-[10px] font-bold">DRAG TO DRAW</span>
               </div>
-              <div
-                className="flex-1 min-h-0 relative flex items-center justify-center p-4 bg-stone-100 dark:bg-zinc-900/50 overflow-auto"
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-              >
-                <div className="relative inline-block max-w-full">
+              <div className="flex-1 min-h-0 relative flex items-center justify-center p-4 bg-stone-100 dark:bg-zinc-900/50 overflow-auto">
+                <div 
+                  className="relative inline-block max-w-full select-none cursor-crosshair"
+                  onMouseDown={handleCanvasMouseDown}
+                  onMouseMove={handleCanvasMouseMove}
+                >
                   <img
                     ref={imageRef}
                     src={baselineUrl}
@@ -633,6 +670,7 @@ export function ReportAnalysis() {
                       // Trigger state refresh for alignment
                       setLocalIgnoreRegions(prev => [...prev]);
                     }}
+                    draggable={false}
                   />
                   {renderIgnoreRegionsOverlay()}
                 </div>

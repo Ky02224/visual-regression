@@ -17,7 +17,9 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import json
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -34,6 +36,7 @@ class JsonCache:
     """Thread-safe JSON file cache with mtime-based invalidation."""
     
     _cache: Dict[Path, _CacheEntry] = {}
+    _lock = threading.Lock()
     
     @classmethod
     def read(cls, path: Path | str) -> Any:
@@ -57,29 +60,35 @@ class JsonCache:
             current_mtime = path.stat().st_mtime
         except FileNotFoundError:
             # Clear any stale cache entry
-            cls._cache.pop(path, None)
+            with cls._lock:
+                cls._cache.pop(path, None)
             raise
         
         # Return cached data if mtime matches
-        if path in cls._cache:
-            entry = cls._cache[path]
-            if entry.mtime == current_mtime:
-                return entry.data
+        with cls._lock:
+            if path in cls._cache:
+                entry = cls._cache[path]
+                if entry.mtime == current_mtime:
+                    return copy.deepcopy(entry.data)
         
         # Cache miss or stale: read and cache
         data = json.loads(path.read_text(encoding="utf-8"))
-        cls._cache[path] = _CacheEntry(data, current_mtime)
-        return data
+        
+        with cls._lock:
+            cls._cache[path] = _CacheEntry(data, current_mtime)
+        return copy.deepcopy(data)
     
     @classmethod
     def clear(cls, path: Path | str) -> None:
         """Clear cache entry for a specific file."""
-        cls._cache.pop(Path(path), None)
+        with cls._lock:
+            cls._cache.pop(Path(path), None)
     
     @classmethod
     def clear_all(cls) -> None:
         """Clear entire cache."""
-        cls._cache.clear()
+        with cls._lock:
+            cls._cache.clear()
     
     @classmethod
     def cache_size(cls) -> int:

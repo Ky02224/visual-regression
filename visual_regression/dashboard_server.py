@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import subprocess
 import sys
 import time
 import uuid
+import io
+from contextlib import redirect_stdout, redirect_stderr
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -15,13 +18,82 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 _task_executor = ThreadPoolExecutor(max_workers=4)
 _tasks_status: Dict[str, Dict[str, Any]] = {}
+_MAX_TASK_HISTORY = 500  # cap to prevent unbounded memory growth
+
+from collections import defaultdict
+_SDK_LIMITER: Dict[str, list[float]] = defaultdict(list)
+_SDK_LIMITER_LOCK = None  # initialised after threading import below
+_MAX_SNAPSHOTS_PER_MINUTE = 30
+
+# Login brute-force rate limiter: ip -> list of attempt timestamps
+_LOGIN_LIMITER: Dict[str, list[float]] = defaultdict(list)
+_LOGIN_LIMITER_LOCK = None  # initialised after threading import below
+_MAX_LOGIN_ATTEMPTS_PER_MINUTE = 10
+
+# --------------------------------------------------------------------------- #
+# API Key TTL cache — avoids reading integrations.json on every request.
+# Invalidated explicitly when the key is rotated or integrations are updated.
+# --------------------------------------------------------------------------- #
+_API_KEY_CACHE: Dict[str, Any] = {}   # keys: "value", "expires_at"
+_API_KEY_TTL = 60.0  # seconds
+_API_KEY_LOCK = None  # initialised lazily after threading is imported
 
 import threading
 
 _ai_review_queue_lock = threading.Lock()
+_API_KEY_LOCK = threading.Lock()   # for the API key TTL cache
+_SDK_LIMITER_LOCK = threading.Lock()   # for the SDK snapshot rate limiter
+_LOGIN_LIMITER_LOCK = threading.Lock()  # for the login brute-force limiter
 _ai_review_queue_count = 0
 _ai_training_in_progress = False
 _last_ai_train_time = 0.0
+
+_GLOBAL_PLAYWRIGHT = None
+_GLOBAL_BROWSER = None
+_GLOBAL_BROWSER_LOCK = threading.Lock()
+
+# Cache for git remote origin URL — populated once at server startup (RISK-02 fix).
+_GITHUB_REPO_URL_CACHE: Dict[str, Any] = {}
+
+# Base URL fixed at startup to prevent Host-header injection on OAuth redirect URIs.
+# Format: {"value": "http://127.0.0.1:7070"}  — populated in serve_dashboard().
+_STARTUP_BASE_URL: Dict[str, Any] = {}
+
+
+def get_shared_browser():
+    global _GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER
+    with _GLOBAL_BROWSER_LOCK:
+        if _GLOBAL_BROWSER is None:
+            from playwright.sync_api import sync_playwright
+            from .browser import set_shared_browser
+            print("[Playwright Pool] Initializing shared browser process...", flush=True)
+            _GLOBAL_PLAYWRIGHT = sync_playwright().start()
+            _GLOBAL_BROWSER = _GLOBAL_PLAYWRIGHT.chromium.launch(headless=True)
+            set_shared_browser(_GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER)
+        return _GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER
+
+def close_shared_browser():
+    global _GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER
+    with _GLOBAL_BROWSER_LOCK:
+        if _GLOBAL_BROWSER is not None:
+            try:
+                _GLOBAL_BROWSER.close()
+            except Exception:
+                pass
+            _GLOBAL_BROWSER = None
+        if _GLOBAL_PLAYWRIGHT is not None:
+            try:
+                _GLOBAL_PLAYWRIGHT.stop()
+            except Exception:
+                pass
+            _GLOBAL_PLAYWRIGHT = None
+        from .browser import set_shared_browser
+        set_shared_browser(None, None)
+        print("[Playwright Pool] Shared browser process stopped.", flush=True)
+
+def find_selectors_for_coordinates(paths: WorkspacePaths, name: str, regions: list) -> list[str]:
+    # CSS selector resolution discarded
+    return []
 
 def _run_background_ai_training(paths: WorkspacePaths):
     global _ai_training_in_progress, _last_ai_train_time
@@ -32,9 +104,9 @@ def _run_background_ai_training(paths: WorkspacePaths):
         train_model(
             paths=paths,
             model_path=model_path,
-            epochs=5,
+            epochs=3,
             batch_size=16,
-            samples_per_image=4,
+            samples_per_image=2,
             pretrained_backbone=True
         )
         print("[AI Trainer] Background training successfully completed! Model weights updated.", flush=True)
@@ -50,9 +122,9 @@ def queue_ai_training_sample(paths: WorkspacePaths):
     with _ai_review_queue_lock:
         _ai_review_queue_count += 1
         curr_time = time.time()
-        # Trigger when we have at least 5 new reviews, training is not running,
-        # and at least 30 seconds have passed since the last training run.
-        if _ai_review_queue_count >= 5 and not _ai_training_in_progress and (curr_time - _last_ai_train_time) > 30:
+        # Trigger when we have at least 1 new review, training is not running,
+        # and at least 60 seconds have passed since the last training run to avoid CPU starvation.
+        if _ai_review_queue_count >= 1 and not _ai_training_in_progress and (curr_time - _last_ai_train_time) > 60:
             _ai_review_queue_count = 0
             _ai_training_in_progress = True
             threading.Thread(target=_run_background_ai_training, args=(paths,), daemon=True).start()
@@ -80,6 +152,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.port = port
         self.store = SqliteStore(paths.db_path)
         super().__init__(*args, directory=str(project_root), **kwargs)
+
+    def end_headers(self) -> None:  # single authoritative definition — see L208 stub removed
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
 
     def _cookie_value(self, name: str) -> str:
         header = self.headers.get("Cookie") or ""
@@ -137,7 +215,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # Demo portal pages
         if parsed.startswith("/demo/"):
             relative = parsed.removeprefix("/demo/")
-            return str(self.project_root / "demo_portal" / relative)
+            return self._safe_path(self.project_root / "demo_portal", relative)
 
         # Assets (JS/CSS/images from vite)
         if parsed.startswith("/assets/"):
@@ -146,17 +224,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # API routing happens below in do_GET / do_POST. If it falls through to translate_path,
         # and it's not a known file, we should serve index.html for React Router client side routes.
         # Check if the file exists in the frontend dist dir.
-        target_path = frontend_dir / parsed.lstrip("/")
+        target_str = self._safe_path(frontend_dir, parsed.lstrip("/"))
+        target_path = Path(target_str)
         if target_path.is_file():
-            return str(target_path)
+            return target_str
             
         # Fallback to index.html for all other paths (except /api/ which should be handled by server)
         return str((frontend_dir / "index.html").resolve())
 
 
-    def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
+    # NOTE: end_headers is defined once above (L129).  The duplicate stub that only
+    # sent 'Cache-Control: no-store' has been removed to avoid the Python MRO
+    # silently picking the last definition, which would have dropped Pragma/Expires.
 
     def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
@@ -170,22 +249,47 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """Invalidate the dashboard cache after data modifications."""
         _DashboardCache.invalidate()
 
-    def _read_json(self) -> Dict[str, Any]:
+    def _read_json(self, max_bytes: int = 2 * 1024 * 1024) -> Dict[str, Any]:
+        """Read and parse the JSON request body, rejecting oversized payloads."""
         length = int(self.headers.get("Content-Length", "0"))
+        if length > max_bytes:
+            raise ValueError(f"Request body too large ({length} bytes, max {max_bytes}).")
         body = self.rfile.read(length) if length else b"{}"
         return json.loads(body.decode("utf-8"))
 
     def _run_cli_action(self, args: list[str]) -> Dict[str, Any]:
-        process = subprocess.run(
-            [sys.executable, "-m", "visual_regression.cli", *args],
-            cwd=str(self.project_root),
-            capture_output=True,
-            text=True,
-        )
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+        from .cli import main as cli_main
+
+        full_args = list(args)
+        if "--root" not in full_args:
+            full_args = ["--root", str(self.paths.root)] + full_args
+
+        try:
+            get_shared_browser()
+        except Exception:
+            pass
+
+        stdout_io = io.StringIO()
+        stderr_io = io.StringIO()
+        returncode = 0
+        try:
+            with redirect_stdout(stdout_io), redirect_stderr(stderr_io):
+                returncode = cli_main(full_args)
+                if returncode is None:
+                    returncode = 0
+        except SystemExit as e:
+            returncode = e.code if isinstance(e.code, int) else 0
+        except Exception as e:
+            import traceback
+            traceback.print_exc(file=stderr_io)
+            returncode = 1
+
         return {
-            "returncode": process.returncode,
-            "stdout": process.stdout,
-            "stderr": process.stderr,
+            "returncode": returncode,
+            "stdout": stdout_io.getvalue(),
+            "stderr": stderr_io.getvalue(),
         }
 
     def _run_cli_action_async(self, args: list[str]) -> str:
@@ -198,13 +302,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "cmd": " ".join(args),
             "created_at": time.time(),
         }
-        
+
+        # Capture project_root by value so the closure doesn't hold a reference to
+        # the (already-completed) handler instance after the request finishes.
+        _project_root = str(self.project_root)
+
         def job():
             _tasks_status[task_id]["status"] = "running"
             try:
                 process = subprocess.run(
                     [sys.executable, "-m", "visual_regression.cli", *args],
-                    cwd=str(self.project_root),
+                    cwd=_project_root,
                     capture_output=True,
                     text=True,
                 )
@@ -214,14 +322,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "stderr": process.stderr,
                     "returncode": process.returncode
                 })
-                self._invalidate_dashboard_cache()
+                # Call the class method directly — avoids referencing the stale handler `self`
+                _DashboardCache.invalidate()
             except Exception as e:
                 _tasks_status[task_id].update({
                     "status": "failed",
                     "stderr": str(e),
                     "returncode": -1
                 })
-                
+            finally:
+                # Evict oldest entries if the dict grows too large
+                if len(_tasks_status) > _MAX_TASK_HISTORY:
+                    oldest_keys = sorted(_tasks_status, key=lambda k: _tasks_status[k].get("created_at", 0))
+                    for old_key in oldest_keys[:len(_tasks_status) - _MAX_TASK_HISTORY]:
+                        _tasks_status.pop(old_key, None)
+
         _task_executor.submit(job)
         return task_id
 
@@ -278,19 +393,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def _dashboard_base_url(self) -> str:
+        # Prefer the startup-fixed base URL to avoid Host-header injection.
+        # Falls back to the Host header only for local development.
+        fixed = _STARTUP_BASE_URL.get("value")
+        if fixed:
+            return fixed
         host = self.headers.get("Host") or f"127.0.0.1:{self.port}"
         return f"http://{host}"
 
     def _github_repo_url(self) -> str:
+        # Use the URL cached at server startup (see serve_dashboard).
+        # Falls back to a live subprocess call if the cache is empty.
+        cached = _GITHUB_REPO_URL_CACHE.get("value")
+        if cached is not None:
+            return cached
         process = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             cwd=str(self.project_root),
             capture_output=True,
             text=True,
         )
-        if process.returncode != 0:
-            return ""
-        return process.stdout.strip()
+        result = process.stdout.strip() if process.returncode == 0 else ""
+        _GITHUB_REPO_URL_CACHE["value"] = result
+        return result
 
     def _is_authorized(self) -> bool:
         """
@@ -298,14 +423,27 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         - Browser users: cookie session (admin) OR role checks via _require_role()
         - Automation: X-Access-Key matches configured api_key
+
+        The API key is cached for up to 60 s to avoid reading integrations.json
+        on every single request (RISK-01 fix).
+        Uses hmac.compare_digest for timing-safe comparison (prevents timing attacks).
         """
         user = self._session_user()
         if user and user.role == "admin":
             return True
-        manager = IntegrationsManager(self.paths.root)
-        config = manager.get_config()
-        secure_key = config.get("api_key")
-        return self.headers.get("X-Access-Key") == secure_key
+        now = time.time()
+        with _API_KEY_LOCK:
+            cached = _API_KEY_CACHE
+            if cached.get("expires_at", 0) > now:
+                secure_key = cached["value"]
+            else:
+                manager = IntegrationsManager(self.paths.root)
+                secure_key = manager.get_config().get("api_key", "")
+                cached["value"] = secure_key
+                cached["expires_at"] = now + _API_KEY_TTL
+        incoming = self.headers.get("X-Access-Key") or ""
+        # Use timing-safe comparison to prevent timing-based key enumeration attacks
+        return bool(secure_key) and hmac.compare_digest(incoming, secure_key)
 
     @staticmethod
     def _payload_to_args(payload: Dict[str, Any], allowed: Dict[str, str]) -> list[str]:
@@ -361,6 +499,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/artifacts/") or parsed.path.startswith("/baseline/"):
+                if not self._session_user() and not self._is_authorized():
+                    return self._send_forbidden()
+
+            if parsed.path == "/api/health":
+                return self._send_json({"ok": True, "status": "healthy"})
+
             if parsed.path == "/api/tasks/status":
                 query = parse_qs(parsed.query)
                 task_id = query.get("id", [None])[0]
@@ -512,6 +657,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 users = self.store.list_users()
                 return self._send_json({"ok": True, "users": users})
 
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export"):
+                run_id = parsed.path.removeprefix("/api/runs/").removesuffix("/export")
+                if not run_id or "/" in run_id or ".." in run_id:
+                    return self._send_error_json("Invalid run id", status=400)
+                run_dir = self.paths.runs_dir / run_id
+                if not run_dir.is_dir():
+                    return self._send_error_json(f"Run '{run_id}' not found", status=404)
+                from .export_report import generate_standalone_report
+                html_content = generate_standalone_report(run_dir)
+                html_bytes = html_content.encode("utf-8")
+                safe_name = run_id[:64].replace("/", "_").replace("\\", "_")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html_bytes)))
+                self.send_header("Content-Disposition", f'attachment; filename="report-{safe_name}.html"')
+                self.end_headers()
+                self.wfile.write(html_bytes)
+                return
+
             return super().do_GET()
 
         except FileNotFoundError as exc:
@@ -528,214 +692,55 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     return self._send_forbidden()
                 
                 parts = self._parse_multipart()
-                name = parts.get("name")
-                current_image_part = parts.get("current_image")
-                
-                if not name or not current_image_part:
-                    return self._send_error_json("Missing 'name' or 'current_image'", status=400)
-                
-                manager = BaselineManager(self.paths)
-                if not manager.exists(name):
-                    return self._send_error_json(f"Baseline '{name}' does not exist", status=404)
-                
-                image_bytes = current_image_part["content"]
-                
-                from .cli import _copy_baseline_into_run, _slug_part, now_stamp_precise, summarize_severity, build_ai_explanation, resolve_ai_model_path, build_capture_metadata, _initial_decision_status
-                from .image_compare import compare_images, parse_ignore_regions
-                from .decision import decide_pass_fail
-                from .reporter import generate_html_report, save_image, write_json
-                from .ai_training import assess_result
-                
-                now_str = now_stamp_precise()
-                browser_part = _slug_part(parts.get("browser"), "upload-client")
-                device_part = _slug_part(parts.get("device"), "desktop")
-                locale_part = _slug_part(parts.get("locale"), "default")
-                run_name = f"{now_str}_{BaselineManager.normalize_name(name)}_{browser_part}_{device_part}_{locale_part}"
-                
-                run_dir = self.paths.runs_dir / run_name
-                run_dir.mkdir(parents=True, exist_ok=True)
-                
-                current_path = run_dir / "current.png"
-                current_path.write_bytes(image_bytes)
-                
-                baseline_image_path = manager.baseline_image_path(name)
-                
+                from .server_services import handle_run_upload
                 try:
-                    threshold_pct = float(parts.get("threshold_pct", 0.1))
-                except ValueError:
-                    threshold_pct = 0.1
-                try:
-                    pixel_threshold = int(parts.get("pixel_threshold", 10))
-                except ValueError:
-                    pixel_threshold = 10
-                try:
-                    min_region_area = int(parts.get("min_region_area", 20))
-                except ValueError:
-                    min_region_area = 20
-                comparison_mode = parts.get("comparison_mode", "ai")
-                no_ai = parts.get("no_ai") == "true"
-                ignore_regions_raw = parts.get("ignore_region", "")
-                ignore_regions_list = [r.strip() for r in ignore_regions_raw.split(";") if r.strip()] if ignore_regions_raw else []
-                ignore_regions = parse_ignore_regions(ignore_regions_list)
-                if not ignore_regions:
-                    try:
-                        meta = manager.load_metadata(name)
-                        saved_regions = meta.get("ignore_regions", [])
-                        for r in saved_regions:
-                            if isinstance(r, dict):
-                                ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
-                            elif isinstance(r, (list, tuple)) and len(r) == 4:
-                                ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
-                    except Exception:
-                        pass
-                
-                result, diff_overlay, binary_diff = compare_images(
-                    baseline_path=baseline_image_path,
-                    current_path=current_path,
-                    pixel_threshold=pixel_threshold,
-                    min_region_area=min_region_area,
-                    ignore_regions=ignore_regions,
-                )
-                
-                baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
-                diff_overlay_path = run_dir / "diff_overlay.png"
-                binary_diff_path = run_dir / "binary_diff.png"
-                report_path = run_dir / "report.html"
-                json_path = run_dir / "result.json"
-                
-                save_image(diff_overlay_path, diff_overlay)
-                save_image(binary_diff_path, binary_diff)
-                
-                ai_model_path = resolve_ai_model_path(self.paths, None, no_ai)
-                ai_assessment = {}
-                ai_model_available = bool(ai_model_path and ai_model_path.exists())
-                if ai_model_available:
-                    ai_assessment = assess_result(
-                        result=result,
-                        model_path=ai_model_path,
-                        baseline_image_path=baseline_image_path,
-                        current_image_path=current_path,
-                    ).to_dict()
-                
-                passed, comparison_decision = decide_pass_fail(
-                    comparison_mode=comparison_mode,
-                    mismatch_pct=result.mismatch_pct,
-                    threshold_pct=threshold_pct,
-                    ai_assessment=ai_assessment,
-                    ai_model_available=ai_model_available,
-                )
-                
-                decision = _initial_decision_status(passed)
-                severity = summarize_severity(
-                    result.mismatch_pct,
-                    len(result.regions),
-                    ai_assessment.get("score"),
-                    ai_assessment.get("label"),
-                )
-                ai_explanation = build_ai_explanation(result, ai_assessment)
-                
-                from .config import CaptureConfig
-                mock_cfg = CaptureConfig(
-                    name=name,
-                    url="http://upload-api-url",
-                    browser=parts.get("browser", "upload-client"),
-                    device=parts.get("device", "desktop"),
-                    viewport=(1440, 900),
-                    wait_ms=0,
-                    wait_until="",
-                    navigation_timeout_ms=30000,
-                    full_page=True,
-                    disable_animations=True,
-                    locale=parts.get("locale", "default"),
-                    timezone_id="UTC",
-                    color_scheme="light",
-                    extra_headers={},
-                    hide_selectors=[],
-                    wait_for_selector=None,
-                )
-                
-                output_payload = {
-                    "case_name": name,
-                    "baseline_name": name,
-                    "suite_name": None,
-                    "status": "PASS" if passed else "FAIL",
-                    "threshold_pct": threshold_pct,
-                    "comparison_decision": comparison_decision,
-                    "ignore_regions": [list(item) for item in ignore_regions],
-                    "capture": build_capture_metadata(mock_cfg),
-                    "result": result.to_dict(),
-                    "decision": decision,
-                    "ai_assessment": ai_assessment,
-                    "ai_explanation": ai_explanation,
-                    "severity": severity,
-                    "artifacts": {
-                        "baseline": str(baseline_for_report),
-                        "current": str(current_path),
-                        "diff_overlay": str(diff_overlay_path),
-                        "binary_diff": str(binary_diff_path),
-                        "report": str(report_path),
-                    },
-                }
-                write_json(json_path, output_payload)
-                
-                generate_html_report(
-                    report_path=report_path,
-                    test_name=name,
-                    baseline_image=Path("baseline.png"),
-                    current_image=Path("current.png"),
-                    diff_image=Path("diff_overlay.png"),
-                    binary_image=Path("binary_diff.png"),
-                    result=result,
-                    threshold_pct=threshold_pct,
-                    ignore_regions=ignore_regions,
-                    capture=build_capture_metadata(mock_cfg),
-                    review=decision,
-                    decision_history=[decision],
-                    ai_assessment=ai_assessment,
-                    ai_explanation=ai_explanation,
-                    severity=severity,
-                    status=output_payload["status"],
-                )
-                
-                sha = parts.get("sha")
-                if sha:
-                    integrations_manager = IntegrationsManager(self.paths.root)
-                    github_config = integrations_manager.get_config().get("github", {})
-                    if github_config.get("connected"):
-                        repo_url = self._github_repo_url()
-                        if repo_url:
-                            target_url = f"{self._dashboard_base_url()}/runs"
-                            state_map = "success" if passed else "failure"
-                            desc_msg = f"Visual check: {output_payload['status']}. Mismatch: {result.mismatch_pct:.2f}%"
-                            integrations_manager.post_github_commit_status(
-                                repo_url=repo_url,
-                                sha=sha,
-                                state=state_map,
-                                target_url=target_url,
-                                description=desc_msg
-                            )
-                
-                self._invalidate_dashboard_cache()
-                return self._send_json({
-                    "ok": True, 
-                    "passed": passed, 
-                    "run_id": run_name, 
-                    "mismatch_pct": result.mismatch_pct, 
-                    "ai_label": ai_assessment.get("label"),
-                    "severity": severity.get("label"),
-                    "report_href": f"/artifacts/{run_name}/report.html"
-                })
+                    res = handle_run_upload(
+                        paths=self.paths,
+                        project_root=self.project_root,
+                        parts=parts,
+                        github_repo_url=self._github_repo_url(),
+                        dashboard_base_url=self._dashboard_base_url(),
+                    )
+                    self._invalidate_dashboard_cache()
+                    return self._send_json(res)
+                except ValueError as exc:
+                    return self._send_error_json(str(exc), status=400)
+                except FileNotFoundError as exc:
+                    return self._send_error_json(str(exc), status=404)
+                except Exception as exc:
+                    return self._send_error_json(str(exc), status=500)
+
 
             if self.path == "/api/auth/login":
                 payload = self._read_json()
                 email = str(payload.get("email", "")).strip()
-                password = str(payload.get("password", "")).strip()
+                # NOTE: do NOT strip the password — leading/trailing spaces are valid password chars
+                password = str(payload.get("password", ""))
                 if not email or not password:
                     return self._send_error_json("Email and password are required", status=400)
+
+                # Brute-force / rate-limiting: max 10 attempts per IP per minute
+                client_ip = self.client_address[0]
+                now_ts = time.time()
+                window_start_ts = now_ts - 60.0
+                with _LOGIN_LIMITER_LOCK:
+                    recent = [t for t in _LOGIN_LIMITER[client_ip] if t > window_start_ts]
+                    if len(recent) >= _MAX_LOGIN_ATTEMPTS_PER_MINUTE:
+                        return self._send_error_json(
+                            "Too many login attempts. Please wait a minute before trying again.",
+                            status=429,
+                        )
+                    recent.append(now_ts)
+                    _LOGIN_LIMITER[client_ip] = recent
+
                 user = self.store.authenticate(email, password)
                 if not user:
                     self.store.audit(None, None, "auth.login_failed", {"email": email})
                     return self._send_error_json("Invalid credentials", status=401)
+
+                # Successful login — clear limiter for this IP
+                with _LOGIN_LIMITER_LOCK:
+                    _LOGIN_LIMITER.pop(client_ip, None)
 
                 token = self.store.create_session(user.email, ttl_seconds=60 * 60 * 12)
                 self.send_response(200)
@@ -789,6 +794,61 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     decider=decider,
                     comment=str(payload.get("comment", "")),
                 )
+                
+                # Auto-update GitHub Commit Status if integrated
+                try:
+                    run_payload = manager.load_run_payload(run_dir)
+                    build_id = run_payload.get("build_id")
+                    if build_id:
+                        build_dir = self.paths.builds_dir / build_id
+                        build_json_file = build_dir / "build.json"
+                        if build_json_file.exists():
+                            build_meta = json.loads(build_json_file.read_text(encoding="utf-8"))
+                            commit_sha = build_meta.get("commit_sha")
+                            if commit_sha:
+                                # Retrieve all runs matching this build_id
+                                all_runs = []
+                                for r_dir in self.paths.runs_dir.iterdir():
+                                    if not r_dir.is_dir():
+                                        continue
+                                    res_file = r_dir / "result.json"
+                                    if res_file.exists():
+                                        try:
+                                            r_payload = json.loads(res_file.read_text(encoding="utf-8"))
+                                            if r_payload.get("build_id") == build_id:
+                                                all_runs.append(r_payload)
+                                        except Exception:
+                                            pass
+                                
+                                # A build is green if all runs are either PASS or manually approved
+                                failed_any = False
+                                for r_payload in all_runs:
+                                    status = r_payload.get("status")
+                                    dec_status = (r_payload.get("decision") or {}).get("status")
+                                    if status == "FAIL" and dec_status != "approved":
+                                        failed_any = True
+                                        break
+                                
+                                state = "failure" if failed_any else "success"
+                                description = "Visual check: All snapshots approved/passed" if not failed_any else "Visual check: Remaining unapproved mismatches"
+                                
+                                integrations_manager = IntegrationsManager(self.paths.root)
+                                github_config = integrations_manager.get_config().get("github", {})
+                                if github_config.get("connected"):
+                                    repo_url = self._github_repo_url()
+                                    if repo_url:
+                                        from urllib.parse import quote
+                                        target_url = f"{self._dashboard_base_url()}/build/{quote(build_id)}"
+                                        integrations_manager.post_github_commit_status(
+                                            repo_url=repo_url,
+                                            sha=commit_sha,
+                                            state=state,
+                                            target_url=target_url,
+                                            description=description
+                                        )
+                except Exception as e:
+                    print(f"[GitHub Status Update Warning] Failed: {e}", flush=True)
+
                 actor = self._session_user()
                 self.store.audit(
                     actor.email if actor else decider,
@@ -812,6 +872,27 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 result = manager.delete_run(run_ref)
                 self._invalidate_dashboard_cache()
                 return self._send_json({"ok": True, **result})
+
+            if self.path == "/api/baseline/update-threshold":
+                if not self._require_role({"admin", "developer"}):
+                    if not self._is_authorized():
+                        return self._send_forbidden()
+                payload = self._read_json()
+                name = str(payload.get("name", "")).strip()
+                threshold_val = payload.get("threshold_pct")
+                if not name:
+                    return self._send_error_json("Missing baseline name", status=400)
+                
+                manager = BaselineManager(self.paths)
+                try:
+                    if threshold_val is None or str(threshold_val).strip() == "":
+                        manager.save_custom_threshold(name, None)
+                    else:
+                        manager.save_custom_threshold(name, float(threshold_val))
+                    self._invalidate_dashboard_cache()
+                    return self._send_json({"ok": True})
+                except Exception as e:
+                    return self._send_error_json(str(e), status=400)
 
             if self.path == "/api/baseline/delete":
                 if not self._require_role({"admin"}):
@@ -849,50 +930,50 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     return self._send_forbidden()
                 payload = self._read_json()
                 name = str(payload.get("name", "")).strip()
+                run_id = str(payload.get("run_id", "")).strip()
                 ignore_regions = payload.get("ignore_regions", [])
                 if not name:
                     return self._send_error_json("Missing baseline name", status=400)
-                manager = BaselineManager(self.paths)
+                
+                from .server_services import handle_ignore_regions_update
                 try:
-                    manager.save_ignore_regions(name, ignore_regions)
+                    res = handle_ignore_regions_update(
+                        paths=self.paths,
+                        name=name,
+                        run_id=run_id,
+                        ignore_regions=ignore_regions,
+                        find_selectors_fn=find_selectors_for_coordinates,
+                        github_repo_url=self._github_repo_url(),
+                        dashboard_base_url=self._dashboard_base_url(),
+                    )
                     self._invalidate_dashboard_cache()
-                    return self._send_json({"ok": True, "ignore_regions": ignore_regions})
+                    return self._send_json(res)
                 except Exception as e:
                     return self._send_error_json(str(e), status=500)
 
             if self.path == "/api/ignore-css-selectors":
                 if not self._is_authorized() and not self._require_role({"admin", "viewer"}):
                     return self._send_forbidden()
-                payload = self._read_json()
-                name = str(payload.get("name", "")).strip()
-                ignore_css_selectors = payload.get("ignore_css_selectors", [])
-                if not name:
-                    return self._send_error_json("Missing baseline name", status=400)
-                manager = BaselineManager(self.paths)
-                try:
-                    manager.save_ignore_css_selectors(name, ignore_css_selectors)
-                    self._invalidate_dashboard_cache()
-                    return self._send_json({"ok": True, "ignore_css_selectors": ignore_css_selectors})
-                except Exception as e:
-                    return self._send_error_json(str(e), status=500)
+                return self._send_json({"ok": True, "ignore_css_selectors": []})
 
             if self.path == "/api/actions/create-demo-baselines":
-                # These are demo actions, but we still check for the base 'technician' or 'admin' access
-                # For simplicity in this demo, we check for any non-empty auth or just let it pass if not destructive
-                # But to follow instructions strictly, let's keep it consistent.
-                if not self.headers.get("X-Access-Key") and self.headers.get("User-Role") != "developer":
-                     # In a real app we'd be more granular, but for this FYP we'll let Technicians run tests.
-                     pass 
+                if not self._require_role({"admin", "developer"}) and not self._is_authorized():
+                    return self._send_forbidden()
 
                 result = self._run_cli_action(["create-suite-baselines", "--suite", "suite.demo.yaml", "--overwrite"])
                 self._invalidate_dashboard_cache()
                 return self._send_cli_result(result)
 
             if self.path == "/api/actions/train-ai":
+                if not self._require_role({"admin", "developer"}) and not self._is_authorized():
+                    return self._send_forbidden()
                 result = self._run_cli_action(["train-ai", "--epochs", "20", "--samples-per-image", "12"])
                 self._invalidate_dashboard_cache()
                 return self._send_cli_result(result)
+
             if self.path == "/api/actions/compare-defect":
+                if not self._require_role({"admin", "developer"}) and not self._is_authorized():
+                    return self._send_forbidden()
                 defect_url = f"http://127.0.0.1:{self.port}/demo/index.html?lang=en-US&defect=missing-cta"
                 result = self._run_cli_action(["compare", "--name", "demo-home-en", "--url", defect_url])
                 self._invalidate_dashboard_cache()
@@ -931,6 +1012,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return self._send_cli_result(result)
 
             if self.path == "/api/actions/create-multiple-baselines":
+                if not self._require_role({"admin", "developer"}) and not self._is_authorized():
+                    return self._send_forbidden()
                 payload = self._read_json()
                 args = [
                     "create-multiple-baselines",
@@ -1096,6 +1179,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         return self._send_forbidden()
                 manager = IntegrationsManager(self.paths.root)
                 new_key = manager.rotate_api_key()
+                # Immediately invalidate the in-process API key cache so the
+                # new key is enforced on the very next request (no 60s lag).
+                with _API_KEY_LOCK:
+                    _API_KEY_CACHE.clear()
                 return self._send_json({"ok": True, "api_key": new_key})
 
             if self.path == "/api/integrations/reveal-key":
@@ -1246,6 +1333,219 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 return self._send_json({"ok": True})
 
+            if self.path == "/api/sdk/snapshot":
+                if not self._is_authorized() and not self._session_user():
+                    return self._send_forbidden()
+                
+                # Payload size protection (10MB limit)
+                content_len = int(self.headers.get("Content-Length", "0"))
+                if content_len > 10 * 1024 * 1024:
+                    return self._send_error_json("Payload too large. Maximum 10MB.", status=413)
+
+                # Rate Limiting protection (thread-safe via _SDK_LIMITER_LOCK)
+                auth_hdr = self.headers.get("Authorization") or ""
+                client_ip = self.client_address[0]
+                limiter_key = auth_hdr if auth_hdr else client_ip
+                now = time.time()
+                window_start = now - 60.0
+                with _SDK_LIMITER_LOCK:
+                    timestamps = [t for t in _SDK_LIMITER[limiter_key] if t > window_start]
+                    if len(timestamps) >= _MAX_SNAPSHOTS_PER_MINUTE:
+                        return self._send_error_json("Rate limit exceeded. Maximum 30 uploads per minute.", status=429)
+                    timestamps.append(now)
+                    _SDK_LIMITER[limiter_key] = timestamps
+
+                payload = self._read_json(max_bytes=10 * 1024 * 1024)
+                name = str(payload.get("name", "")).strip()
+                image_b64 = str(payload.get("image", "")).strip()
+                if not name:
+                    return self._send_error_json("Missing 'name'", status=400)
+                # Security: reject path traversal sequences in the baseline name (RISK-03)
+                if ".." in name or "/" in name or "\\" in name:
+                    return self._send_error_json(
+                        "Invalid baseline name: must not contain path separators or '..'",
+                        status=400,
+                    )
+                if not image_b64:
+                    return self._send_error_json("Missing 'image' (base64 PNG)", status=400)
+
+
+                import base64 as _base64
+                try:
+                    # Strip data URI prefix if present
+                    if "," in image_b64:
+                        image_b64 = image_b64.split(",", 1)[1]
+                    image_bytes = _base64.b64decode(image_b64)
+                except Exception:
+                    return self._send_error_json("Invalid base64 image data", status=400)
+
+                manager = BaselineManager(self.paths)
+
+                # Create baseline if it doesn't exist
+                if not manager.exists(name):
+                    tmp_dir = self.paths.root / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    tmp_path = tmp_dir / f"sdk_baseline_{name}.png"
+                    tmp_path.write_bytes(image_bytes)
+                    from .config import CaptureConfig
+                    from .cli import build_capture_metadata
+                    url = str(payload.get("url", "")) or "sdk://upload"
+                    browser = str(payload.get("browser", "sdk-client"))
+                    mock_cfg = CaptureConfig(
+                        name=name, url=url, browser=browser,
+                        viewport=(int(payload.get("viewport_width", 1440)), int(payload.get("viewport_height", 900))),
+                    )
+                    capture_meta = {**build_capture_metadata(mock_cfg), "updated_by": "sdk", "source": "sdk-upload"}
+                    try:
+                        manager.save_from_image(name=name, source_image_path=tmp_path, capture_meta=capture_meta)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+                    self._invalidate_dashboard_cache()
+                    return self._send_json({
+                        "ok": True,
+                        "action": "baseline_created",
+                        "name": name,
+                        "message": f"Baseline '{name}' created successfully from SDK upload."
+                    })
+
+                # Compare against existing baseline
+                from .cli import _copy_baseline_into_run, now_stamp_precise, summarize_severity, build_ai_explanation, resolve_ai_model_path, build_capture_metadata, _initial_decision_status
+                from .image_compare import compare_images
+                from .decision import decide_pass_fail
+                from .reporter import generate_html_report, save_image, write_json
+                from .ai_training import assess_result
+                from .config import CaptureConfig
+                from .baseline_manager import BaselineManager as BM
+
+                url = str(payload.get("url", "")) or "sdk://upload"
+                browser = str(payload.get("browser", "sdk-client"))
+                threshold_pct = float(payload.get("threshold_pct", 0.5))
+                pixel_threshold = int(payload.get("pixel_threshold", 20))
+                min_region_area = int(payload.get("min_region_area", 120))
+                comparison_mode = str(payload.get("comparison_mode", "hybrid"))
+                no_ai = bool(payload.get("no_ai", False))
+
+                from .cli import _slug_part
+                now_str = now_stamp_precise()
+                browser_part = _slug_part(browser, "sdk")
+                run_name = f"{now_str}_{BM.normalize_name(name)}_{browser_part}_desktop_default"
+                run_dir = self.paths.runs_dir / run_name
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                current_path = run_dir / "current.png"
+                current_path.write_bytes(image_bytes)
+
+                baseline_image_path = manager.baseline_image_path(name)
+
+                # Load saved ignore regions
+                ignore_regions = []
+                try:
+                    meta = manager.load_metadata(name)
+                    if "custom_threshold_pct" in meta:
+                        threshold_pct = float(meta["custom_threshold_pct"])
+                    for r in meta.get("ignore_regions", []):
+                        if isinstance(r, dict):
+                            ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
+                        elif isinstance(r, (list, tuple)) and len(r) == 4:
+                            ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
+                except Exception:
+                    pass
+
+                result, diff_overlay, binary_diff = compare_images(
+                    baseline_path=baseline_image_path,
+                    current_path=current_path,
+                    pixel_threshold=pixel_threshold,
+                    min_region_area=min_region_area,
+                    ignore_regions=ignore_regions,
+                )
+
+                baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
+                diff_overlay_path = run_dir / "diff_overlay.png"
+                binary_diff_path = run_dir / "binary_diff.png"
+                report_path = run_dir / "report.html"
+                json_path = run_dir / "result.json"
+
+                save_image(diff_overlay_path, diff_overlay)
+                save_image(binary_diff_path, binary_diff)
+
+                ai_model_path = resolve_ai_model_path(self.paths, None, no_ai)
+                ai_assessment = {}
+                ai_model_available = bool(ai_model_path and ai_model_path.exists())
+                if ai_model_available:
+                    try:
+                        ai_assessment = assess_result(
+                            result=result, model_path=ai_model_path,
+                            baseline_image_path=baseline_image_path,
+                            current_image_path=current_path,
+                        ).to_dict()
+                    except Exception:
+                        pass
+
+                passed, comparison_decision = decide_pass_fail(
+                    comparison_mode=comparison_mode, mismatch_pct=result.mismatch_pct,
+                    threshold_pct=threshold_pct, ai_assessment=ai_assessment,
+                    ai_model_available=ai_model_available,
+                )
+
+                decision_obj = _initial_decision_status(passed)
+                severity = summarize_severity(
+                    result.mismatch_pct, len(result.regions),
+                    ai_assessment.get("score"), ai_assessment.get("label"),
+                )
+                ai_explanation = build_ai_explanation(result, ai_assessment)
+
+                mock_cfg = CaptureConfig(
+                    name=name, url=url, browser=browser,
+                    viewport=(int(payload.get("viewport_width", 1440)), int(payload.get("viewport_height", 900))),
+                )
+                output_payload = {
+                    "case_name": name, "baseline_name": name,
+                    "suite_name": payload.get("suite_name"),
+                    "status": "PASS" if passed else "FAIL",
+                    "threshold_pct": threshold_pct,
+                    "comparison_decision": comparison_decision,
+                    "ignore_regions": [list(r) for r in ignore_regions],
+                    "capture": build_capture_metadata(mock_cfg),
+                    "result": result.to_dict(),
+                    "decision": decision_obj,
+                    "ai_assessment": ai_assessment,
+                    "ai_explanation": ai_explanation,
+                    "severity": severity,
+                }
+                write_json(json_path, output_payload)
+                generate_html_report(
+                    report_path=report_path,
+                    test_name=name,
+                    baseline_image=Path("baseline.png"),
+                    current_image=Path("current.png"),
+                    diff_image=Path("diff_overlay.png"),
+                    binary_image=Path("binary_diff.png"),
+                    result=result,
+                    threshold_pct=threshold_pct,
+                    ignore_regions=ignore_regions,
+                    capture=build_capture_metadata(mock_cfg),
+                    review=decision_obj,
+                    decision_history=[decision_obj],
+                    ai_assessment=ai_assessment,
+                    ai_explanation=ai_explanation,
+                    severity=severity,
+                    status=output_payload["status"],
+                )
+                self._invalidate_dashboard_cache()
+                return self._send_json({
+                    "ok": True,
+                    "action": "compared",
+                    "passed": passed,
+                    "run_id": run_name,
+                    "mismatch_pct": result.mismatch_pct,
+                    "diff_pixels": result.diff_pixels,
+                    "regions": len(result.regions),
+                    "ai_label": ai_assessment.get("label"),
+                    "severity": severity.get("label"),
+                    "report_url": f"/runs/{run_name}",
+                    "export_url": f"/api/runs/{run_name}/export"
+                })
+
             return self._send_error_json("Unknown API endpoint", status=404)
 
         except FileNotFoundError as exc:
@@ -1267,7 +1567,10 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
     store = SqliteStore(paths.db_path)
     store.ensure_bootstrap_users()
     
-    # Pre-warm AI model asynchronously in background to avoid cold-start delays
+    # Pre-warm AI model and Playwright browser pool asynchronously.
+    # NOTE: The earlier AI-only stub (which was accidentally shadowed by this full
+    # version due to Python name rebinding) has been removed.  Only one warmup
+    # function now exists, covering both the model and the browser pool.
     def warmup():
         try:
             from .ai_training import _load_legacy_or_hybrid_model
@@ -1278,10 +1581,46 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
                 print("[AI Warmup] Visual AI model pre-loaded successfully!", flush=True)
         except Exception as e:
             print(f"[AI Warmup Warning] Failed to pre-load model: {e}", flush=True)
-            
+
+        try:
+            get_shared_browser()
+            print("[Playwright Pool] Shared browser pre-warmed successfully!", flush=True)
+        except Exception as e:
+            print(f"[Playwright Pool Warning] Failed to pre-warm browser: {e}", flush=True)
+
     import threading
     threading.Thread(target=warmup, daemon=True).start()
-    
+
+    # ------------------------------------------------------------------ #
+    # Pre-cache git remote URL (RISK-02 fix).  This runs once synchronously
+    # at startup so _github_repo_url() never needs to shell out per-request.
+    # ------------------------------------------------------------------ #
+    try:
+        _git_proc = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
+        _GITHUB_REPO_URL_CACHE["value"] = _git_proc.stdout.strip() if _git_proc.returncode == 0 else ""
+    except Exception:
+        _GITHUB_REPO_URL_CACHE["value"] = ""
+
+    # Pre-seed API key cache so the very first request doesn't pay I/O cost.
+    try:
+        _seed_key = IntegrationsManager(paths.root).get_config().get("api_key", "")
+        with _API_KEY_LOCK:
+            _API_KEY_CACHE["value"] = _seed_key
+            _API_KEY_CACHE["expires_at"] = time.time() + _API_KEY_TTL
+    except Exception:
+        pass
+
+    # Fix the base URL once at startup to prevent Host-header injection attacks
+    # on OAuth redirect URIs (RISK-09 fix).  Always prefer the explicit host/port
+    # the server is bound to; never trust the per-request Host header for this.
+    _display_host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    _STARTUP_BASE_URL["value"] = f"http://{_display_host}:{port}"
+
     handler = partial(DashboardHandler, project_root=project_root, paths=paths, port=port)
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Serving dashboard at http://{host}:{port}/")
@@ -1291,5 +1630,6 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
         pass
     finally:
         server.server_close()
+        close_shared_browser()
 
 

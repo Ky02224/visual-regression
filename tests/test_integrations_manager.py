@@ -33,3 +33,34 @@ def test_github_oauth_lifecycle(tmp_path: Path):
     disconnected = manager.github_status()
     assert disconnected["connected"] is False
     assert disconnected["login"] == ""
+
+
+def test_github_token_encryption(tmp_path: Path):
+    config_dir = tmp_path / ".visual-regression"
+    manager = IntegrationsManager(config_dir)
+
+    manager.complete_github_oauth(
+        access_token="super-secret-token",
+        user={
+            "login": "coder",
+            "avatar_url": "https://example.com/avatar.png",
+            "html_url": "https://github.com/coder",
+        },
+        scopes=["repo"],
+    )
+
+    # Read config file directly from disk to verify it's encrypted.
+    # The new authenticated-encryption format uses the "enc2:" prefix
+    # (CTR + HMAC-SHA256), replacing the old unauthenticated "enc:" XOR format.
+    import json
+    raw_config = json.loads((config_dir / "integrations.json").read_text(encoding="utf-8"))
+    encrypted_token = raw_config["github"]["access_token"]
+    assert encrypted_token.startswith("enc2:"), (
+        f"Expected enc2: prefix (authenticated encryption), got: {encrypted_token[:10]}..."
+    )
+    assert encrypted_token != "super-secret-token"
+
+    # Reload from a new manager instance to verify it decrypts successfully
+    new_manager = IntegrationsManager(config_dir)
+    config = new_manager.get_config()
+    assert config["github"]["access_token"] == "super-secret-token"

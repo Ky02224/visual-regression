@@ -18,6 +18,8 @@ import { cn } from '../lib/utils';
 import { Baseline } from '../types';
 import { useRole } from '../context/RoleContext';
 
+
+
 export function Baselines() {
   const { role } = useRole();
   const [baselines, setBaselines] = React.useState<Baseline[]>([]);
@@ -33,6 +35,8 @@ export function Baselines() {
   const [isExecuting, setIsExecuting] = React.useState(false);
   const [baselineDetails, setBaselineDetails] = React.useState<any>(null);
   const [browserFilter, setBrowserFilter] = React.useState('All');
+  const [thresholdSaved, setThresholdSaved] = React.useState(false);
+
 
   const [newBaseline, setNewBaseline] = React.useState({
     name: '',
@@ -206,6 +210,43 @@ export function Baselines() {
     return matchesSearch && matchesBrowser;
   });
 
+  if (loading) {
+    return (
+      <div className="p-8 min-h-screen">
+        <div className="max-w-7xl mx-auto space-y-12">
+          {/* Header skeleton */}
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-[var(--outline)] pb-8">
+            <div className="flex-1 space-y-3">
+              <div className="h-9 w-48 rounded-md animate-shimmer" />
+              <div className="h-5 w-72 rounded-md animate-shimmer" />
+              <div className="mt-8 h-12 max-w-md rounded-md animate-shimmer" />
+            </div>
+            <div className="h-10 w-40 rounded-xl animate-shimmer" />
+          </div>
+          {/* Grid skeleton */}
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-12">
+            <div className="xl:col-span-8">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="rounded-xl border border-[var(--outline)] overflow-hidden">
+                    <div className="aspect-video animate-shimmer" />
+                    <div className="p-4 space-y-2">
+                      <div className="h-4 w-3/4 rounded animate-shimmer" />
+                      <div className="h-3 w-1/2 rounded animate-shimmer" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="xl:col-span-4">
+              <div className="h-[500px] rounded-md border border-[var(--outline)] animate-shimmer" />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8 min-h-screen">
       <div className="max-w-7xl mx-auto space-y-12">
@@ -344,9 +385,54 @@ export function Baselines() {
                         <InfoItem label="Current Key" value={selectedBaseline.version} />
                       </div>
 
-                      <div className="p-4 bg-stone-50 dark:bg-zinc-900 rounded-md border border-slate-100 dark:border-slate-800 space-y-2">
-                        <h4 className="text-[10px] font-bold text-[var(--on-surface-variant)] uppercase tracking-widest">Ignore regions</h4>
-                        {(baselineDetails?.ignore_regions?.length ?? 0) > 0 ? (
+                      <div className="p-4 bg-stone-50 dark:bg-zinc-900 rounded-md border border-slate-100 dark:border-slate-800 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-[10px] font-bold text-[var(--on-surface-variant)] uppercase tracking-widest">Mismatch Threshold</h4>
+                          <span className="text-[10px] font-semibold text-slate-400">Default: 0.5%</span>
+                        </div>
+                        <div className="flex gap-2 items-center">
+                          <input 
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max="100"
+                            placeholder="0.5"
+                            value={baselineDetails?.custom_threshold_pct ?? ''}
+                            onChange={(e) => {
+                              const val = e.target.value === '' ? null : parseFloat(e.target.value);
+                              setBaselineDetails((prev: any) => ({ ...prev, custom_threshold_pct: val }));
+                            }}
+                            className="bg-white dark:bg-zinc-800 border border-slate-200 dark:border-slate-700 rounded px-2.5 py-1 text-xs outline-none focus:ring-2 focus:ring-primary/10 w-24 dark:text-slate-100"
+                          />
+                          <span className="text-xs text-[var(--on-surface-variant)]">%</span>
+                          <button
+                            onClick={async () => {
+                              setIsExecuting(true);
+                              try {
+                                await fetch('/api/baseline/update-threshold', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ name: selectedBaseline.id, threshold_pct: baselineDetails?.custom_threshold_pct })
+                                });
+                                setThresholdSaved(true);
+                                setTimeout(() => setThresholdSaved(false), 2000);
+                              } catch (_) {}
+                              setIsExecuting(false);
+                            }}
+                            disabled={isExecuting}
+                            className="px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-[11px] font-bold transition-all ml-auto"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        {thresholdSaved && (
+                          <p className="text-[10px] text-emerald-600 dark:text-emerald-450 font-semibold text-right">Saved!</p>
+                        )}
+                      </div>
+
+                      {(baselineDetails?.ignore_regions?.length ?? 0) > 0 && (
+                        <div className="p-4 bg-stone-50 dark:bg-zinc-900 rounded-md border border-slate-100 dark:border-slate-800 space-y-2">
+                          <h4 className="text-[10px] font-bold text-[var(--on-surface-variant)] uppercase tracking-widest">Ignore regions</h4>
                           <ul className="space-y-1 max-h-28 overflow-y-auto">
                             {baselineDetails.ignore_regions.map((rect: number[], idx: number) => (
                               <li key={idx} className="text-xs font-mono text-[var(--on-surface-variant)]">
@@ -354,12 +440,8 @@ export function Baselines() {
                               </li>
                             ))}
                           </ul>
-                        ) : (
-                          <p className="text-xs text-[var(--on-surface-variant)] leading-relaxed">
-                            None on this baseline. Configure <code className="text-[10px] bg-white dark:bg-zinc-800 px-1 rounded">ignore_regions</code> per case in your suite YAML (Percy-style) to exclude dynamic UI from diffs.
-                          </p>
-                        )}
-                      </div>
+                        </div>
+                      )}
 
                       {/* Versions Timeline */}
                       {baselineDetails?.versions && baselineDetails.versions.length > 0 && (
@@ -583,6 +665,7 @@ export function Baselines() {
           </motion.div>
         </div>
       )}
+
     </div>
   );
 }
@@ -697,6 +780,7 @@ function BaselineCard({ baseline, isSelected, onClick, viewMode = 'grid' }: { ba
         )}>
           <Calendar className="w-3 h-3" /> Updated {baseline.updatedAt}
         </p>
+
       </div>
     </div>
   );

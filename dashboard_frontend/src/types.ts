@@ -1,17 +1,19 @@
-/** @deprecated Use ReviewStatus for list/review UI */
+/** Legacy status type — used internally by StatusBadge component */
 export type Status = 'passed' | 'failed' | 'attention' | 'error';
 
 export type ReviewStatus = 'no_changes' | 'unreviewed' | 'approved' | 'rejected';
 export type Severity = 'critical' | 'high' | 'medium' | 'low';
+
+/** All 8 defect categories recognised by the AI model (ResNet50 Siamese) */
 export type AILabel = 
-  | 'missing-element' 
-  | 'layout-shift' 
-  | 'color-regression' 
-  | 'text-truncation' 
-  | 'overlay-obstruction' 
-  | 'broken-image'
-  | 'misaligned-fields'
-  | 'unreadable-text';
+  | 'missing-element'     // UI element is absent
+  | 'layout-shift'        // structural position change
+  | 'color-regression'    // unexpected colour change
+  | 'text-truncation'     // clipped or shortened text
+  | 'overlay-obstruction' // modal / banner blocking content
+  | 'broken-image'        // image failed to load
+  | 'misaligned-fields'   // form fields / elements out of position
+  | 'unreadable-text';    // low-contrast or obscured text
 
 export interface Baseline {
   id: string;

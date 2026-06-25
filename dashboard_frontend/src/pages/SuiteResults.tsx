@@ -69,7 +69,12 @@ export function SuiteResults() {
 
   return (
     <div className="p-8 max-w-6xl mx-auto">
-      <PageHeader title={suiteName} description="Suite-level execution results." action={<Link to="/summaries" className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">Back to summaries</Link>} />
+      <div className="mb-2">
+        <Link to="/summaries" className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+          ← Back to builds
+        </Link>
+      </div>
+      <PageHeader title={suiteName} description="Suite-level execution results." />
       {!runs.length ? (
         <Panel><EmptyState icon={<Activity className="w-8 h-8" />} title="No runs found" description="No runs were recorded for this suite." /></Panel>
       ) : (
@@ -93,7 +98,7 @@ export function SuiteResults() {
                   <td className="px-4 py-3"><ChangeTypeBadge label={getRunChangeLabel(run as any) ?? run.aiLabel} /></td>
                   <td className={cn('px-4 py-3 font-mono text-sm', mismatchPctClass(Number(run.mismatch)))}>{run.mismatch}%</td>
                   <td className="px-4 py-3 text-xs text-[var(--on-surface-variant)]">{new Date(run.lastRun).toLocaleString()}</td>
-                  <td className="px-4 py-3 text-right"><Link to={`/report/${run.id}`} className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">Review</Link></td>
+                  <td className="px-4 py-3 text-right"><Link to={`/report/${run.id}`} state={{ from: 'suite', suiteName }} className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">Review</Link></td>
                 </tr>
               ))}
             </tbody>

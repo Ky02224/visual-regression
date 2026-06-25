@@ -59,7 +59,7 @@ export function Dashboard() {
     onError: () => {}
   });
   
-  const [selectedBuildId, setSelectedBuildId] = React.useState<string | null>(null);
+
   const [groupedRuns, setGroupedRuns] = React.useState<GroupedRuns[]>([]);
   
   React.useEffect(() => {
@@ -67,12 +67,7 @@ export function Dashboard() {
     
     // Group runs by url
     const groups: Record<string, TestRun[]> = {};
-    const runs = (dashboardData.runs || []).filter((r: any) => {
-      if (selectedBuildId) {
-        return r.build_id === selectedBuildId;
-      }
-      return true;
-    });
+    const runs = (dashboardData.runs || []);
 
     runs.forEach((r: any) => {
       const urlStr = r.url || 'Unknown';
@@ -94,17 +89,17 @@ export function Dashboard() {
         
     const arr = Object.keys(groups).map(url => ({ url, runs: groups[url] }));
     setGroupedRuns(arr);
-  }, [dashboardData, selectedBuildId]);
+  }, [dashboardData]);
 
   const [selectedRun, setSelectedRun] = React.useState<TestRun | null>(null);
   const [expandedUrls, setExpandedUrls] = React.useState<string[]>([]);
-  
-  // Auto-expand first group when data loads (but don't auto-select any run)
+  const [previewTab, setPreviewTab] = React.useState<'current' | 'diff' | 'baseline'>('current');
+
   React.useEffect(() => {
-    if (groupedRuns.length > 0 && expandedUrls.length === 0) {
-      setExpandedUrls([groupedRuns[0].url]);
-    }
-  }, [groupedRuns]);
+    setPreviewTab('current');
+  }, [selectedRun?.id]);
+  
+
 
   // Filter States
   const [websiteFilter, setWebsiteFilter] = React.useState('All');
@@ -155,10 +150,9 @@ export function Dashboard() {
           const matchesLocale = localeFilter === 'All' || run.locale === localeFilter;
           const rs = run.reviewStatus ?? normalizeReviewStatus((run as any).review_status ?? run.status);
           const matchesStatus = statusFilter === 'All' ||
-            (statusFilter === 'No changes' && rs === 'no_changes') ||
+            (statusFilter === 'Changes Only' && rs !== 'no_changes') ||
             (statusFilter === 'Unreviewed' && rs === 'unreviewed') ||
-            (statusFilter === 'Approved' && rs === 'approved') ||
-            (statusFilter === 'Rejected' && rs === 'rejected');
+            (statusFilter === 'Approved' && rs === 'approved');
           return matchesSearch && matchesWebsite && matchesDevice && matchesLocale && matchesStatus;
         })
       }))
@@ -215,139 +209,50 @@ export function Dashboard() {
   return (
     <>
     <div className="p-6 max-w-7xl mx-auto min-h-[calc(100vh-4rem)] space-y-6">
-      {selectedBuildId === null ? (
-        <>
-          <header className="mb-8 pb-6 border-b border-slate-200 dark:border-slate-800">
-            <h2 className="text-xl font-semibold mb-1">Builds</h2>
-            <p className="text-slate-500 font-medium">
-              Monitoring visual changes across <span className="text-accent font-bold">{dashboardData?.builds?.length || 0} builds</span>.
-            </p>
-          </header>
-
-          <div className="grid grid-cols-1 gap-4">
-            {(dashboardData?.builds || []).map((build: any) => (
-              <div
-                key={build.build_id}
-                onClick={() => setSelectedBuildId(build.build_id)}
-                className="bg-white dark:bg-slate-900 rounded-md border border-slate-200 dark:border-slate-800 p-5 flex items-center justify-between cursor-pointer hover:border-indigo-500 dark:hover:border-indigo-500 shadow-sm transition-all"
-              >
-                <div className="space-y-1.5 min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold font-mono">
-                      {build.branch}
-                    </span>
-                    <span className="text-xs text-slate-400 font-mono">
-                      {build.commit_sha?.slice(0, 7) || 'unknown'}
-                    </span>
-                  </div>
-                  <h4 className="font-bold text-slate-900 dark:text-slate-100 text-sm truncate max-w-xl">
-                    {build.commit_message || 'Local suite run'}
-                  </h4>
-                  <p className="text-xs text-slate-500 font-medium font-mono">
-                    By <span className="text-slate-700 dark:text-slate-300 font-semibold">{build.author || 'system'}</span> · {relativeTime(build.created_at)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-4 shrink-0 ml-4">
-                  <div className="text-right hidden sm:block">
-                    <p className="text-xs font-semibold text-slate-500">
-                      {build.passed_count || 0} passed / {build.failed_count || 0} failed
-                    </p>
-                    <p className="text-[10px] text-slate-400">Total: {build.total_count || 0} tests</p>
-                  </div>
-                  {build.status === 'passed' ? (
-                    <span className="px-2.5 py-1 rounded bg-green-50 dark:bg-green-950/20 text-green-600 dark:text-green-400 text-[10px] font-bold uppercase tracking-widest">
-                      Passed
-                    </span>
-                  ) : (
-                    <span className="px-2.5 py-1 rounded bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 text-[10px] font-bold uppercase tracking-widest">
-                      Failed
-                    </span>
-                  )}
-                  <ChevronRight className="w-5 h-5 text-slate-300" />
-                </div>
-              </div>
-            ))}
-            {(dashboardData?.builds || []).length === 0 && (
-              <div className="flex flex-col items-center justify-center py-20 text-center bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md">
-                <div className="w-16 h-16 rounded-md bg-slate-50 dark:bg-slate-800/60 flex items-center justify-center mb-5">
-                  <Monitor className="w-8 h-8 text-slate-300 dark:text-slate-600" />
-                </div>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 mb-1">No builds recorded yet</h3>
-                <p className="text-sm text-slate-400 max-w-xs mb-6">Run a suite of tests to create a build.</p>
-                <Link to="/actions" className="px-5 py-2 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-md text-xs font-bold uppercase tracking-widest hover:opacity-80 transition-opacity">
-                  Run Suite
-                </Link>
-              </div>
-            )}
+      {/* ── Stats bar ── */}
+      <div className="mb-6 flex rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden divide-x divide-slate-100 dark:divide-slate-800 shadow-sm">
+        <div className="flex-1 px-8 py-6">
+          <div className="flex items-center gap-2 mb-3">
+            <Monitor className="w-4 h-4 text-slate-400" />
+            <p className="text-xs font-semibold text-slate-400">Total runs</p>
           </div>
-        </>
-      ) : (
-        <>
-          <header className="mb-8 pb-6 border-b border-slate-200 dark:border-slate-800 flex justify-between items-end flex-wrap gap-4">
-            <div>
-              <button onClick={() => setSelectedBuildId(null)} className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline mb-1 block">
-                ← Back to builds
-              </button>
-              <h2 className="text-xl font-bold">
-                Build: {dashboardData?.builds?.find((b: any) => b.build_id === selectedBuildId)?.commit_message || 'Local suite run'}
-              </h2>
-              <p className="text-xs text-slate-500 font-mono mt-1">
-                ID: {selectedBuildId}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <Link to="/actions">
-                <Button variant="secondary" size="sm">New run</Button>
-              </Link>
-            </div>
-          </header>
-
-          {/* ── Stats: single card, internal dividers ── */}
-          <div className="mb-8 flex rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden divide-x divide-slate-100 dark:divide-slate-800 shadow-sm">
-            <div className="flex-1 px-8 py-8">
-              <div className="flex items-center gap-2 mb-4">
-                <Monitor className="w-4 h-4 text-slate-400" />
-                <p className="text-xs font-semibold text-slate-400">Total tests</p>
-              </div>
-              <p className="text-4xl font-black tabular-nums text-slate-900 dark:text-slate-100">
-                {groupedRuns.flatMap(g => g.runs).length}
-              </p>
-              <p className="text-xs text-slate-400 mt-1.5">Executed in build</p>
-            </div>
-
-            <div className="flex-1 px-8 py-8">
-              <div className="flex items-center gap-2 mb-4">
-                <AlertTriangle className="w-4 h-4 text-orange-400" />
-                <p className="text-xs font-semibold text-slate-400">Unreviewed</p>
-              </div>
-              <p className="text-4xl font-black tabular-nums text-orange-600 dark:text-orange-400">
-                {groupedRuns.flatMap(g => g.runs).filter(r => r.reviewStatus === 'unreviewed').length}
-              </p>
-              <p className="text-xs text-slate-400 mt-1.5">Requires action</p>
-            </div>
-
-            <div className="flex-1 px-8 py-8">
-              <div className="flex items-center gap-2 mb-4">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                <p className="text-xs font-semibold text-slate-400 font-mono">Passed</p>
-              </div>
-              <p className="text-4xl font-black tabular-nums text-emerald-600 dark:text-emerald-400">
-                {groupedRuns.flatMap(g => g.runs).filter(r => r.reviewStatus === 'no_changes' || r.reviewStatus === 'approved').length}
-              </p>
-              <p className="text-xs text-slate-400 mt-1.5">No changes or approved</p>
-            </div>
+          <p className="text-4xl font-black tabular-nums text-slate-900 dark:text-slate-100">
+            {groupedRuns.flatMap(g => g.runs).length}
+          </p>
+          <p className="text-xs text-slate-400 mt-1.5">Across all baselines</p>
+        </div>
+        <div className="flex-1 px-8 py-6">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="w-4 h-4 text-orange-400" />
+            <p className="text-xs font-semibold text-slate-400">Unreviewed</p>
           </div>
+          <p className="text-4xl font-black tabular-nums text-orange-600 dark:text-orange-400">
+            {groupedRuns.flatMap(g => g.runs).filter(r => r.reviewStatus === 'unreviewed').length}
+          </p>
+          <p className="text-xs text-slate-400 mt-1.5">Requires action</p>
+        </div>
+        <div className="flex-1 px-8 py-6">
+          <div className="flex items-center gap-2 mb-3">
+            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+            <p className="text-xs font-semibold text-slate-400">Passed</p>
+          </div>
+          <p className="text-4xl font-black tabular-nums text-emerald-600 dark:text-emerald-400">
+            {groupedRuns.flatMap(g => g.runs).filter(r => r.reviewStatus === 'no_changes' || r.reviewStatus === 'approved').length}
+          </p>
+          <p className="text-xs text-slate-400 mt-1.5">No changes or approved</p>
+        </div>
+      </div>
 
-          <div className="space-y-4">
-            {/* Section header */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">Visual Snapshots</h3>
-                <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-bold">
-                  {groupedRuns.flatMap(g => g.runs).length}
-                </span>
-              </div>
-            </div>
+      <div className="space-y-4">
+        {/* Section header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">All Runs</h3>
+            <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-bold">
+              {groupedRuns.flatMap(g => g.runs).length}
+            </span>
+          </div>
+        </div>
 
             {/* Full-width search bar */}
             <div className="relative">
@@ -369,10 +274,10 @@ export function Dashboard() {
               )}
             </div>
 
-            {/* Filter row: status pills + dropdowns */}
+            {/* Filter row */}
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="flex items-center gap-1.5 flex-wrap">
-                {(['All', 'No changes', 'Unreviewed', 'Approved', 'Rejected'] as const).map(s => (
+                {(['All', 'Changes Only', 'Unreviewed', 'Approved'] as const).map(s => (
                   <button
                     key={s}
                     onClick={() => setStatusFilter(s)}
@@ -380,14 +285,14 @@ export function Dashboard() {
                       "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
                       statusFilter === s
                         ? s === 'All' ? "bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-sm"
-                          : s === 'Rejected' ? "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800 shadow-sm"
+                          : s === 'Changes Only' ? "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800 shadow-sm"
                           : s === 'Unreviewed' ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800 shadow-sm"
                           : "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800 shadow-sm"
                         : "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600"
                     )}
                   >
                     {s !== 'All' && (
-                      <span className={cn("mr-1 text-[8px]", statusFilter !== s && (s === 'Rejected' ? 'text-red-400' : s === 'Unreviewed' ? 'text-orange-400' : 'text-green-400'))}>●</span>
+                      <span className={cn("mr-1 text-[8px]", statusFilter !== s && (s === 'Changes Only' ? 'text-red-400' : s === 'Unreviewed' ? 'text-orange-400' : 'text-green-400'))}>●</span>
                     )}
                     {s}
                   </button>
@@ -500,7 +405,7 @@ export function Dashboard() {
               })}
             </div>
 
-            {/* Empty state: filters returned nothing */}
+            {/* Empty state */}
             {filteredGroupedRuns.length === 0 && !loading && (
               <div className="flex flex-col items-center justify-center py-20 text-center">
                 <div className="w-16 h-16 rounded-md bg-slate-50 dark:bg-slate-800/60 flex items-center justify-center mb-5">
@@ -517,8 +422,6 @@ export function Dashboard() {
               </div>
             )}
           </div>
-        </>
-      )}
     </div>
 
     {/* Right-side detail drawer */}
@@ -565,8 +468,29 @@ export function Dashboard() {
                 <ChangeTypeBadge label={(selectedRun as any).ai_label ?? selectedRun.aiLabel} />
                 <ReviewStatusBadge status={selectedRun.reviewStatus ?? normalizeReviewStatus(selectedRun.status)} />
               </div>
+              <div className="flex rounded-md bg-stone-100 dark:bg-zinc-800 p-0.5 mb-3">
+                {(['baseline', 'current', 'diff'] as const).map(tab => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setPreviewTab(tab)}
+                    className={cn(
+                      "flex-1 text-center py-1 rounded text-xs font-semibold capitalize transition-all",
+                      previewTab === tab
+                        ? "bg-white dark:bg-zinc-700 shadow-sm text-slate-900 dark:text-white"
+                        : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+                    )}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
               <div className="rounded-md overflow-hidden border border-[var(--outline)] mb-4">
-                <ImageFrame src={`/artifacts/${selectedRun.id}/current.png`} alt="Preview" aspectRatio="16/10" />
+                <ImageFrame 
+                  src={`/artifacts/${selectedRun.id}/${previewTab === 'diff' ? 'diff_overlay' : previewTab}.png`} 
+                  alt={`${previewTab} preview`} 
+                  aspectRatio="16/10" 
+                />
               </div>
               <div className="flex items-center justify-between text-sm mb-4 px-1">
                 <span className="text-[var(--on-surface-variant)]">Mismatch</span>

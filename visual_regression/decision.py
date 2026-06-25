@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Tuple
 
 COMPARISON_MODES = ("pixel", "ai", "hybrid")
-DEFAULT_COMPARISON_MODE = "ai"
+DEFAULT_COMPARISON_MODE = "hybrid"
 
 
 def normalize_comparison_mode(value: str | None, default: str = DEFAULT_COMPARISON_MODE) -> str:

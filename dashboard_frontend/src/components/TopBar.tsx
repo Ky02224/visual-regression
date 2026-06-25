@@ -9,7 +9,7 @@ const PAGE_TITLES: Record<string, { title: string; sub: string }> = {
   '/': { title: 'Dashboard', sub: 'Visual change status across all runs' },
   '/actions': { title: 'Actions', sub: 'Run comparisons and suite tests' },
   '/baselines': { title: 'Baselines', sub: 'Manage snapshot baselines' },
-  '/summaries': { title: 'Summaries', sub: 'Aggregated run summaries' },
+  '/summaries': { title: 'Builds', sub: 'All test runs — suite executions and CI builds' },
   '/integrations': { title: 'Integrations', sub: 'External service configuration' },
   '/users': { title: 'User Management', sub: 'Roles and access control' },
 };

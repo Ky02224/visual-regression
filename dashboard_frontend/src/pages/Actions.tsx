@@ -74,10 +74,10 @@ export function Actions() {
   return (
     <div className="p-8 min-h-screen transition-colors duration-300">
       <div className="max-w-4xl mx-auto space-y-12">
-        <PageHeader title="System actions" description="Capture, sync, and compare visual baselines." />
+        <PageHeader title="System Actions" description="Capture, sync, and compare visual baselines." />
 
         {/* Tab Navigation */}
-        <div className="flex flex-wrap items-center gap-2 p-1.5 bg-[var(--surface)] border border-[var(--outline)] rounded-md shadow-sm">
+        <div className="inline-flex flex-wrap items-center gap-1.5 p-1.5 bg-[var(--surface)] border border-[var(--outline)] rounded-2xl shadow-sm">
           {tabs.map((tab) => (
             <button
               key={tab.id}

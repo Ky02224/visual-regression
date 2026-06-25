@@ -6,17 +6,27 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Thread-local storage so each thread reuses its own SQLite connection
+# instead of opening a new file handle on every _connect() call.
+_thread_local = threading.local()
 
 
 def _utc_epoch() -> int:
     return int(time.time())
 
 
-def _pbkdf2_hash(password: str, salt: bytes, iterations: int = 210_000) -> bytes:
+# PBKDF2 iteration counts — OWASP 2023 recommends ≥ 600,000 for SHA-256.
+_PBKDF2_ITERATIONS = 600_000         # Used for all newly created passwords
+_PBKDF2_LEGACY_ITERATIONS = 210_000  # Retained for backward-compat verification
+
+
+def _pbkdf2_hash(password: str, salt: bytes, iterations: int = _PBKDF2_ITERATIONS) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
 
 
@@ -32,8 +42,13 @@ def verify_password(password: str, salt_hex: str, digest_hex: str) -> bool:
         expected = bytes.fromhex(digest_hex)
     except Exception:
         return False
-    actual = _pbkdf2_hash(password, salt)
-    return hmac.compare_digest(actual, expected)
+    # Try the current (stronger) iteration count first; fall back to the legacy
+    # count for users whose passwords were hashed before the upgrade.
+    actual = _pbkdf2_hash(password, salt, _PBKDF2_ITERATIONS)
+    if hmac.compare_digest(actual, expected):
+        return True
+    legacy = _pbkdf2_hash(password, salt, _PBKDF2_LEGACY_ITERATIONS)
+    return hmac.compare_digest(legacy, expected)
 
 
 @dataclass(frozen=True)
@@ -50,9 +65,22 @@ class SqliteStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        """Return a per-thread cached SQLite connection.
+
+        SQLite connections are not thread-safe to share, but reusing one
+        connection per thread (thread-local storage) eliminates the cost of
+        opening a new file handle on every single database call.
+        """
+        conn = getattr(_thread_local, "conn", None)
+        db_path_str = str(self.db_path)
+        # Re-create if the connection doesn't exist or points to a different DB
+        if conn is None or getattr(_thread_local, "db_path", None) != db_path_str:
+            conn = sqlite3.connect(db_path_str, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            _thread_local.conn = conn
+            _thread_local.db_path = db_path_str
         return conn
+
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -247,10 +275,22 @@ class SqliteStore:
         - LENS_ADMIN_EMAIL / LENS_ADMIN_PASSWORD   (default: admin / admin1234)
         - LENS_DEVELOPER_EMAIL / LENS_DEVELOPER_PASSWORD  (default: user / user1234)
         """
+        import sys
         admin_email = os.environ.get("LENS_ADMIN_EMAIL", "admin")
         admin_password = os.environ.get("LENS_ADMIN_PASSWORD", "admin1234")
         dev_email = os.environ.get("LENS_DEVELOPER_EMAIL", "user")
         dev_password = os.environ.get("LENS_DEVELOPER_PASSWORD", "user1234")
+
+        # Warn loudly when factory-default credentials are in use
+        _WEAK_DEFAULTS = {"admin1234", "user1234", "password", "admin", "user"}
+        if admin_password in _WEAK_DEFAULTS or dev_password in _WEAK_DEFAULTS:
+            print(
+                "\n⚠️  [SECURITY WARNING] Default/weak credentials are in use!\n"
+                "   Set LENS_ADMIN_PASSWORD and LENS_DEVELOPER_PASSWORD env vars\n"
+                "   before deploying to any network-accessible environment.\n",
+                file=sys.stderr,
+                flush=True,
+            )
 
         now = _utc_epoch()
         for email, password, role in [
@@ -258,12 +298,9 @@ class SqliteStore:
             (dev_email, dev_password, "developer"),
         ]:
             email = email.strip().lower()
-            with self._connect() as conn:
-                existing = conn.execute("SELECT id FROM users WHERE email=?;", (email,)).fetchone()
-                if existing:
-                    continue
             salt_hex, digest_hex = hash_password(password)
             with self._connect() as conn:
+                # INSERT OR IGNORE handles duplicate emails natively — no prior SELECT needed.
                 conn.execute(
                     "INSERT OR IGNORE INTO users(email, role, password_salt, password_hash, disabled, created_at) VALUES(?,?,?,?,0,?);",
                     (email, role, salt_hex, digest_hex, now),

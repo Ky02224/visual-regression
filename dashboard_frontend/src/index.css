@@ -73,3 +73,9 @@
 }
 
 .review-layout > section:last-child { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+
+/* Hide browser native reveal and clear buttons for custom toggles */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}

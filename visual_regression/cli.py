@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -167,6 +168,43 @@ def _copy_baseline_into_run(baseline_path: Path, run_dir: Path) -> Path:
     return target
 
 
+def capture_website_remotely(agent_url: str, cfg: CaptureConfig, output_path: Path) -> None:
+    import urllib.request
+    import json
+    data = {
+        "name": cfg.name,
+        "url": cfg.url,
+        "browser": cfg.browser,
+        "device": cfg.device,
+        "viewport": list(cfg.viewport),
+        "wait_ms": cfg.wait_ms,
+        "wait_until": cfg.wait_until,
+        "navigation_timeout_ms": cfg.navigation_timeout_ms,
+        "full_page": cfg.full_page,
+        "disable_animations": cfg.disable_animations,
+        "locale": cfg.locale,
+        "timezone_id": cfg.timezone_id,
+        "color_scheme": cfg.color_scheme,
+        "extra_headers": cfg.extra_headers,
+        "hide_selectors": cfg.hide_selectors,
+        "wait_for_selector": cfg.wait_for_selector,
+        "mock_routes": cfg.mock_routes,
+    }
+    url = agent_url.rstrip("/") + "/capture"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(data).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    print(f"[Agent Capture] Delegating capture of '{cfg.name}' to remote agent: {agent_url}", flush=True)
+    with urllib.request.urlopen(req, timeout=60) as response:
+        if response.status == 200:
+            output_path.write_bytes(response.read())
+        else:
+            raise Exception(f"Agent returned status code {response.status}")
+
+
 def _capture_and_save_baseline(
     manager: BaselineManager,
     paths: WorkspacePaths,
@@ -175,12 +213,17 @@ def _capture_and_save_baseline(
     capture_meta: Dict[str, Any],
     playwright_instance: Any = None,
     browser_instance: Any = None,
+    agent_node: str | None = None,
 ) -> None:
     from .browser import capture_website
 
     temp_path = paths.root / "tmp" / f"{manager.normalize_name(name)}-{now_stamp()}.png"
-    capture_website(capture_cfg, temp_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
-    manager.save_from_image(name=name, source_image_path=temp_path, capture_meta=capture_meta)
+    if agent_node:
+        capture_website_remotely(agent_node, capture_cfg, temp_path)
+        regions = None
+    else:
+        regions = capture_website(capture_cfg, temp_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
+    manager.save_from_image(name=name, source_image_path=temp_path, capture_meta=capture_meta, ignore_regions=regions)
     temp_path.unlink(missing_ok=True)
 
 
@@ -228,10 +271,11 @@ def _run_compare(
     ignore_regions: Sequence[tuple[int, int, int, int]],
     ai_model_path: Path | None,
     suite_name: str | None = None,
-    comparison_mode: str = "ai",
+    comparison_mode: str = "hybrid",
     playwright_instance: Any = None,
     browser_instance: Any = None,
     build_id: str | None = None,
+    agent_node: str | None = None,
 ) -> tuple[bool, Path, Dict[str, Any]]:
     from .ai_training import assess_result
     from .browser import capture_website
@@ -243,11 +287,11 @@ def _run_compare(
         raise FileNotFoundError(f"Baseline '{case_name}' not found. Create one first.")
 
     active_ignore_regions = list(ignore_regions)
-    active_css_selectors = []
     if manager.exists(case_name):
         try:
             meta = manager.load_metadata(case_name)
-            active_css_selectors = list(meta.get("ignore_css_selectors", []))
+            if "custom_threshold_pct" in meta:
+                threshold_pct = float(meta["custom_threshold_pct"])
             if not active_ignore_regions:
                 saved_regions = meta.get("ignore_regions", [])
                 for r in saved_regions:
@@ -258,15 +302,14 @@ def _run_compare(
         except Exception:
             pass
 
-    if active_css_selectors:
-        orig = list(capture_cfg.hide_selectors or [])
-        capture_cfg.hide_selectors = list(set(orig + active_css_selectors))
-
     run_dir = paths.runs_dir / _run_name_for_capture(case_name, capture_cfg)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     current_path = run_dir / "current.png"
-    capture_website(capture_cfg, current_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
+    if agent_node:
+        capture_website_remotely(agent_node, capture_cfg, current_path)
+    else:
+        capture_website(capture_cfg, current_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
 
     baseline_image_path = manager.baseline_image_path(case_name)
     result, diff_overlay, binary_diff = compare_images(
@@ -405,7 +448,7 @@ def _run_compare(
         # Trigger webhook only when a regression is detected.
         webhook_url = config.get("webhook_url")
         if webhook_url and not passed:
-            dashboard_url = "http://127.0.0.1:8130"
+            dashboard_url = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8130")
             payload = format_regression_detected_payload(
                 run_id=run_dir.name,
                 case_name=case_name,
@@ -709,6 +752,7 @@ def _run_suite_case(
     playwright_instance: Any = None,
     browser_instance: Any = None,
     build_id: str | None = None,
+    agent_node: str | None = None,
 ) -> tuple[bool, Dict[str, Any]]:
     capture_cfg = _capture_config_from_case(case, args)
     passed, _, details = _run_compare(
@@ -726,6 +770,7 @@ def _run_suite_case(
         playwright_instance=playwright_instance,
         browser_instance=browser_instance,
         build_id=build_id,
+        agent_node=agent_node,
     )
     return passed, details
 
@@ -832,6 +877,12 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
     }
     write_json(build_meta_dir / "build.json", build_payload)
 
+    agent_nodes = getattr(args, "agent_node", []) or []
+    case_agents = {}
+    if agent_nodes:
+        for idx, case in enumerate(cases):
+            case_agents[case.name] = agent_nodes[idx % len(agent_nodes)]
+
     def process_case(case) -> Dict[str, Any]:
         nonlocal failed_any
         if failed_any and getattr(args, "fail_fast", False):
@@ -866,14 +917,50 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
             "ai_explanation": None,
         }
 
+        agent_url = case_agents.get(case.name) if agent_nodes else None
+
         try:
-            with sync_playwright() as playwright:
-                browser_name = case.browser or "chromium"
-                if browser_name not in {"chromium", "firefox", "webkit"}:
-                    browser_name = "chromium"
-                browser_type = getattr(playwright, browser_name)
-                browser_instance = browser_type.launch(headless=True)
+            if agent_url:
+                if not manager.exists(case.name):
+                    if not getattr(args, "create_missing_baseline", False):
+                        row["status"] = "SKIP"
+                        row["message"] = "Missing baseline. Use --create-missing-baseline."
+                        print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
+                        failed_any = True
+                        return row
+
+                    capture_cfg = _capture_config_from_case(case, args)
+                    _capture_and_save_baseline(
+                        manager=manager,
+                        paths=paths,
+                        name=case.name,
+                        capture_cfg=capture_cfg,
+                        capture_meta={**build_capture_metadata(capture_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
+                        agent_node=agent_url,
+                    )
+                    print(f"[BASELINE CREATED] {case.name} via Agent {agent_url}")
+
+                passed, details = _run_suite_case(
+                    case, args, manager, paths, ai_model_path,
+                    build_id=build_id,
+                    agent_node=agent_url,
+                )
+                row["status"] = "PASS" if passed else "FAIL"
+                row["mismatch_pct"] = details.get("mismatch_pct")
+                row["threshold_pct"] = details.get("threshold_pct")
+                row["report"] = details.get("report", "")
+                row["decision_status"] = details.get("decision_status")
+                row["ai_label"] = details.get("ai_label")
+                row["ai_score"] = details.get("ai_score")
+                row["severity"] = details.get("severity")
+                row["ai_explanation"] = details.get("ai_explanation")
+                if not passed:
+                    failed_any = True
+            else:
                 try:
+                    from .dashboard_server import get_shared_browser
+                    playwright, browser = get_shared_browser()
+
                     if not manager.exists(case.name):
                         if not getattr(args, "create_missing_baseline", False):
                             row["status"] = "SKIP"
@@ -890,14 +977,14 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
                             capture_cfg=capture_cfg,
                             capture_meta={**build_capture_metadata(capture_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
                             playwright_instance=playwright,
-                            browser_instance=browser_instance,
+                            browser_instance=browser,
                         )
                         print(f"[BASELINE CREATED] {case.name}")
 
                     passed, details = _run_suite_case(
                         case, args, manager, paths, ai_model_path,
                         playwright_instance=playwright,
-                        browser_instance=browser_instance,
+                        browser_instance=browser,
                         build_id=build_id,
                     )
                     row["status"] = "PASS" if passed else "FAIL"
@@ -911,11 +998,11 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
                     row["ai_explanation"] = details.get("ai_explanation")
                     if not passed:
                         failed_any = True
-                finally:
-                    try:
-                        browser_instance.close()
-                    except:
-                        pass
+                except Exception as exc:
+                    row["status"] = "ERROR"
+                    row["message"] = str(exc)
+                    failed_any = True
+                    print(f"[ERROR] {case.name}: {exc}")
         except Exception as exc:
             row["status"] = "ERROR"
             row["message"] = str(exc)
@@ -991,6 +1078,13 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
             message=f"Suite execution: {Path(args.suite).name}",
             status="success" if fail_count == 0 else "failed"
         )
+    except:
+        pass
+
+    # Ensure any shared browser started by the CLI is cleaned up
+    try:
+        from .dashboard_server import close_shared_browser
+        close_shared_browser()
     except:
         pass
 
@@ -1121,10 +1215,10 @@ def add_common_capture_args(parser: argparse.ArgumentParser, require_url: bool, 
     parser.add_argument("--browser", default="chromium", choices=["chromium", "firefox", "webkit"])
     parser.add_argument("--device", help="Playwright device name (example: iPhone 13)")
     parser.add_argument("--viewport", default="1440x900", help="Viewport format WIDTHxHEIGHT")
-    parser.add_argument("--wait-ms", type=int, default=1200, help="Extra wait time after load")
+    parser.add_argument("--wait-ms", type=int, default=0, help="Extra wait time after load")
     parser.add_argument(
         "--wait-until",
-        default="networkidle",
+        default="load",
         choices=["load", "domcontentloaded", "networkidle", "commit"],
         help="Playwright navigation wait strategy",
     )
@@ -1146,9 +1240,81 @@ def add_ai_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--comparison-mode",
         choices=["pixel", "ai", "hybrid"],
-        default="ai",
+        default="hybrid",
         help="PASS/FAIL source: pixel threshold, AI meaningful-change detection, or both (hybrid)",
     )
+
+
+from http.server import BaseHTTPRequestHandler
+
+class AgentHTTPHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path == "/capture":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            try:
+                import json
+                from pathlib import Path
+                import tempfile
+                from .config import CaptureConfig
+                from .browser import capture_website
+                
+                data = json.loads(post_data.decode('utf-8'))
+                cfg = CaptureConfig(
+                    name=data["name"],
+                    url=data["url"],
+                    browser=data.get("browser", "chromium"),
+                    device=data.get("device"),
+                    viewport=tuple(data.get("viewport", (1440, 900))),
+                    wait_ms=data.get("wait_ms", 1200),
+                    wait_until=data.get("wait_until", "networkidle"),
+                    navigation_timeout_ms=data.get("navigation_timeout_ms", 45000),
+                    full_page=data.get("full_page", True),
+                    disable_animations=data.get("disable_animations", True),
+                    locale=data.get("locale"),
+                    timezone_id=data.get("timezone_id"),
+                    color_scheme=data.get("color_scheme", "light"),
+                    extra_headers=data.get("extra_headers", {}),
+                    hide_selectors=data.get("hide_selectors", []),
+                    wait_for_selector=data.get("wait_for_selector"),
+                    mock_routes=data.get("mock_routes", {}),
+                )
+                
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    out_path = Path(tmpdir) / "screenshot.png"
+                    capture_website(cfg, out_path)
+                    if out_path.exists():
+                        img_bytes = out_path.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "image/png")
+                        self.send_header("Content-Length", str(len(img_bytes)))
+                        self.end_headers()
+                        self.wfile.write(img_bytes)
+                        return
+                    else:
+                        raise Exception("Screenshot file was not generated.")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def cmd_agent(args) -> int:
+    from http.server import HTTPServer
+    server = HTTPServer((args.host, args.port), AgentHTTPHandler)
+    print(f"Distributed Capture Agent running at http://{args.host}:{args.port}/", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1198,8 +1364,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare_matrix_parser.add_argument("--device", action="append", default=[], help="Playwright device name; use desktop by leaving empty")
     compare_matrix_parser.add_argument("--locale", action="append", default=[], help="Locale for browser context")
     compare_matrix_parser.add_argument("--viewport", default="1440x900", help="Viewport format WIDTHxHEIGHT")
-    compare_matrix_parser.add_argument("--wait-ms", type=int, default=1200)
-    compare_matrix_parser.add_argument("--wait-until", default="networkidle", choices=["load", "domcontentloaded", "networkidle", "commit"])
+    compare_matrix_parser.add_argument("--wait-ms", type=int, default=0)
+    compare_matrix_parser.add_argument("--wait-until", default="load", choices=["load", "domcontentloaded", "networkidle", "commit"])
     compare_matrix_parser.add_argument("--timeout-ms", type=int, default=45000)
     compare_matrix_parser.add_argument("--no-full-page", action="store_true")
     compare_matrix_parser.add_argument("--allow-animations", action="store_true")
@@ -1272,7 +1438,12 @@ def build_parser() -> argparse.ArgumentParser:
     suite_parser.add_argument("--fail-fast", action="store_true", help="Stop on first failure/error")
     suite_parser.add_argument("--junit-file", help="Write JUnit XML to this path")
     suite_parser.add_argument("--no-junit", action="store_true", help="Disable JUnit XML output")
+    suite_parser.add_argument("--agent-node", action="append", default=[], help="Address of remote agent node(s)")
     add_ai_args(suite_parser)
+
+    agent_parser = subparsers.add_parser("agent", help="Start a distributed capture agent worker")
+    agent_parser.add_argument("--host", default="0.0.0.0", help="Host address to bind to")
+    agent_parser.add_argument("--port", type=int, default=8140, help="Port to listen on")
 
     serve_parser = subparsers.add_parser("serve-demo", help="Serve local demo portal")
     serve_parser.add_argument("--site-dir", default="demo_portal")
@@ -1326,6 +1497,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_serve_demo(args)
     if args.command == "serve-dashboard":
         return cmd_serve_dashboard(args, paths)
+    if args.command == "agent":
+        return cmd_agent(args)
     raise ValueError(f"Unknown command: {args.command}")
 
 

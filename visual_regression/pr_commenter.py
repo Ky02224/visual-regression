@@ -1,11 +1,97 @@
 """
 Generates a markdown report from the visual regression test results
-to be posted as a comment on Pull Requests.
+to be posted as a comment on Pull Requests and sets GitHub Commit Status.
 """
 from __future__ import annotations
 import json
 from pathlib import Path
 from .config import WorkspacePaths
+
+def post_to_github(markdown_body: str, is_fail: bool, failed_count: int, total_count: int) -> None:
+    import os
+    import urllib.request
+    import json as _json
+
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    sha = os.environ.get("GITHUB_SHA")
+    dashboard_url = os.environ.get("VISUAL_DASHBOARD_URL")
+
+    if not token or not repo:
+        print("GitHub integration skipped: GITHUB_TOKEN or GITHUB_REPOSITORY not set in environment.")
+        return
+
+    # 1. Update Commit Status
+    if sha:
+        status_url = f"https://api.github.com/repos/{repo}/statuses/{sha}"
+        status_data = {
+            "state": "failure" if is_fail else "success",
+            "context": "visual-regression/mismatch-check",
+            "description": f"{failed_count} failures detected" if is_fail else "All snapshots matched successfully",
+        }
+        if dashboard_url:
+            status_data["target_url"] = dashboard_url
+
+        try:
+            req = urllib.request.Request(
+                status_url,
+                data=_json.dumps(status_data).encode("utf-8"),
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "Python-VisualRegression-Workbench",
+                    "Content-Type": "application/json",
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                print(f"GitHub Commit Status updated successfully (HTTP {resp.status})")
+        except Exception as e:
+            print(f"Error updating GitHub Commit Status: {e}")
+
+    # 2. Post PR Comment (if PR number is available)
+    pr_number = None
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if event_path and os.path.exists(event_path):
+        try:
+            with open(event_path, "r", encoding="utf-8") as f:
+                event_data = _json.load(f)
+            pr_number = event_data.get("pull_request", {}).get("number")
+        except Exception:
+            pass
+
+    if not pr_number:
+        # Fallback to parse from GITHUB_REF
+        ref = os.environ.get("GITHUB_REF", "")
+        if ref.startswith("refs/pull/"):
+            parts = ref.split("/")
+            if len(parts) > 2:
+                try:
+                    pr_number = int(parts[2])
+                except ValueError:
+                    pass
+
+    if pr_number:
+        comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+        comment_data = {
+            "body": markdown_body
+        }
+        try:
+            req = urllib.request.Request(
+                comment_url,
+                data=_json.dumps(comment_data).encode("utf-8"),
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "Python-VisualRegression-Workbench",
+                    "Content-Type": "application/json",
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                print(f"GitHub PR comment posted successfully (HTTP {resp.status})")
+        except Exception as e:
+            print(f"Error posting GitHub PR comment: {e}")
 
 def main() -> None:
     paths = WorkspacePaths(Path(__file__).parent.parent.resolve())
@@ -71,10 +157,15 @@ def main() -> None:
         markdown.append("### ✅ Visual Regression Passed!")
         markdown.append(f"All **{total}** test variations matched their baseline images successfully.")
 
+    markdown_content = "\n".join(markdown)
+
     # Write output markdown comment file
     comment_file = paths.root / "pr_comment.md"
-    comment_file.write_text("\n".join(markdown), encoding="utf-8")
+    comment_file.write_text(markdown_content, encoding="utf-8")
     print(f"Generated PR comment Markdown at: {comment_file}")
+
+    # Post/publish to GitHub CI environment if config is present
+    post_to_github(markdown_content, failed_count > 0, failed_count, total)
 
 if __name__ == "__main__":
     main()

@@ -25,7 +25,16 @@ class WorkspacePaths:
         self.models_dir = self.root / "models"
         self.datasets_dir = self.root / "datasets"
         self.builds_dir = self.root / "builds"
-        self.db_path = self.root / "storage.db"
+        
+        import os
+        db_env = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_PATH")
+        if db_env:
+            if db_env.startswith("sqlite:///"):
+                self.db_path = Path(db_env[10:])
+            else:
+                self.db_path = Path(db_env)
+        else:
+            self.db_path = self.root / "storage.db"
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -56,6 +65,7 @@ class CaptureConfig:
     extra_headers: Dict[str, str] = field(default_factory=dict)
     hide_selectors: List[str] = field(default_factory=list)
     wait_for_selector: str | None = None
+    mock_routes: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -4,7 +4,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from typing import Any
+from typing import Any, List, Dict
 from playwright.sync_api import Playwright, sync_playwright
 
 from .config import CaptureConfig
@@ -55,6 +55,37 @@ cookieSelectors.forEach(sel => {
 });
 """
 
+_FIND_DYNAMIC_REGIONS_JS = """
+(() => {
+  const dynamicBoxes = [];
+  document.querySelectorAll('*').forEach(el => {
+    if (el.children.length > 0) return;
+    const text = (el.textContent || '').trim();
+    if (!text) return;
+    
+    // Regex for dates (e.g. 2026-06-10), times (e.g. 21:55:42), and prices/currencies (e.g. $12.34, ￥99.00)
+    const isDate = /\\d{4}[-/.]\\d{2}[-/.]\\d{2}/.test(text) || /\\d{2}[-/.]\\d{2}[-/.]\\d{4}/.test(text);
+    const isTime = /\\d{1,2}:\\d{2}(:\\d{2})?\\s*(am|pm)?/i.test(text);
+    const isPrice = /^[\\$\\u00A3\\u00A5\\u20AC\\u20A1-\\u20CF\\uFE69\\uFF04\\uFFE0\\uFFE1\\uFFE5\\uFFE6]\\s*\\d+/i.test(text) || /\\d+\\s*(USD|EUR|CNY|MYR)/i.test(text);
+    
+    const classId = (el.className + ' ' + el.id).toLowerCase();
+    const isClassDynamic = classId.includes('date') || classId.includes('time') || classId.includes('timestamp') || classId.includes('clock') || classId.includes('counter') || classId.includes('price');
+    
+    if (isDate || isTime || isPrice || isClassDynamic) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 3 && r.height > 3) {
+        dynamicBoxes.push({
+          x: Math.round(r.left + window.scrollX),
+          y: Math.round(r.top + window.scrollY),
+          width: Math.round(r.width),
+          height: Math.round(r.height)
+        });
+      }
+    }
+  });
+  return dynamicBoxes;
+})()
+"""
 
 
 def _build_context_options(playwright: Playwright, cfg: CaptureConfig) -> dict:
@@ -77,17 +108,43 @@ def _build_context_options(playwright: Playwright, cfg: CaptureConfig) -> dict:
     return options
 
 
+_SHARED_PLAYWRIGHT = None
+_SHARED_BROWSER = None
+
+def set_shared_browser(playwright: Playwright | None, browser: Any) -> None:
+    global _SHARED_PLAYWRIGHT, _SHARED_BROWSER
+    _SHARED_PLAYWRIGHT = playwright
+    _SHARED_BROWSER = browser
+
+def _setup_routing_mocks(page: Any, mock_routes: dict[str, Any]) -> None:
+    import json
+    for pattern, response in mock_routes.items():
+        def make_handler(data):
+            return lambda route: route.fulfill(
+                status=200,
+                headers={"content-type": "application/json", "access-control-allow-origin": "*"},
+                body=json.dumps(data) if isinstance(data, (dict, list)) else str(data)
+            )
+        page.route(pattern, make_handler(response))
+
 def capture_website(
     cfg: CaptureConfig,
     output_path: Path,
     playwright_instance: Playwright | None = None,
     browser_instance: Any = None,
-) -> None:
+) -> List[Dict[str, Any]]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not playwright_instance and _SHARED_PLAYWRIGHT:
+        playwright_instance = _SHARED_PLAYWRIGHT
+    if not browser_instance and _SHARED_BROWSER:
+        browser_instance = _SHARED_BROWSER
 
     if playwright_instance and browser_instance:
         context = browser_instance.new_context(**_build_context_options(playwright_instance, cfg))
         page = context.new_page()
+        if cfg.mock_routes:
+            _setup_routing_mocks(page, cfg.mock_routes)
         try:
             page.goto(cfg.url, wait_until=cfg.wait_until or "networkidle", timeout=cfg.navigation_timeout_ms)
         except Exception as e:
@@ -97,9 +154,6 @@ def capture_website(
                 raise e
         if cfg.disable_animations:
             page.add_style_tag(content=_DISABLE_ANIMATION_CSS)
-        if cfg.hide_selectors:
-            selector_rules = "\n".join([f"{selector} {{ visibility: hidden !important; }}" for selector in cfg.hide_selectors])
-            page.add_style_tag(content=selector_rules)
         if cfg.wait_for_selector:
             page.wait_for_selector(cfg.wait_for_selector, timeout=cfg.navigation_timeout_ms)
         if cfg.wait_ms > 0:
@@ -114,10 +168,21 @@ def capture_website(
         except Exception:
             pass
 
+        # Wait for custom fonts to load fully
+        try:
+            page.evaluate("document.fonts.ready")
+        except Exception:
+            pass
+
         page.evaluate(_PREPARE_PAGE_JS)
+        dynamic_regions = []
+        try:
+            dynamic_regions = page.evaluate(_FIND_DYNAMIC_REGIONS_JS) or []
+        except Exception:
+            pass
         page.screenshot(path=str(output_path), full_page=cfg.full_page)
         context.close()
-        return
+        return dynamic_regions
 
     with sync_playwright() as playwright:
         if cfg.browser not in {"chromium", "firefox", "webkit"}:
@@ -128,6 +193,8 @@ def capture_website(
         context = browser.new_context(**_build_context_options(playwright, cfg))
 
         page = context.new_page()
+        if cfg.mock_routes:
+            _setup_routing_mocks(page, cfg.mock_routes)
         try:
             page.goto(cfg.url, wait_until=cfg.wait_until or "networkidle", timeout=cfg.navigation_timeout_ms)
         except Exception as e:
@@ -137,9 +204,6 @@ def capture_website(
                 raise e
         if cfg.disable_animations:
             page.add_style_tag(content=_DISABLE_ANIMATION_CSS)
-        if cfg.hide_selectors:
-            selector_rules = "\n".join([f"{selector} {{ visibility: hidden !important; }}" for selector in cfg.hide_selectors])
-            page.add_style_tag(content=selector_rules)
         if cfg.wait_for_selector:
             page.wait_for_selector(cfg.wait_for_selector, timeout=cfg.navigation_timeout_ms)
         if cfg.wait_ms > 0:
@@ -154,11 +218,23 @@ def capture_website(
         except Exception:
             pass
 
+        # Wait for custom fonts to load fully
+        try:
+            page.evaluate("document.fonts.ready")
+        except Exception:
+            pass
+
         page.evaluate(_PREPARE_PAGE_JS)
+        dynamic_regions = []
+        try:
+            dynamic_regions = page.evaluate(_FIND_DYNAMIC_REGIONS_JS) or []
+        except Exception:
+            pass
         page.screenshot(path=str(output_path), full_page=cfg.full_page)
 
         context.close()
         browser.close()
+        return dynamic_regions
 
 
 def _normalized_same_domain_href(base_url: str, href: str, domain: str, preserve_query: bool = False) -> str | None:
@@ -209,7 +285,7 @@ def discover_same_domain_urls(cfg: CaptureConfig, page_limit: int = 30, preserve
                 continue
             seen.add(current_url)
             try:
-                page.goto(current_url, wait_until=cfg.wait_until, timeout=cfg.navigation_timeout_ms)
+                page.goto(current_url, wait_until=cfg.wait_until or "networkidle", timeout=cfg.navigation_timeout_ms)
                 if cfg.disable_animations:
                     page.add_style_tag(content=_DISABLE_ANIMATION_CSS)
                 if cfg.wait_ms > 0:

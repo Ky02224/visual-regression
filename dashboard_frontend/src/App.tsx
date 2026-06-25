@@ -8,6 +8,7 @@ import { Summaries } from './pages/Summaries';
 import { ReportAnalysis } from './pages/ReportAnalysis';
 import { Integrations } from './pages/Integrations';
 import { SuiteResults } from './pages/SuiteResults';
+import { BuildDetail } from './pages/BuildDetail';
 import { Login } from './pages/Login';
 import { UserManagement } from './pages/UserManagement';
 
@@ -35,6 +36,7 @@ export default function App() {
               <Route path="/integrations" element={<Integrations />} />
               <Route path="/report/:id" element={<ReportAnalysis />} />
               <Route path="/suite/:suiteName" element={<SuiteResults />} />
+              <Route path="/build/:buildId" element={<BuildDetail />} />
               <Route path="/users" element={<UserManagement />} />
             </Route>
             <Route path="/login" element={<Login />} />

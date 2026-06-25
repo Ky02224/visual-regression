@@ -10,7 +10,7 @@ const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', to: '/' },
   { icon: PlayCircle, label: 'Actions', to: '/actions' },
   { icon: Ruler, label: 'Baselines', to: '/baselines' },
-  { icon: FileText, label: 'Summaries', to: '/summaries' },
+  { icon: FileText, label: 'Builds', to: '/summaries' },
   { icon: Cpu, label: 'Integrations', to: '/integrations' },
 ];
 

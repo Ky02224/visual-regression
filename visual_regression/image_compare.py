@@ -37,17 +37,49 @@ def _load_image(path: Path) -> np.ndarray:
     return image
 
 
-def _normalize_canvas(base: np.ndarray, current: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _get_dominant_background_color(img: np.ndarray) -> tuple[int, int, int]:
+    h, w = img.shape[:2]
+    if h == 0 or w == 0:
+        return (255, 255, 255)
+    corners = [
+        img[0, 0],
+        img[0, w - 1],
+        img[h - 1, 0],
+        img[h - 1, w - 1]
+    ]
+    median_color = np.median(corners, axis=0).astype(np.uint8)
+    return int(median_color[0]), int(median_color[1]), int(median_color[2])
+
+
+def _normalize_canvas(base: np.ndarray, current: np.ndarray) -> tuple[np.ndarray, np.ndarray, tuple, tuple]:
     height = max(base.shape[0], current.shape[0])
     width = max(base.shape[1], current.shape[1])
-    canvas_a = np.full((height, width, 3), 255, dtype=np.uint8)
-    canvas_b = np.full((height, width, 3), 255, dtype=np.uint8)
+    
+    bg_base = _get_dominant_background_color(base)
+    bg_current = _get_dominant_background_color(current)
+    
+    canvas_a = np.full((height, width, 3), bg_base, dtype=np.uint8)
+    canvas_b = np.full((height, width, 3), bg_current, dtype=np.uint8)
+    
     canvas_a[0 : base.shape[0], 0 : base.shape[1]] = base
     canvas_b[0 : current.shape[0], 0 : current.shape[1]] = current
-    return canvas_a, canvas_b
+    # Return the pre-computed background colours so callers can reuse them
+    # without a second call to _get_dominant_background_color.
+    return canvas_a, canvas_b, bg_base, bg_current
 
 
-def _apply_ignore_regions(image: np.ndarray, regions: Sequence[IgnoreRegion]) -> None:
+
+def _apply_ignore_regions(
+    image: np.ndarray,
+    regions: Sequence[IgnoreRegion],
+    fill_color: tuple[int, int, int] = (255, 255, 255),
+) -> None:
+    """Fill ignore regions with a solid colour (defaults to white).
+
+    Using each image's own dominant background colour avoids false-positive
+    diffs when comparing dark-theme UIs: a white fill on a dark background
+    would itself look like a change to the diff algorithm.
+    """
     height, width = image.shape[:2]
     for x, y, w, h in regions:
         x1 = max(0, x)
@@ -56,7 +88,7 @@ def _apply_ignore_regions(image: np.ndarray, regions: Sequence[IgnoreRegion]) ->
         y2 = min(height, y + h)
         if x2 <= x1 or y2 <= y1:
             continue
-        cv2.rectangle(image, (x1, y1), (x2, y2), (255, 255, 255), thickness=-1)
+        cv2.rectangle(image, (x1, y1), (x2, y2), fill_color, thickness=-1)
 
 
 def compare_arrays(
@@ -67,9 +99,12 @@ def compare_arrays(
     ignore_regions: Sequence[IgnoreRegion],
     skip_ssim: bool = False,
 ) -> tuple[CompareResult, np.ndarray, np.ndarray]:
-    base_canvas, current_canvas = _normalize_canvas(baseline, current)
-    _apply_ignore_regions(base_canvas, ignore_regions)
-    _apply_ignore_regions(current_canvas, ignore_regions)
+    base_canvas, current_canvas, bg_base, bg_current = _normalize_canvas(baseline, current)
+    # Use each image's own background color to fill ignored regions so that
+    # the fill does not itself introduce a visual difference (e.g. white on a dark UI).
+    # bg_base / bg_current are returned directly by _normalize_canvas — no recompute needed.
+    _apply_ignore_regions(base_canvas, ignore_regions, fill_color=bg_base)
+    _apply_ignore_regions(current_canvas, ignore_regions, fill_color=bg_current)
 
     base_gray = cv2.cvtColor(base_canvas, cv2.COLOR_BGR2GRAY)
     current_gray = cv2.cvtColor(current_canvas, cv2.COLOR_BGR2GRAY)
@@ -78,6 +113,36 @@ def compare_arrays(
 
     delta = cv2.absdiff(base_gray, current_gray)
     _, binary = cv2.threshold(delta, pixel_threshold, 255, cv2.THRESH_BINARY)
+
+    # ── Vectorized Anti-Aliasing Suppressor ────────────────────────────────────
+    # Compute neighborhood min/max using a 3x3 kernel (erosion/dilation)
+    kernel_aa = np.ones((3, 3), dtype=np.uint8)
+    min_b = cv2.erode(base_gray, kernel_aa)
+    max_b = cv2.dilate(base_gray, kernel_aa)
+    min_c = cv2.erode(current_gray, kernel_aa)
+    max_c = cv2.dilate(current_gray, kernel_aa)
+
+    # Local contrast check to ensure we only suppress pixels on high-contrast edges
+    contrast_b = max_b - min_b
+    contrast_c = max_c - min_c
+    high_contrast = (contrast_b > 15) | (contrast_c > 15)
+
+    # A differing pixel is classified as antialiasing if:
+    # 1. It lies on a high-contrast boundary.
+    # 2. Its gray value in the current image lies within the baseline neighborhood min/max.
+    # 3. Its gray value in the baseline image lies within the current neighborhood min/max.
+    is_aa = (
+        high_contrast
+        & (current_gray >= min_b)
+        & (current_gray <= max_b)
+        & (base_gray >= min_c)
+        & (base_gray <= max_c)
+    )
+
+    aa_mask = np.zeros_like(binary)
+    aa_mask[is_aa] = 255
+    binary = cv2.bitwise_and(binary, cv2.bitwise_not(aa_mask))
+
     kernel = np.ones((3, 3), dtype=np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     binary = cv2.dilate(binary, kernel, iterations=1)

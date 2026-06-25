@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -65,7 +66,7 @@ class BaselineManager:
         manifest_path = self.latest_version_manifest_path(name)
         manifest: List[Dict[str, Any]] = []
         if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = list(JsonCache.read(manifest_path))  # list() copies so appending won't mutate cache
         manifest.append(
             {
                 "version": version_stamp,
@@ -75,8 +76,9 @@ class BaselineManager:
             }
         )
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        JsonCache.clear(manifest_path)  # invalidate cache after write
 
-    def save_from_image(self, name: str, source_image_path: Path, capture_meta: Dict[str, Any]) -> None:
+    def save_from_image(self, name: str, source_image_path: Path, capture_meta: Dict[str, Any], ignore_regions: List[Dict[str, int]] | None = None) -> None:
         target_dir = self.baseline_dir(name)
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -117,6 +119,11 @@ class BaselineManager:
                 "capture": capture_meta,
                 "history": history[-25:],
             }
+            if ignore_regions is not None:
+                metadata["ignore_regions"] = ignore_regions
+            elif "ignore_regions" in previous_meta:
+                metadata["ignore_regions"] = previous_meta["ignore_regions"]
+
             metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             # Invalidate JSON cache for this metadata file
             JsonCache.clear(metadata_file)
@@ -151,40 +158,45 @@ class BaselineManager:
             metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             JsonCache.clear(metadata_file)
 
+    @staticmethod
+    def _load_baseline_item(child: Path) -> "Dict[str, Any] | None":
+        """Load metadata for a single baseline directory. Designed for parallel execution."""
+        if not child.is_dir():
+            return None
+        image_path = child / "baseline.png"
+        metadata_path = child / "metadata.json"
+        if not image_path.exists() or not metadata_path.exists():
+            return None
+        data = JsonCache.read(metadata_path)
+        manifest_path = child / "versions" / "manifest.json"
+        version_count = 0
+        if manifest_path.exists():
+            try:
+                version_count = len(JsonCache.read(manifest_path))
+            except Exception:
+                version_count = 0
+        return {
+            "name": data.get("name", child.name),
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+            "url": data.get("capture", {}).get("url"),
+            "browser": data.get("capture", {}).get("browser"),
+            "device": data.get("capture", {}).get("device"),
+            "locale": data.get("capture", {}).get("locale"),
+            "timezone_id": data.get("capture", {}).get("timezone_id"),
+            "viewport": data.get("capture", {}).get("viewport"),
+            "thumbnail_href": f"/baseline/{child.name}/baseline.png",
+            "version_count": version_count,
+            "history": data.get("history", []),
+        }
+
     def list_baselines(self) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        for child in sorted(self.paths.baselines_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            image_path = child / "baseline.png"
-            metadata_path = child / "metadata.json"
-            if not image_path.exists() or not metadata_path.exists():
-                continue
-            data = JsonCache.read(metadata_path)
-            manifest_path = child / "versions" / "manifest.json"
-            version_count = 0
-            if manifest_path.exists():
-                try:
-                    version_count = len(JsonCache.read(manifest_path))
-                except Exception:
-                    version_count = 0
-            items.append(
-                {
-                    "name": data.get("name", child.name),
-                    "created_at": data.get("created_at"),
-                    "updated_at": data.get("updated_at"),
-                    "url": data.get("capture", {}).get("url"),
-                    "browser": data.get("capture", {}).get("browser"),
-                    "device": data.get("capture", {}).get("device"),
-                    "locale": data.get("capture", {}).get("locale"),
-                    "timezone_id": data.get("capture", {}).get("timezone_id"),
-                    "viewport": data.get("capture", {}).get("viewport"),
-                    "thumbnail_href": f"/baseline/{child.name}/baseline.png",
-                    "version_count": version_count,
-                    "history": data.get("history", []),
-                }
-            )
-        return items
+        dirs = sorted(self.paths.baselines_dir.iterdir())
+        # Use a thread pool to read multiple JSON files concurrently.
+        # ThreadPoolExecutor.map preserves input order, so the result is still sorted.
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(self._load_baseline_item, dirs))
+        return [r for r in results if r is not None]
 
     def get_baseline_details(self, name: str) -> Dict[str, Any]:
         baseline_name = self.normalize_name(name)
@@ -214,11 +226,27 @@ class BaselineManager:
             "capture": data.get("capture", {}),
             "ignore_regions": data.get("ignore_regions", []),
             "ignore_css_selectors": data.get("ignore_css_selectors", []),
+            "custom_threshold_pct": data.get("custom_threshold_pct"),
             "history": data.get("history", []),
             "current_image_href": f"/baseline/{baseline_name}/baseline.png",
             "metadata_href": f"/baseline/{baseline_name}/metadata.json",
             "versions": versions,
         }
+
+    def save_custom_threshold(self, name: str, threshold_pct: float | None) -> None:
+        target_dir = self.baseline_dir(name)
+        metadata_file = self.metadata_path(name)
+        lock_path = target_dir / ".lock"
+        with FileLock(lock_path, timeout=30.0):
+            if not metadata_file.exists():
+                raise FileNotFoundError(f"metadata not found for baseline '{name}'")
+            metadata = self.load_metadata(name)
+            if threshold_pct is None:
+                metadata.pop("custom_threshold_pct", None)
+            else:
+                metadata["custom_threshold_pct"] = float(threshold_pct)
+            metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            JsonCache.clear(metadata_file)
 
     def delete_baseline(self, name: str) -> Dict[str, Any]:
         baseline_name = self.normalize_name(name)
