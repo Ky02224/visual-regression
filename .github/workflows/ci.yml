@@ -52,7 +52,7 @@ jobs:
 
       - name: Run npm audit
         working-directory: dashboard_frontend
-        run: npm audit --audit-level=moderate || true
+        run: npm audit --audit-level=moderate
 
       - name: Upload pytest results
         if: always()
