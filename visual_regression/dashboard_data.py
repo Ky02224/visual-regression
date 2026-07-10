@@ -10,33 +10,40 @@ from .config import WorkspacePaths
 from ._json_cache import JsonCache
 
 
+import threading
+
 # Server-side dashboard cache with TTL (60 seconds)
 class _DashboardCache:
     _cache: Dict[str, Any] | None = None
     _cache_time: float = 0.0
     _TTL_SECONDS: int = 60
+    # Protect cache with a reentrant lock for thread-safety (ThreadingHTTPServer uses threads)
+    _lock: threading.RLock = threading.RLock()
     
     @classmethod
     def get(cls, paths: WorkspacePaths) -> Dict[str, Any] | None:
         """Get cached dashboard snapshot if still valid (TTL not expired)."""
-        if cls._cache is None:
-            return None
-        if time.time() - cls._cache_time > cls._TTL_SECONDS:
-            cls._cache = None
-            return None
-        return cls._cache
+        with cls._lock:
+            if cls._cache is None:
+                return None
+            if time.time() - cls._cache_time > cls._TTL_SECONDS:
+                cls._cache = None
+                return None
+            return cls._cache
     
     @classmethod
     def set(cls, snapshot: Dict[str, Any]) -> None:
         """Cache dashboard snapshot with current timestamp."""
-        cls._cache = snapshot
-        cls._cache_time = time.time()
+        with cls._lock:
+            cls._cache = snapshot
+            cls._cache_time = time.time()
     
     @classmethod
     def invalidate(cls) -> None:
         """Invalidate cache (called after POST actions)."""
-        cls._cache = None
-        cls._cache_time = 0.0
+        with cls._lock:
+            cls._cache = None
+            cls._cache_time = 0.0
 
 
 def _latest_suite_summary(paths: WorkspacePaths) -> Dict[str, Any] | None:
