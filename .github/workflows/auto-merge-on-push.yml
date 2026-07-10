@@ -4,6 +4,9 @@ on:
   push:
     branches: [ "chore/improvements" ]
 
+permissions:
+  contents: write
+
 jobs:
   test-and-merge:
     runs-on: ubuntu-latest
@@ -45,11 +48,11 @@ jobs:
 
       - name: Merge chore/improvements into main
         env:
-          MERGE_TOKEN: ${{ secrets.GOOD }}
+          MERGE_TOKEN: ${{ github.token }}
         run: |
           echo "Attempting to merge chore/improvements into main"
           response=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST \
-            -H "Authorization: token $MERGE_TOKEN" \
+            -H "Authorization: Bearer $MERGE_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/Ky02224/visual-regression/merges \
             -d '{"base":"main","head":"chore/improvements"}')
@@ -66,11 +69,11 @@ jobs:
     steps:
       - name: Merge fix/dashboard-metrics into main
         env:
-          MERGE_TOKEN: ${{ secrets.GOOD }}
+          MERGE_TOKEN: ${{ github.token }}
         run: |
           echo "Attempting to merge fix/dashboard-metrics into main"
           response=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST \
-            -H "Authorization: token $MERGE_TOKEN" \
+            -H "Authorization: Bearer $MERGE_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/Ky02224/visual-regression/merges \
             -d '{"base":"main","head":"fix/dashboard-metrics"}')

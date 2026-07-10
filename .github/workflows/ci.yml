@@ -65,8 +65,19 @@ jobs:
       - name: Start backend server
         run: |
           python -m visual_regression.cli serve-dashboard --port 8130 &
-          # give server time to start
-          sleep 3
+          python - <<'PY'
+          import time
+          import urllib.request
+          for _ in range(60):
+              try:
+                  urllib.request.urlopen("http://127.0.0.1:8130/demo/index.html?lang=en-US", timeout=3)
+                  print("Dashboard server ready.")
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Dashboard server did not become ready in time.")
+          PY
 
       - name: Run Playwright E2E tests
         working-directory: dashboard_frontend
