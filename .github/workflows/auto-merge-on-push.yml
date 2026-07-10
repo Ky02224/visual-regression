@@ -36,6 +36,7 @@ jobs:
         run: |
           rm -rf node_modules package-lock.json
           npm install
+          npm install --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.2
           npm run build
 
       - name: Run npm audit
