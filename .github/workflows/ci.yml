@@ -45,7 +45,8 @@ jobs:
       - name: Install frontend dependencies
         working-directory: dashboard_frontend
         run: |
-          npm ci || (rm -rf node_modules package-lock.json && npm install)
+          rm -rf node_modules package-lock.json
+          npm install
 
       - name: Build frontend
         working-directory: dashboard_frontend
