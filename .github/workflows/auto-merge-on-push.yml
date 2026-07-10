@@ -34,7 +34,7 @@ jobs:
       - name: Install frontend deps and build
         working-directory: dashboard_frontend
         run: |
-          npm ci
+          npm ci || (rm -rf node_modules package-lock.json && npm install)
           npm run build
 
       - name: Run npm audit

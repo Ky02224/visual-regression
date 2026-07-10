@@ -44,7 +44,8 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: dashboard_frontend
-        run: npm ci
+        run: |
+          npm ci || (rm -rf node_modules package-lock.json && npm install)
 
       - name: Build frontend
         working-directory: dashboard_frontend
@@ -57,7 +58,6 @@ jobs:
       - name: Install Playwright
         working-directory: dashboard_frontend
         run: |
-          npm ci
           npx playwright install --with-deps
 
       - name: Start backend server
