@@ -23,17 +23,17 @@ jobs:
           pip install -r requirements-dev.txt
           python -m playwright install chromium
 
-      - name: Start demo portal
-        run: python -m visual_regression.cli serve-demo --port 8123 &
+      - name: Start dashboard server
+        run: python -m visual_regression.cli serve-dashboard --port 8130 &
 
-      - name: Wait for demo portal
+      - name: Wait for dashboard demo
         run: |
           python - <<'PY'
           import time, urllib.request
           for _ in range(30):
               try:
-                  urllib.request.urlopen("http://127.0.0.1:8123/index.html", timeout=3)
-                  print("Demo portal ready."); break
+                  urllib.request.urlopen("http://127.0.0.1:8130/demo/index.html", timeout=3)
+                  print("Dashboard demo ready."); break
               except: time.sleep(1)
           PY
 
