@@ -124,9 +124,14 @@ def _load_all_baselines_indexed(paths: WorkspacePaths) -> Dict[str, Dict[str, An
                 "updated_at": data.get("updated_at"),
                 "capture": data.get("capture", {}),
                 "history": data.get("history", []),
+                # Convenience top-level fields for dashboard filters
+                "browser": data.get("capture", {}).get("browser"),
+                "device": data.get("capture", {}).get("device"),
+                "locale": data.get("capture", {}).get("locale"),
                 "current_image_href": f"/baseline/{baseline_name}/baseline.png",
                 "metadata_href": f"/baseline/{baseline_name}/metadata.json",
                 "versions": versions,
+                "version_count": len(versions),
             }
         except Exception:
             continue
@@ -234,12 +239,13 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     recent_summaries = _recent_suite_summaries(paths)
     
     # Compute filter values from runs and baselines
+    # For runs, fields are at the top-level; for baselines, capture info is nested under "capture".
     browser_values = {item.get("browser") for item in runs if item.get("browser")}
-    browser_values.update(item.get("browser") for item in baselines if item.get("browser"))
+    browser_values.update(item.get("capture", {}).get("browser") for item in baselines if item.get("capture", {}).get("browser"))
     locale_values = {item.get("locale") for item in runs if item.get("locale")}
-    locale_values.update(item.get("locale") for item in baselines if item.get("locale"))
+    locale_values.update(item.get("capture", {}).get("locale") for item in baselines if item.get("capture", {}).get("locale"))
     device_values = {item.get("device") or "desktop" for item in runs if item.get("browser")}
-    device_values.update(item.get("device") or "desktop" for item in baselines if item.get("browser"))
+    device_values.update((item.get("capture", {}).get("device") or "desktop") for item in baselines if item.get("capture", {}).get("browser"))
 
     metrics = {
         "baseline_count": len(baselines),
