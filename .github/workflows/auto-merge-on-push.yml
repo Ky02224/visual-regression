@@ -1,0 +1,83 @@
+name: Auto Merge chore/improvements
+
+on:
+  push:
+    branches: [ "chore/improvements" ]
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-merge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run Python tests
+        run: |
+          python -m pytest -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install frontend deps and build
+        working-directory: dashboard_frontend
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
+          npm install --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.2
+          npm run build
+
+      - name: Run npm audit
+        working-directory: dashboard_frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Merge chore/improvements into main
+        env:
+          MERGE_TOKEN: ${{ github.token }}
+        run: |
+          echo "Attempting to merge chore/improvements into main"
+          response=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $MERGE_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Ky02224/visual-regression/merges \
+            -d '{"base":"main","head":"chore/improvements"}')
+          if [ "$response" -ne 201 ] && [ "$response" -ne 204 ]; then
+            echo "Merge failed (status $response), creating a pull request instead and failing the job"
+            exit 1
+          fi
+
+  merge-fix-branch:
+    needs: test-and-merge
+    runs-on: ubuntu-latest
+    if: ${{ needs.test-and-merge.result == 'success' }}
+
+    steps:
+      - name: Merge fix/dashboard-metrics into main
+        env:
+          MERGE_TOKEN: ${{ github.token }}
+        run: |
+          echo "Attempting to merge fix/dashboard-metrics into main"
+          response=$(curl -s -o /dev/stderr -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $MERGE_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Ky02224/visual-regression/merges \
+            -d '{"base":"main","head":"fix/dashboard-metrics"}')
+          if [ "$response" -ne 201 ] && [ "$response" -ne 204 ]; then
+            echo "Merge failed (status $response). Exiting with failure."
+            exit 1
+          fi

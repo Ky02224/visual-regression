@@ -10,33 +10,40 @@ from .config import WorkspacePaths
 from ._json_cache import JsonCache
 
 
+import threading
+
 # Server-side dashboard cache with TTL (60 seconds)
 class _DashboardCache:
     _cache: Dict[str, Any] | None = None
     _cache_time: float = 0.0
     _TTL_SECONDS: int = 60
+    # Protect cache with a reentrant lock for thread-safety (ThreadingHTTPServer uses threads)
+    _lock: threading.RLock = threading.RLock()
     
     @classmethod
     def get(cls, paths: WorkspacePaths) -> Dict[str, Any] | None:
         """Get cached dashboard snapshot if still valid (TTL not expired)."""
-        if cls._cache is None:
-            return None
-        if time.time() - cls._cache_time > cls._TTL_SECONDS:
-            cls._cache = None
-            return None
-        return cls._cache
+        with cls._lock:
+            if cls._cache is None:
+                return None
+            if time.time() - cls._cache_time > cls._TTL_SECONDS:
+                cls._cache = None
+                return None
+            return cls._cache
     
     @classmethod
     def set(cls, snapshot: Dict[str, Any]) -> None:
         """Cache dashboard snapshot with current timestamp."""
-        cls._cache = snapshot
-        cls._cache_time = time.time()
+        with cls._lock:
+            cls._cache = snapshot
+            cls._cache_time = time.time()
     
     @classmethod
     def invalidate(cls) -> None:
         """Invalidate cache (called after POST actions)."""
-        cls._cache = None
-        cls._cache_time = 0.0
+        with cls._lock:
+            cls._cache = None
+            cls._cache_time = 0.0
 
 
 def _latest_suite_summary(paths: WorkspacePaths) -> Dict[str, Any] | None:
@@ -124,9 +131,14 @@ def _load_all_baselines_indexed(paths: WorkspacePaths) -> Dict[str, Dict[str, An
                 "updated_at": data.get("updated_at"),
                 "capture": data.get("capture", {}),
                 "history": data.get("history", []),
+                # Convenience top-level fields for dashboard filters
+                "browser": data.get("capture", {}).get("browser"),
+                "device": data.get("capture", {}).get("device"),
+                "locale": data.get("capture", {}).get("locale"),
                 "current_image_href": f"/baseline/{baseline_name}/baseline.png",
                 "metadata_href": f"/baseline/{baseline_name}/metadata.json",
                 "versions": versions,
+                "version_count": len(versions),
             }
         except Exception:
             continue
@@ -234,12 +246,13 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     recent_summaries = _recent_suite_summaries(paths)
     
     # Compute filter values from runs and baselines
+    # For runs, fields are at the top-level; for baselines, capture info is nested under "capture".
     browser_values = {item.get("browser") for item in runs if item.get("browser")}
-    browser_values.update(item.get("browser") for item in baselines if item.get("browser"))
+    browser_values.update(item.get("capture", {}).get("browser") for item in baselines if item.get("capture", {}).get("browser"))
     locale_values = {item.get("locale") for item in runs if item.get("locale")}
-    locale_values.update(item.get("locale") for item in baselines if item.get("locale"))
+    locale_values.update(item.get("capture", {}).get("locale") for item in baselines if item.get("capture", {}).get("locale"))
     device_values = {item.get("device") or "desktop" for item in runs if item.get("browser")}
-    device_values.update(item.get("device") or "desktop" for item in baselines if item.get("browser"))
+    device_values.update((item.get("capture", {}).get("device") or "desktop") for item in baselines if item.get("capture", {}).get("browser"))
 
     metrics = {
         "baseline_count": len(baselines),
