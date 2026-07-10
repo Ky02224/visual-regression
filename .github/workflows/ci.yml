@@ -54,6 +54,22 @@ jobs:
         working-directory: dashboard_frontend
         run: npm audit --audit-level=moderate
 
+      - name: Install Playwright
+        working-directory: dashboard_frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps
+
+      - name: Start backend server
+        run: |
+          python -m visual_regression.cli serve-dashboard --port 8130 &
+          # give server time to start
+          sleep 3
+
+      - name: Run Playwright E2E tests
+        working-directory: dashboard_frontend
+        run: npm run test:e2e
+
       - name: Upload pytest results
         if: always()
         uses: actions/upload-artifact@v4
