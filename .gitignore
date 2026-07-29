@@ -9,6 +9,8 @@ __pycache__/
 scratch/
 dashboard_frontend/node_modules/
 dashboard_frontend/dist/
+dashboard_frontend/test-results/
+dashboard_frontend/playwright-report/
 dashboard_frontend/.env
 dashboard_frontend/.env.local
 dashboard_frontend/.env.*.local
