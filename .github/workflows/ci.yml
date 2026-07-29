@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, "fix/*", "chore/*", "feat/*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: [3.11]
+        node-version: [18]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install pip-audit
+
+      - name: Run Python tests
+        run: |
+          python -m pytest -q
+
+      - name: Run pip-audit
+        run: |
+          python -m pip_audit -r requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install frontend dependencies
+        working-directory: dashboard_frontend
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
+          npm install --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.2
+
+      - name: Build frontend
+        working-directory: dashboard_frontend
+        run: npm run build
+
+      - name: Run npm audit
+        working-directory: dashboard_frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Install Playwright
+        working-directory: dashboard_frontend
+        run: |
+          npx playwright install --with-deps
+
+      - name: Start backend server
+        run: |
+          python -m visual_regression.cli serve-dashboard --port 8130 &
+          python - <<'PY'
+          import time
+          import urllib.request
+          for _ in range(60):
+              try:
+                  urllib.request.urlopen("http://127.0.0.1:8130/demo/index.html?lang=en-US", timeout=3)
+                  print("Dashboard server ready.")
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Dashboard server did not become ready in time.")
+          PY
+
+      - name: Run Playwright E2E tests
+        working-directory: dashboard_frontend
+        run: npm run test:e2e
+
+      - name: Upload pytest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: .
