@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ main ]
 
+# Cancel any older, still-running run for the same branch/PR when a new
+# commit lands, instead of letting stale runs pile up and hog concurrency
+# slots (which delays the newest run's queue time).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
