@@ -249,31 +249,55 @@ def _match_element(el: dict, candidates: list, max_dist: float = 100.0, claimed:
     """
     if claimed:
         candidates = [c for c in candidates if id(c) not in claimed]
+    status, match = _match_by_identity(el, candidates)
+    if status != "none":
+        return match
+    match, _dist = _match_by_geometry(el, candidates, max_dist)
+    return match
 
+
+def _match_by_identity(el: dict, candidates: list) -> tuple[str, dict | None]:
+    """id/text identity tiers of _match_element, split out so the caller can
+    resolve every element's identity match first (order-independent — ids
+    and unique-in-page text are unambiguous regardless of which baseline
+    element is processed first) before falling back to geometry only for
+    what's left. See _match_element's docstring for the reasoning behind
+    each tier.
+
+    Returns ("found", match) | ("absent", None) — specific text confirmed
+    nowhere in candidates, caller must not fall through to geometry |
+    ("none", None) — no identity signal available, try geometry.
+    """
     tag = el.get("tag")
     eid = el.get("eid")
     if eid:
         for c in candidates:
             if c.get("tag") == tag and c.get("eid") == eid:
-                return c
+                return "found", c
 
     etxt = el.get("txt")
     if etxt and len(etxt) >= 8:
         txt_matches = [c for c in candidates if c.get("tag") == tag and c.get("txt") == etxt]
         if len(txt_matches) == 1:
-            return txt_matches[0]
+            return "found", txt_matches[0]
         if not txt_matches:
-            # This exact, specific text doesn't appear anywhere in the
-            # current candidates. That absence is itself the answer — don't
-            # let the geometry fallback below paper over it by matching to
-            # whichever unrelated same-tag/size neighbor happens to be
-            # nearby (which is exactly the false "moved" verdict this tier
-            # exists to prevent).
-            return None
-        # Multiple candidates share this exact text (rare, but real for
-        # boilerplate like repeated "Read more" links) — ambiguous, fall
+            return "absent", None
+        # Multiple candidates share this exact text — ambiguous, fall
         # through to geometry rather than guess among identical text.
 
+    return "none", None
+
+
+def _match_by_geometry(el: dict, candidates: list, max_dist: float = 100.0) -> tuple[dict | None, float]:
+    """Geometry-fallback tier of _match_element: nearest same-tag,
+    similarly-sized element. Returns (match_or_None, distance) — the
+    distance lets the caller resolve *all* elements needing this fallback
+    tier in order of match confidence (closest first) instead of DOM
+    order, so a confident pairing can't get scooped by a same-tag sibling
+    that merely happened to be processed first (see the two-phase loop in
+    diagnose_from_dom_diff).
+    """
+    tag = el.get("tag")
     ecls = el.get("ecls")
     ew, eh = max(el.get("w", 0), 1), max(el.get("h", 0), 1)
     cx = el.get("x", 0) + ew / 2.0
@@ -306,7 +330,9 @@ def _match_element(el: dict, candidates: list, max_dist: float = 100.0, claimed:
     # Among candidates that already pass the geometry band, prefer the one
     # that also shares a class — it's more likely the same node than a
     # same-tag/same-size stranger that happens to be marginally closer.
-    return best_cls if best_cls is not None else best
+    if best_cls is not None:
+        return best_cls, best_cls_dist
+    return best, best_dist
 
 
 _MEDIA_TAGS = {"img", "video", "svg", "canvas"}
@@ -418,11 +444,53 @@ def diagnose_from_dom_diff(
     missing_media_strong, missing_generic_strong, missing_generic_weak = [], [], []
     moved, font_changed, color_changed, text_issue = [], [], [], []
 
+    # Two-phase matching: identity (id/unique text) first, since those are
+    # exact and order-independent — resolving them regardless of processing
+    # order can't create a wrong pairing. Only the geometry-fallback tier
+    # (no id, no unique-enough text — the common case for generic <span>/
+    # <li> siblings in a list or nav bar) is ambiguous, and resolving those
+    # in DOM order let a same-tag/same-size sibling that merely happened to
+    # be processed first "steal" another element's rightful match (confirmed
+    # on a real page: a moved nav link with a 5-char label got its match
+    # taken by an unrelated, unmoved sibling that iterated first, so the
+    # real move was silently missed). Deferring the fallback tier and
+    # resolving it in ascending distance order — most confident pairing
+    # claims first — fixes that without touching the already-unambiguous
+    # identity tier or the geometry heuristics themselves.
     claimed_matches: set = set()
+    resolved: dict[int, dict | None] = {}
+    pending: list[dict] = []
     for el in baseline_near:
-        match = _match_element(el, match_candidates, claimed=claimed_matches)
+        available = [c for c in match_candidates if id(c) not in claimed_matches]
+        status, match = _match_by_identity(el, available)
+        if status == "found":
+            resolved[id(el)] = match
+            claimed_matches.add(id(match))
+        elif status == "absent":
+            resolved[id(el)] = None
+        else:
+            pending.append(el)
+
+    scored = []
+    for el in pending:
+        available = [c for c in match_candidates if id(c) not in claimed_matches]
+        match, dist = _match_by_geometry(el, available, max_dist=100.0)
+        scored.append((dist if match is not None else float("inf"), el, match))
+    scored.sort(key=lambda t: t[0])
+    for _dist, el, match in scored:
+        if match is not None and id(match) in claimed_matches:
+            # Best candidate was claimed by a more confident (smaller-
+            # distance) pairing resolved earlier in this sorted pass —
+            # recompute against what's left rather than treating this
+            # element as unmatched.
+            available = [c for c in match_candidates if id(c) not in claimed_matches]
+            match, _dist = _match_by_geometry(el, available, max_dist=100.0)
         if match is not None:
             claimed_matches.add(id(match))
+        resolved[id(el)] = match
+
+    for el in baseline_near:
+        match = resolved[id(el)]
         tag = el.get("tag", "")
         if match is None:
             has_identity = bool(el.get("eid") or len(el.get("txt") or "") >= 8)
