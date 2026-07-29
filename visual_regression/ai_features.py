@@ -458,11 +458,22 @@ def diagnose_from_dom_diff(
         # box. Newly-overflowing (wasn't in baseline) is an unambiguous,
         # cheap-to-check signal — no ambiguity about root cause, so it's
         # checked first among the "matched but changed" cases.
+        #
+        # The 1.4x floor (not 1.1x) is deliberate: a webfont that finishes
+        # loading between the baseline and current capture shifts an
+        # untouched element's scrollWidth by font-metric noise alone — e.g.
+        # a real capture pair confirmed 103px -> 119px (1.155x) on an
+        # element whose position/size never changed, unrelated to the
+        # actual edit elsewhere on the page. Real truncation defects (text
+        # genuinely clipped by a narrowed container) measured 2.29x-3.25x
+        # in the same eval — a wide, safe margin above the noise band, so
+        # 1.4x filters the font-settling false positive without weakening
+        # detection of genuine truncation.
         b_sw, b_cw = el.get("sw"), el.get("cw")
         c_sw, c_cw = match.get("sw"), match.get("cw")
         if tag in _TEXT_TAGS and b_sw is not None and b_cw and c_sw is not None and c_cw:
-            baseline_overflowed = b_sw > b_cw * 1.1
-            current_overflows = c_sw > c_cw * 1.1
+            baseline_overflowed = b_sw > b_cw * 1.4
+            current_overflows = c_sw > c_cw * 1.4
             if current_overflows and not baseline_overflowed:
                 text_issue.append((el, match, "text now overflows/clips its container"))
                 continue
