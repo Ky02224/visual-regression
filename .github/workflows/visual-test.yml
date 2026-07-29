@@ -88,14 +88,17 @@ jobs:
 
       - name: Bootstrap Missing Baselines
         run: |
-          python -m visual_regression.cli create-suite-baselines --suite suite.demo.yaml
+          python -m visual_regression.cli create-suite-baselines --suite suite.ci-smoke.yaml
 
       - name: Run Test Suite
         id: run_tests
-        # Runs the suite and auto-bootstraps missing baselines.
+        # Runs a lightweight 3-case subset (suite.ci-smoke.yaml) instead of the
+        # full suite.demo.yaml — GitHub's shared CPU runners have no GPU, and the
+        # full 12-case suite (each doing real CNN inference) was taking 30+
+        # minutes here. suite.demo.yaml remains the full suite for local/dashboard use.
         # If there are visual regressions, this step exits with code 1.
         run: |
-          python -m visual_regression.cli run-suite --suite suite.demo.yaml --create-missing-baseline
+          python -m visual_regression.cli run-suite --suite suite.ci-smoke.yaml --create-missing-baseline
 
       - name: Generate PR Markdown Comment
         if: failure() && github.event_name == 'pull_request'
