@@ -49,9 +49,16 @@ SITES = [
     "https://en.wikipedia.org/wiki/Web_browser",
     "https://docs.python.org/3/tutorial/introduction.html",
     "https://books.toscrape.com/",
-    "https://github.com/torvalds/linux/blob/master/README",
+    "https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/div",
     "https://old.reddit.com/",
 ]
+# Previously included github.com/torvalds/linux/blob/master/README, but its
+# live star/watch counters and relative timestamps ("X days ago") change
+# between the baseline and current capture even with zero mutation applied —
+# confirmed by two trials against it reporting the exact same mismatch_pct
+# (17.8082%) despite one being a "benign" (unmutated) trial. That's a false
+# positive baked into the site choice, not a model error, so it inflates
+# the error count without measuring anything real.
 
 CATEGORIES = [
     "benign",
