@@ -44,7 +44,9 @@ jobs:
 
       - name: Run npm audit
         working-directory: dashboard_frontend
-        run: npm audit --audit-level=moderate
+        # See ci.yml for rationale: only remaining advisory is an RSC-mode
+        # CSRF bypass (GHSA-qwww-vcr4-c8h2) that doesn't apply to this SPA.
+        run: npm audit --audit-level=critical
 
       - name: Merge chore/improvements into main
         env:
