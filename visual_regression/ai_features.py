@@ -284,7 +284,17 @@ def _match_element(el: dict, candidates: list, max_dist: float = 100.0, claimed:
         if c.get("tag") != tag:
             continue
         cw, ch = max(c.get("w", 0), 1), max(c.get("h", 0), 1)
-        if not (0.25 <= cw / ew <= 4.0 and 0.4 <= ch / eh <= 2.5):
+        # Text tags get a much lower width floor than the generic 0.25x: a
+        # fixed-width `overflow: hidden` clip (the text-issue signal itself)
+        # can shrink an element to a small fraction of its baseline width
+        # regardless of how wide it started — that's a legitimate same-
+        # element edit, not evidence this is a different node. Height stays
+        # the tighter band either way, since it's unaffected by truncation
+        # and remains the stronger "same box" signal. Non-text tags (img,
+        # div, etc.) keep the original floor: a drastic width shrink there
+        # is more likely a genuinely different element.
+        width_floor = 0.03 if tag in _TEXT_TAGS else 0.25
+        if not (width_floor <= cw / ew <= 4.0 and 0.4 <= ch / eh <= 2.5):
             continue
         ccx = c.get("x", 0) + cw / 2.0
         ccy = c.get("y", 0) + ch / 2.0
