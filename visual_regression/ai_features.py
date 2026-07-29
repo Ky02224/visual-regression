@@ -300,8 +300,20 @@ def _match_by_geometry(el: dict, candidates: list, max_dist: float = 100.0) -> t
     tag = el.get("tag")
     ecls = el.get("ecls")
     ew, eh = max(el.get("w", 0), 1), max(el.get("h", 0), 1)
-    cx = el.get("x", 0) + ew / 2.0
-    cy = el.get("y", 0) + eh / 2.0
+    # Distance uses the top-left corner, not the box center. For same-size
+    # candidates the two are identical up to a constant offset (w/2, h/2 is
+    # the same on both sides), so this changes nothing for the ordinary
+    # "did it move" comparison. It matters specifically when a candidate's
+    # width shrank (a text-truncation edit, left-anchored so the left edge
+    # doesn't move): the center drifts left by half the lost width even
+    # though the element never actually moved, artificially inflating its
+    # distance past an unrelated same-size sibling sitting one row away —
+    # confirmed on a real page where a truncated element's own unmoved
+    # position scored 91px (center-based) against itself, while a same-
+    # size sibling merely 20px further down scored closer and stole the
+    # match, silently discarding the truncation this element should have
+    # been diagnosed with.
+    ex, ey = el.get("x", 0), el.get("y", 0)
     best, best_dist = None, max_dist
     best_cls, best_cls_dist = None, max_dist
     for c in candidates:
@@ -320,9 +332,8 @@ def _match_by_geometry(el: dict, candidates: list, max_dist: float = 100.0) -> t
         width_floor = 0.03 if tag in _TEXT_TAGS else 0.25
         if not (width_floor <= cw / ew <= 4.0 and 0.4 <= ch / eh <= 2.5):
             continue
-        ccx = c.get("x", 0) + cw / 2.0
-        ccy = c.get("y", 0) + ch / 2.0
-        dist = ((cx - ccx) ** 2 + (cy - ccy) ** 2) ** 0.5
+        ccx, ccy = c.get("x", 0), c.get("y", 0)
+        dist = ((ex - ccx) ** 2 + (ey - ccy) ** 2) ** 0.5
         if dist < best_dist:
             best, best_dist = c, dist
         if ecls and c.get("ecls") == ecls and dist < best_cls_dist:
