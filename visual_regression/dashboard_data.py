@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 from .baseline_manager import BaselineManager
 from .config import WorkspacePaths
@@ -12,31 +16,41 @@ from ._json_cache import JsonCache
 
 # Server-side dashboard cache with TTL (60 seconds)
 class _DashboardCache:
-    _cache: Dict[str, Any] | None = None
-    _cache_time: float = 0.0
+    _lock = threading.Lock()
+    # Cache maps workspace_root_str -> (snapshot_dict, cache_time_float)
+    _caches: Dict[str, tuple[Dict[str, Any], float]] = {}
     _TTL_SECONDS: int = 60
     
     @classmethod
     def get(cls, paths: WorkspacePaths) -> Dict[str, Any] | None:
         """Get cached dashboard snapshot if still valid (TTL not expired)."""
-        if cls._cache is None:
-            return None
-        if time.time() - cls._cache_time > cls._TTL_SECONDS:
-            cls._cache = None
-            return None
-        return cls._cache
+        key = str(paths.root.resolve())
+        with cls._lock:
+            cached = cls._caches.get(key)
+            if cached is None:
+                return None
+            snapshot, cache_time = cached
+            if time.time() - cache_time > cls._TTL_SECONDS:
+                cls._caches.pop(key, None)
+                return None
+            return snapshot
     
     @classmethod
-    def set(cls, snapshot: Dict[str, Any]) -> None:
+    def set(cls, paths: WorkspacePaths, snapshot: Dict[str, Any]) -> None:
         """Cache dashboard snapshot with current timestamp."""
-        cls._cache = snapshot
-        cls._cache_time = time.time()
+        key = str(paths.root.resolve())
+        with cls._lock:
+            cls._caches[key] = (snapshot, time.time())
     
     @classmethod
-    def invalidate(cls) -> None:
+    def invalidate(cls, paths: WorkspacePaths | None = None) -> None:
         """Invalidate cache (called after POST actions)."""
-        cls._cache = None
-        cls._cache_time = 0.0
+        with cls._lock:
+            if paths is not None:
+                key = str(paths.root.resolve())
+                cls._caches.pop(key, None)
+            else:
+                cls._caches.clear()
 
 
 def _sanitize_ai_label(label: str | None) -> str | None:
@@ -84,25 +98,51 @@ def _normalize_run_status(raw_status: str | None, decision_status: str | None) -
     return "passed"
 
 
-def _latest_suite_summary(paths: WorkspacePaths) -> Dict[str, Any] | None:
-    summaries = sorted(paths.reports_dir.glob("suite-summary-*.json"), reverse=True)
-    for path in summaries:
-        try:
-            return JsonCache.read(path)
-        except Exception:
-            continue
-    return None
+def _latest_suite_summary(paths: WorkspacePaths, runs: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    items = _recent_suite_summaries(paths, runs, limit=1)
+    return items[0] if items else None
 
 
-def _recent_suite_summaries(paths: WorkspacePaths, limit: int = 6) -> List[Dict[str, Any]]:
+def _recent_suite_summaries(paths: WorkspacePaths, runs: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
+    # Map run_id to its dynamic review status
+    run_status_map: Dict[str, str] = {r["id"]: r["review_status"] for r in runs}
+    
     for path in sorted(paths.reports_dir.glob("suite-summary-*.json"), reverse=True)[:limit]:
         try:
             payload = JsonCache.read(path)
+            cases = payload.get("cases", [])
+            passed_count = 0
+            failed_count = 0
+            
+            for case in cases:
+                report_path = case.get("report", "")
+                run_id = ""
+                if report_path:
+                    parts = Path(report_path).parts
+                    if len(parts) >= 2:
+                        run_id = parts[-2]
+                        
+                if run_id and run_id in run_status_map:
+                    rev_status = run_status_map[run_id]
+                    if rev_status in ("approved", "no_changes"):
+                        passed_count += 1
+                    else:
+                        failed_count += 1
+                else:
+                    if case.get("status") == "PASS":
+                        passed_count += 1
+                    else:
+                        failed_count += 1
+                        
+            payload["passed"] = passed_count
+            payload["failed"] = failed_count
+            payload["status"] = "passed" if failed_count == 0 else "failed"
+            payload["file"] = path.name
+            items.append(payload)
         except Exception:
+            logger.debug("Skipping unreadable suite summary %s", path, exc_info=True)
             continue
-        payload["file"] = path.name
-        items.append(payload)
     return items
 
 
@@ -112,6 +152,7 @@ def _load_model_metadata(paths: WorkspacePaths) -> List[Dict[str, Any]]:
         try:
             payload = JsonCache.read(path)
         except Exception:
+            logger.debug("Skipping unreadable model metadata %s", path, exc_info=True)
             continue
         payload["name"] = path.name
         items.append(payload)
@@ -121,81 +162,85 @@ def _load_model_metadata(paths: WorkspacePaths) -> List[Dict[str, Any]]:
 def _load_all_baselines_indexed(paths: WorkspacePaths) -> Dict[str, Dict[str, Any]]:
     """
     Load all baseline metadata once and index by name.
-    
-    This prevents N+1 lookups when processing runs.
-    
+
+    This prevents N+1 lookups when processing runs. Delegates to
+    BaselineManager so the directory-walk/JSON-read logic lives in one place
+    instead of being duplicated here.
+
     Returns:
         Dict mapping baseline name to its details (same format as get_baseline_details).
     """
-    baseline_manager = BaselineManager(paths)
-    indexed: Dict[str, Dict[str, Any]] = {}
-    
-    for child in sorted(paths.baselines_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        image_path = child / "baseline.png"
-        metadata_path = child / "metadata.json"
-        if not image_path.exists() or not metadata_path.exists():
-            continue
-        
-        try:
-            data = JsonCache.read(metadata_path)
-            baseline_name = data.get("name", child.name)
-            
-            # Load version manifest
-            versions_manifest: List[Dict[str, Any]] = []
-            manifest_path = child / "versions" / "manifest.json"
-            if manifest_path.exists():
-                versions_manifest = JsonCache.read(manifest_path)
-            
-            # Build versions list
-            versions = []
-            for version in reversed(versions_manifest):
-                version_id = version.get("version")
-                if not version_id:
-                    continue
-                versions.append(
-                    {
-                        **version,
-                        "image_href": f"/baseline/{baseline_name}/versions/{version_id}/baseline.png",
-                        "metadata_href": f"/baseline/{baseline_name}/versions/{version_id}/metadata.json",
-                    }
-                )
-            
-            # Build baseline details entry
-            capture = data.get("capture", {})
-            indexed[baseline_name] = {
-                "name": baseline_name,
-                "created_at": data.get("created_at"),
-                "updated_at": data.get("updated_at"),
-                "capture": capture,
-                "browser": capture.get("browser"),
-                "device": capture.get("device"),
-                "locale": capture.get("locale"),
-                "url": capture.get("url"),
-                "history": data.get("history", []),
-                "current_image_href": f"/baseline/{baseline_name}/baseline.png",
-                "metadata_href": f"/baseline/{baseline_name}/metadata.json",
-                "versions": versions,
-                "version_count": len(versions),
-            }
-        except Exception:
-            continue
-    
-    return indexed
+    return BaselineManager(paths).list_baselines_indexed()
 
 
 def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Load all runs with their metadata.
-    
-    Args:
-        paths: WorkspacePaths instance
-        baselines_indexed: Pre-loaded baseline details indexed by name (prevents N+1)
-    
-    Returns:
-        List of run metadata dictionaries
+    Load all runs using the database runs_index table, falling back to folder scanning if database query fails.
     """
+    from .database import get_store
+    
+    rows = []
+    try:
+        store = get_store(paths.db_path)
+        rows = store._execute_query(
+            "SELECT * FROM runs_index ORDER BY created_at DESC;",
+            fetch=True
+        )
+    except Exception as e:
+        logger.warning("[Dashboard Data] DB query failed; falling back to folder scan: %s", e)
+        rows = []
+
+    if rows:
+        runs: List[Dict[str, Any]] = []
+        for row in rows:
+            run_id = row["run_id"]
+            mismatch_pct = row.get("mismatch_pct") or 0.0
+            status = row.get("status")
+            decision_status = row.get("decision_status") or "pending"
+            
+            review_status = _normalize_review_status(
+                status,
+                decision_status,
+                mismatch_pct=mismatch_pct,
+            )
+            ai_label = _sanitize_ai_label(row.get("ai_label"))
+            baseline_name = row.get("baseline_name") or row.get("case_name")
+            baseline_details = baselines_indexed.get(baseline_name) if baseline_name else None
+            
+            runs.append(
+                {
+                    "run": run_id,
+                    "id": run_id,
+                    "case_name": row.get("case_name"),
+                    "name": row.get("case_name"),
+                    "review_status": review_status,
+                    "status": _normalize_run_status(status, decision_status),
+                    "decision_status": decision_status,
+                    "decider": row.get("decider") or "",
+                    "decision_comment": row.get("decision_comment") or "",
+                    "decided_at": row.get("decided_at") or "",
+                    "mismatch_pct": mismatch_pct,
+                    "mismatch": mismatch_pct,
+                    "diff_regions": row.get("diff_regions") or 0,
+                    "ai_label": ai_label,
+                    "ignore_regions": [],
+                    "ai_score": row.get("ai_score"),
+                    "ai_explanation": "",
+                    "severity": {"label": row.get("severity_label") or ""},
+                    "locale": row.get("locale"),
+                    "browser": row.get("browser"),
+                    "device": row.get("device"),
+                    "url": row.get("url"),
+                    "baseline_name": baseline_name,
+                    "baseline_image_href": baseline_details.get("current_image_href") if baseline_details else None,
+                    "suite_name": row.get("suite_name"),
+                    "build_id": row.get("build_id"),
+                    "report_href": row.get("report_href") or f"/artifacts/{run_id}/report.html",
+                }
+            )
+        return runs
+
+    # ── Fallback: Load all runs from folder scanning ─────────────────────────
     runs: List[Dict[str, Any]] = []
     for run_dir in sorted(paths.runs_dir.iterdir(), reverse=True):
         if not run_dir.is_dir():
@@ -206,6 +251,7 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
         try:
             payload = JsonCache.read(result_file)
         except Exception:
+            logger.debug("Skipping unreadable run result %s", result_file, exc_info=True)
             continue
 
         result = payload.get("result", {})
@@ -299,6 +345,7 @@ def _load_builds(paths: WorkspacePaths, runs: List[Dict[str, Any]]) -> List[Dict
                 
             builds.append(payload)
         except Exception:
+            logger.debug("Skipping unreadable build metadata %s", meta_file, exc_info=True)
             continue
     return builds
 
@@ -336,8 +383,8 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     builds = _load_builds(paths, runs)
     
     models = _load_model_metadata(paths)
-    latest_suite = _latest_suite_summary(paths)
-    recent_summaries = _recent_suite_summaries(paths)
+    latest_suite = _latest_suite_summary(paths, runs)
+    recent_summaries = _recent_suite_summaries(paths, runs)
     
     # Compute filter values from runs and baselines
     browser_values = {item.get("browser") for item in runs if item.get("browser")}
@@ -376,5 +423,5 @@ def build_dashboard_snapshot(project_root: Path, paths: WorkspacePaths) -> Dict[
     }
     
     # Cache result
-    _DashboardCache.set(snapshot)
+    _DashboardCache.set(paths, snapshot)
     return snapshot

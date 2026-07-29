@@ -30,6 +30,8 @@ function ImageFrameInner({ src, alt, aspectRatio = '16/10', fill = false, classN
         ref={imgRef}
         src={src}
         alt={alt}
+        loading="lazy"
+        decoding="async"
         className={cn('w-full h-full object-contain object-center', state !== 'loaded' && 'opacity-0')}
         referrerPolicy="no-referrer"
         onLoad={() => setState('loaded')}

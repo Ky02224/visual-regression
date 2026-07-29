@@ -19,81 +19,59 @@ import { cn } from '../lib/utils';
 import { DashboardData, TestRun } from '../types';
 import { useRole } from '../context/RoleContext';
 import { useApiData } from '../hooks/useApiData';
+import { useDebounce } from '../hooks/useDebounce';
+import { useGroupedRuns } from '../hooks/useGroupedRuns';
 import { ChangeTypeBadge } from '../components/ui/ChangeTypeBadge';
 import { ReviewStatusBadge } from '../components/ui/ReviewStatusBadge';
 import { normalizeReviewStatus, mismatchPctClass, reviewBorderClass, type ReviewStatus } from '../lib/reviewStatus';
+import { parseUrl, relativeTime } from '../lib/format';
 import { ImageFrame } from '../components/ui/ImageFrame';
 import { Button } from '../components/ui/Button';
-
-interface GroupedRuns {
-  url: string;
-  runs: TestRun[];
-}
-
-function parseUrl(url: string): { host: string; path: string } {
-  try {
-    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
-    return { host: u.host, path: u.pathname + (u.search || '') };
-  } catch {
-    const slash = url.indexOf('/');
-    if (slash !== -1) return { host: url.slice(0, slash), path: url.slice(slash) };
-    return { host: url, path: '/' };
-  }
-}
-
-function relativeTime(ts: string | number | null | undefined): string | null {
-  if (!ts) return null;
-  const d = typeof ts === 'number' ? new Date(ts < 1e12 ? ts * 1000 : ts) : new Date(ts);
-  if (isNaN(d.getTime())) return null;
-  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+import { api } from '../services/apiClient';
 
 export function Dashboard() {
-  useRole();
+  const { can } = useRole();
   const { data: dashboardData, loading, error, refetch } = useApiData<DashboardData>('/api/dashboard', {
     ttl: 30000, // 30 second cache
     onError: () => {}
   });
   
 
-  const [groupedRuns, setGroupedRuns] = React.useState<GroupedRuns[]>([]);
-  
-  React.useEffect(() => {
-    if (!dashboardData) return;
-    
-    // Group runs by url
-    const groups: Record<string, TestRun[]> = {};
-    const runs = (dashboardData.runs || []);
-
-    runs.forEach((r: any) => {
-      const urlStr = r.url || 'Unknown';
-      const mapped: TestRun = {
-        ...r,
-        id: r.id || r.run,
-        name: r.name || r.case_name || r.id,
-        mismatch: Number(r.mismatch ?? r.mismatch_pct ?? 0),
-        reviewStatus: normalizeReviewStatus(r.review_status ?? r.status),
-        status: r.status,
-        browser: r.browser || 'Unknown',
-        device: r.device || 'Unknown',
-        locale: r.locale || 'Unknown',
-        aiLabel: r.ai_label ?? r.aiLabel,
-      };
-      if (!groups[urlStr]) groups[urlStr] = [];
-      groups[urlStr].push(mapped);
-    });
-        
-    const arr = Object.keys(groups).map(url => ({ url, runs: groups[url] }));
-    setGroupedRuns(arr);
-  }, [dashboardData]);
+  const groupedRuns = useGroupedRuns(dashboardData?.runs);
 
   const [selectedRun, setSelectedRun] = React.useState<TestRun | null>(null);
   const [expandedUrls, setExpandedUrls] = React.useState<string[]>([]);
   const [previewTab, setPreviewTab] = React.useState<'current' | 'diff' | 'baseline'>('current');
+  const [selectedRunsForBulk, setSelectedRunsForBulk] = React.useState<string[]>([]);
+  const [pendingBulkDecision, setPendingBulkDecision] = React.useState<'approved' | 'rejected' | null>(null);
+  const [bulkError, setBulkError] = React.useState<string | null>(null);
+
+  const handleBulkReview = React.useCallback(async (decision: 'approved' | 'rejected') => {
+    if (!can('approve')) return;
+    if (selectedRunsForBulk.length === 0) return;
+    setBulkError(null);
+    try {
+      const result = await api.post<{ ok: boolean; error?: string }>('/api/bulk-review', {
+        runs: selectedRunsForBulk,
+        decision,
+        reviewer: 'dashboard_ui'
+      });
+      if (result.ok) {
+        setSelectedRunsForBulk([]);
+        refetch();
+      } else {
+        setBulkError(result.error || 'Failed to submit bulk review');
+      }
+    } catch (e) {
+      setBulkError('Error submitting bulk review: ' + String(e));
+    }
+  }, [selectedRunsForBulk, refetch, can]);
+
+  const confirmBulkReview = React.useCallback(() => {
+    if (!pendingBulkDecision) return;
+    handleBulkReview(pendingBulkDecision);
+    setPendingBulkDecision(null);
+  }, [pendingBulkDecision, handleBulkReview]);
 
   React.useEffect(() => {
     setPreviewTab('current');
@@ -107,6 +85,7 @@ export function Dashboard() {
   const [localeFilter, setLocaleFilter] = React.useState('All');
   const [statusFilter, setStatusFilter] = React.useState('All');
   const [searchQuery, setSearchQuery] = React.useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 150);
 
   // Refs & extras
   const searchRef = React.useRef<HTMLInputElement>(null);
@@ -136,13 +115,13 @@ export function Dashboard() {
   const LIST_LIMIT = 50;
 
   // Filtering Logic
-  const filteredGroupedRuns = React.useMemo(() => {
-    let allFiltered = groupedRuns
+  const allFilteredGroupedRuns = React.useMemo(() => {
+    return groupedRuns
       .map(group => ({
         ...group,
         runs: group.runs.filter(run => {
-          const q = searchQuery.toLowerCase();
-          const matchesSearch = searchQuery === '' ||
+          const q = debouncedSearchQuery.toLowerCase();
+          const matchesSearch = debouncedSearchQuery === '' ||
                                (run.name || '').toLowerCase().includes(q) ||
                                (group.url || '').toLowerCase().includes(q);
           const matchesWebsite = websiteFilter === 'All' || group.url === websiteFilter;
@@ -157,14 +136,28 @@ export function Dashboard() {
         })
       }))
       .filter(group => group.runs.length > 0);
+  }, [groupedRuns, websiteFilter, deviceFilter, localeFilter, statusFilter, debouncedSearchQuery]);
 
+  // Reset the truncated view whenever the filters materially change the result set,
+  // so "Show all" from a previous filter doesn't silently carry over.
+  React.useEffect(() => {
+    setShowAll(false);
+  }, [websiteFilter, deviceFilter, localeFilter, statusFilter, debouncedSearchQuery]);
+
+  const filteredGroupedRuns = React.useMemo(() => {
     if (!showAll) {
       // Flatten, slice, and pick groups that contain those runs
       // For simplicity in this UI, we just slice the groups
-      return allFiltered.slice(0, LIST_LIMIT);
+      return allFilteredGroupedRuns.slice(0, LIST_LIMIT);
     }
-    return allFiltered;
-  }, [groupedRuns, websiteFilter, deviceFilter, localeFilter, statusFilter, searchQuery, showAll]);
+    return allFilteredGroupedRuns;
+  }, [allFilteredGroupedRuns, showAll]);
+
+  const totalFilteredRunCount = React.useMemo(
+    () => allFilteredGroupedRuns.flatMap(g => g.runs).length,
+    [allFilteredGroupedRuns]
+  );
+  const isTruncated = !showAll && allFilteredGroupedRuns.length > LIST_LIMIT;
 
   if (loading) {
     return (
@@ -200,7 +193,7 @@ export function Dashboard() {
 
   const m = {
     baseline_count: dashboardData?.baseline_count || 0,
-    run_count: dashboardData?.run_count || 0,
+    run_count: dashboardData?.runs?.length || 0,
     pending_decisions: dashboardData?.pending_decisions || 0,
     approved_decisions: dashboardData?.approved_decisions || 0,
     ...dashboardData?.summary,
@@ -249,8 +242,19 @@ export function Dashboard() {
           <div className="flex items-center gap-3">
             <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">All Runs</h3>
             <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-bold">
-              {groupedRuns.flatMap(g => g.runs).length}
+              {totalFilteredRunCount}
             </span>
+            {isTruncated && (
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                showing first {LIST_LIMIT} groups —{' '}
+                <button
+                  onClick={() => setShowAll(true)}
+                  className="text-accent hover:underline font-semibold cursor-pointer"
+                >
+                  show all
+                </button>
+              </span>
+            )}
           </div>
         </div>
 
@@ -260,13 +264,14 @@ export function Dashboard() {
               <input
                 ref={searchRef}
                 type="text"
+                aria-label="Search by case name or URL"
                 placeholder="Search by case name or URL…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-11 pr-12 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md text-sm outline-none focus:ring-2 focus:ring-accent/20 transition-all font-medium shadow-sm"
               />
               {searchQuery ? (
-                <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+                <button onClick={() => setSearchQuery('')} aria-label="Clear search" className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
                   <X className="w-3 h-3" />
                 </button>
               ) : (
@@ -338,9 +343,24 @@ export function Dashboard() {
                           const pc = group.runs.filter(r => (r.reviewStatus ?? normalizeReviewStatus(r.status)) === 'no_changes').length;
                           return (
                             <div className="flex items-center gap-1.5">
-                              {fc > 0 && <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-[9px] font-bold"><span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />{fc}</span>}
-                              {ac > 0 && <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 text-[9px] font-bold"><span className="w-1.5 h-1.5 rounded-full bg-orange-500" />{ac}</span>}
-                              {pc > 0 && <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 text-[9px] font-bold"><span className="w-1.5 h-1.5 rounded-full bg-green-500" />{pc}</span>}
+                              {fc > 0 && (
+                                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-[9px] font-bold">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                                  {fc} failed
+                                </span>
+                              )}
+                              {ac > 0 && (
+                                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 text-[9px] font-bold">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                                  {ac} changes
+                                </span>
+                              )}
+                              {pc > 0 && (
+                                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 text-[9px] font-bold">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                                  {pc} passed
+                                </span>
+                              )}
                             </div>
                           );
                         })()}
@@ -361,16 +381,39 @@ export function Dashboard() {
                               <div
                                 key={run.id}
                                 onClick={() => setSelectedRun(selectedRun?.id === run.id ? null : run)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    setSelectedRun(selectedRun?.id === run.id ? null : run);
+                                  }
+                                }}
+                                role="button"
+                                tabIndex={0}
+                                aria-pressed={selectedRun?.id === run.id}
                                 className={cn(
-                                  "px-5 py-3.5 flex items-center justify-between cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-800/30 group border-l-[3px]",
+                                  "px-5 py-3.5 flex items-center justify-between cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-800/30 group border-l-[3px] focus-visible:outline-none focus-visible:bg-slate-50 dark:focus-visible:bg-slate-800/30",
                                   selectedRun?.id === run.id
                                     ? "bg-blue-50/50 dark:bg-slate-800/60 border-l-accent"
                                     : reviewBorderClass(run.reviewStatus ?? normalizeReviewStatus(run.status))
                                 )}
                               >
                                 <div className="flex items-center gap-3 min-w-0 flex-1">
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`Select ${run.name} for bulk review`}
+                                    checked={selectedRunsForBulk.includes(run.id)}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setSelectedRunsForBulk(prev => [...prev, run.id]);
+                                      } else {
+                                        setSelectedRunsForBulk(prev => prev.filter(id => id !== run.id));
+                                      }
+                                    }}
+                                    className="w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-accent focus:ring-accent cursor-pointer mr-1"
+                                  />
                                   <div className="w-14 shrink-0 rounded-md overflow-hidden border border-[var(--outline)]">
-                                    <ImageFrame src={`/artifacts/${run.id}/current.png`} alt="" aspectRatio="16/10" />
+                                    <ImageFrame src={`/artifacts/${run.id}/current.webp`} alt={`Current snapshot for ${run.name}`} aspectRatio="16/10" />
                                   </div>
                                   <div className="min-w-0">
                                     <div className="flex items-center gap-2">
@@ -423,6 +466,80 @@ export function Dashboard() {
             )}
           </div>
     </div>
+
+    {selectedRunsForBulk.length > 0 && (
+      <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 flex flex-col items-center gap-2 z-50">
+        {bulkError && (
+          <div className="flex items-center gap-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-400 rounded-lg px-4 py-2 text-xs shadow-lg max-w-md">
+            <span className="flex-1">{bulkError}</span>
+            <button onClick={() => setBulkError(null)} aria-label="Dismiss error" className="opacity-60 hover:opacity-100">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl rounded-lg px-6 py-4 flex items-center gap-6">
+          <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+            {selectedRunsForBulk.length} runs selected
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPendingBulkDecision('approved')}
+              disabled={!can('approve')}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded text-xs font-bold uppercase tracking-wider transition-colors"
+            >
+              Approve
+            </button>
+            <button
+              onClick={() => setPendingBulkDecision('rejected')}
+              disabled={!can('approve')}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded text-xs font-bold uppercase tracking-wider transition-colors"
+            >
+              Reject
+            </button>
+            <button
+              onClick={() => setSelectedRunsForBulk([])}
+              className="px-3 py-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded text-xs font-semibold transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {pendingBulkDecision && (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4" onClick={() => setPendingBulkDecision(null)}>
+        <div
+          className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-2xl max-w-sm w-full p-6 space-y-4"
+          onClick={(e) => e.stopPropagation()}
+          role="alertdialog"
+          aria-modal="true"
+          aria-label={`Confirm ${pendingBulkDecision === 'approved' ? 'approve' : 'reject'} selected runs`}
+        >
+          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+            {pendingBulkDecision === 'approved' ? 'Approve' : 'Reject'} {selectedRunsForBulk.length} selected run{selectedRunsForBulk.length === 1 ? '' : 's'}?
+          </h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400">This will update the review status for every selected run. This action can be redone individually afterwards, but not bulk-undone.</p>
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={() => setPendingBulkDecision(null)}
+              className="px-3 py-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded text-xs font-semibold transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmBulkReview}
+              className={cn(
+                "px-4 py-2 rounded text-xs font-bold uppercase tracking-wider text-white transition-colors",
+                pendingBulkDecision === 'approved' ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700"
+              )}
+            >
+              Confirm {pendingBulkDecision === 'approved' ? 'Approve' : 'Reject'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* Right-side detail drawer */}
     <AnimatePresence>
@@ -487,7 +604,7 @@ export function Dashboard() {
               </div>
               <div className="rounded-md overflow-hidden border border-[var(--outline)] mb-4">
                 <ImageFrame 
-                  src={`/artifacts/${selectedRun.id}/${previewTab === 'diff' ? 'diff_overlay' : previewTab}.png`} 
+                  src={`/artifacts/${selectedRun.id}/${previewTab === 'diff' ? 'diff_overlay' : previewTab}.webp`}
                   alt={`${previewTab} preview`} 
                   aspectRatio="16/10" 
                 />
@@ -512,96 +629,18 @@ export function Dashboard() {
   );
 }
 
-function StatCard({ icon, label, value, subValue, isAlert, variant = 'default' }: { icon: React.ReactNode, label: string, value: string, subValue: string, isAlert?: boolean, variant?: 'default' | 'success' | 'warning' | 'danger' }) {
-  const valueColor = {
-    default: 'text-slate-900 dark:text-white',
-    success: 'text-emerald-600 dark:text-emerald-400',
-    warning: 'text-orange-600 dark:text-orange-400',
-    danger: 'text-red-600 dark:text-red-400',
-  }[variant];
-
-  const accentBg = {
-    default: 'bg-slate-100 dark:bg-slate-800 text-slate-500',
-    success: 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600',
-    warning: 'bg-orange-50 dark:bg-orange-900/20 text-orange-600',
-    danger: 'bg-red-50 dark:bg-red-900/20 text-red-600',
-  }[variant];
-
-  const topBorder = {
-    default: '',
-    success: 'border-t-[3px] border-t-emerald-500',
-    warning: isAlert ? 'border-t-[3px] border-t-orange-500' : '',
-    danger: 'border-t-[3px] border-t-red-500',
-  }[variant];
-
-  return (
-    <div className={cn(
-      "bg-white dark:bg-slate-900 p-6 rounded-md border border-slate-200 dark:border-slate-800 transition-all hover:shadow-md group",
-      topBorder,
-      isAlert && 'shadow-orange-100 dark:shadow-none'
-    )}>
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">{label}</span>
-        <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center", accentBg)}>
-          {icon}
-        </div>
-      </div>
-      <div>
-        <span className={cn("text-4xl font-bold tracking-tighter font-mono", valueColor)}>{value}</span>
-        <p className="text-[11px] font-medium text-slate-400 mt-1.5">{subValue}</p>
-      </div>
-    </div>
-  );
-}
-
 function FilterSelect({ label, options, value, onChange }: { label: string, options: string[], value: string, onChange: (val: string) => void }) {
   return (
     <div className="flex gap-2 items-center px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm">
       <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{label}:</span>
-      <select 
+      <select
+        aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="border-none bg-transparent focus:ring-0 text-primary cursor-pointer p-0 pr-6 text-xs font-bold outline-none"
       >
         {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
       </select>
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: TestRun['status'] }) {
-  switch (status) {
-    case 'failed':
-      return (
-        <div className="flex items-center gap-2 px-3 py-1 bg-red-50 dark:bg-red-900/20 rounded-full">
-          <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
-          <span className="text-red-600 dark:text-red-400 text-[10px] font-bold uppercase tracking-widest">Failed</span>
-        </div>
-      );
-    case 'attention':
-      return (
-        <div className="flex items-center gap-2 px-3 py-1 bg-orange-50 dark:bg-orange-900/20 rounded-full">
-          <div className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-          <span className="text-orange-600 dark:text-orange-400 text-[10px] font-bold uppercase tracking-widest">Attention</span>
-        </div>
-      );
-    case 'passed':
-      return (
-        <div className="flex items-center gap-2 px-3 py-1 bg-green-50 dark:bg-green-900/20 rounded-full">
-          <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-          <span className="text-green-600 dark:text-green-400 text-[10px] font-bold uppercase tracking-widest">Passed</span>
-        </div>
-      );
-    default:
-      return null;
-  }
-}
-
-function InfoItem({ label, value, valueClass }: { label: string, value: string, valueClass?: string }) {
-  return (
-    <div>
-      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em] mb-1">{label}</p>
-      <p className={cn("font-bold text-primary dark:text-slate-200", valueClass)}>{value}</p>
     </div>
   );
 }

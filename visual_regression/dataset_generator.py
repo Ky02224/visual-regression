@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List
 
 from .ai_datasets import load_public_dataset_manifest
-from .config import WorkspacePaths
+from .config import WorkspacePaths, resolve_image_path
 
 NO_DEFECT_LABEL_INDEX = -1
 BENIGN_LABEL_NAME = "__benign__"
@@ -21,6 +21,8 @@ DEFECT_LABELS = [
     "broken-image",
     "misaligned-fields",
     "unreadable-text",
+    "z-index-issue",
+    "font-change",
 ]
 DEFECT_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(DEFECT_LABELS)}
 DEFECT_MODES = [
@@ -32,6 +34,8 @@ DEFECT_MODES = [
     "broken_image",
     "misaligned_fields",
     "unreadable_text",
+    "z_index_issue",
+    "font_change",
 ]
 DEFECT_MODE_WEIGHTS = {
     "missing_element": 2,
@@ -42,6 +46,8 @@ DEFECT_MODE_WEIGHTS = {
     "broken_image": 2,
     "misaligned_fields": 2,
     "unreadable_text": 2,
+    "z_index_issue": 2,
+    "font_change": 2,
 }
 DEFECT_MODE_TO_LABEL = {
     "missing_element": "missing-element",
@@ -52,6 +58,8 @@ DEFECT_MODE_TO_LABEL = {
     "broken_image": "broken-image",
     "misaligned_fields": "misaligned-fields",
     "unreadable_text": "unreadable-text",
+    "z_index_issue": "z-index-issue",
+    "font_change": "font-change",
 }
 
 
@@ -99,7 +107,7 @@ def _resize_to_max(image: np.ndarray, max_px: int) -> np.ndarray:
 def _load_base_images(paths: WorkspacePaths, max_px: int = 0) -> List[np.ndarray]:
     bases: List[np.ndarray] = []
     for baseline_dir in paths.baselines_dir.iterdir():
-        image_path = baseline_dir / "baseline.png"
+        image_path = resolve_image_path(baseline_dir, "baseline")
         if not image_path.exists():
             continue
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -117,10 +125,28 @@ def _load_public_dataset_images(manifest_path: Path | None, max_images: int | No
         raise FileNotFoundError(f"Dataset manifest not found: {manifest_path}")
 
     payload = load_public_dataset_manifest(manifest_path)
+    
+    # Group image items by source
+    by_source: dict[str, list] = {}
+    for item in payload.get("images", []):
+        src = item.get("source", "unknown")
+        if src not in by_source:
+            by_source[src] = []
+        by_source[src].append(item)
+        
+    # Cap items per source to balance loading across all sources
+    items_to_load = []
+    if max_images is not None and by_source:
+        num_sources = len(by_source)
+        limit_per_source = max(1, max_images // num_sources)
+        for src, src_items in by_source.items():
+            items_to_load.extend(src_items[:limit_per_source])
+    else:
+        for src, src_items in by_source.items():
+            items_to_load.extend(src_items)
+
     images: List[np.ndarray] = []
-    for index, item in enumerate(payload.get("images", [])):
-        if max_images is not None and index >= max_images:
-            break
+    for item in items_to_load:
         image_path = Path(str(item.get("path", "")))
         if not image_path.exists():
             continue
@@ -174,28 +200,51 @@ def _apply_benign_variant(image: np.ndarray, seed: int) -> np.ndarray:
     return variant
 
 
-def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None) -> tuple[np.ndarray, str]:
+
+def _sample_bg_color(img, x, y):
+    h, w = img.shape[:2]
+    samples = []
+    for dy in [-2, 0, 2]:
+        for dx in [-2, 0, 2]:
+            px = max(0, min(x + dx, w - 1))
+            py = max(0, min(y + dy, h - 1))
+            samples.append(img[py, px])
+    median_color = np.median(samples, axis=0)
+    return tuple(int(c) for c in median_color)
+
+
+def _apply_defect_variant(image, seed, mode=None):
     # Use np.random.default_rng for consistency with _apply_benign_variant.
-    # Conversion: randint(a,b) inclusive → integers(a, b+1); choice(seq) → seq[integers(len)]
+    # Conversion: randint(a,b) inclusive -> integers(a, b+1); choice(seq) -> seq[integers(len)]
     rng = np.random.default_rng(seed)
     variant = image.copy()
     mode = mode or DEFECT_MODES[int(rng.integers(len(DEFECT_MODES)))]
     h, w = image.shape[:2]
 
     if mode == "missing_element":
+        # Realistic: element gone, leaves white empty gap
+        # Real webpages: when an element disappears, the DOM collapses and shows
+        # the page background (white) in that region. Baseline has content;
+        # current shows a blank white placeholder -> very strong visual signal.
         num_removals = int(rng.integers(1, 4))
         for _ in range(num_removals):
             rx1 = int(rng.integers(int(w * 0.05), int(w * 0.55) + 1))
             ry1 = int(rng.integers(int(h * 0.10), int(h * 0.65) + 1))
-            rw = int(rng.integers(int(w * 0.10), int(w * 0.28) + 1))
-            rh = int(rng.integers(int(h * 0.06), int(h * 0.16) + 1))
+            rw = int(rng.integers(int(w * 0.12), int(w * 0.30) + 1))
+            rh = int(rng.integers(int(h * 0.07), int(h * 0.18) + 1))
             rx2 = min(rx1 + rw, w - 1)
             ry2 = min(ry1 + rh, h - 1)
-            cv2.rectangle(variant, (rx1, ry1), (rx2, ry2), (215, 215, 215), thickness=-1)
-            cv2.rectangle(variant, (rx1, ry1), (rx2, ry2), (170, 170, 170), thickness=2)
+            # Fill with sampled background color (element completely gone).
+            # No placeholder border: a removed element leaves plain background,
+            # not a dashed outline — a drawn border would be a synthetic-only
+            # tell the model could shortcut on instead of learning the real
+            # "content used to be here" pattern.
+            bg_color = _sample_bg_color(image, rx1, ry1)
+            cv2.rectangle(variant, (rx1, ry1), (rx2, ry2), bg_color, thickness=-1)
         label = "missing-element"
 
     elif mode == "color_regression":
+        # Unchanged (already works well at 100%)
         header_h = max(int(h * 0.10), 20)
         hue_opts = [(22, 50, 200), (22, 150, 50), (150, 22, 150), (200, 80, 22), (22, 150, 200)]
         cv2.rectangle(variant, (0, 0), (w, header_h), hue_opts[int(rng.integers(len(hue_opts)))], thickness=-1)
@@ -209,7 +258,11 @@ def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None)
         label = "color-regression"
 
     elif mode == "layout_shift":
-        shift_pct = float(rng.uniform(0.06, 0.15))
+        # Realistic: aggressive shift (9-18%), no break-line marker — a real
+        # reflow bug never draws a grey seam at the shift boundary, so leaving
+        # one in training data taught the model to key off that instead of
+        # the actual displaced-content pattern.
+        shift_pct = float(rng.uniform(0.09, 0.18))
         directions = ["right", "left", "down", "up"]
         direction = directions[int(rng.integers(len(directions)))]
         top = int(h * float(rng.uniform(0.10, 0.25)))
@@ -243,9 +296,11 @@ def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None)
             if panel.shape[0] > shift_y:
                 shifted[: panel.shape[0] - shift_y, :] = panel[shift_y:, :]
             variant[:, left:] = shifted
+            cv2.line(variant, (left, h - shift_y), (w - 1, h - shift_y), (160, 160, 160), 2)
         label = "layout-shift"
 
     elif mode == "overlay_obstruction":
+        # Unchanged (works well)
         overlay_types = ["modal", "banner", "drawer"]
         overlay_type = overlay_types[int(rng.integers(len(overlay_types)))]
         if overlay_type == "modal":
@@ -268,6 +323,8 @@ def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None)
         label = "overlay-obstruction"
 
     elif mode == "text_truncation":
+        # Realistic: text cut off by overflow:hidden — no clip-line marker,
+        # since real CSS truncation doesn't draw a seam at the cut boundary.
         num_rows = int(rng.integers(2, 7))
         start_y = int(h * float(rng.uniform(0.20, 0.50)))
         row_h = int(h * float(rng.uniform(0.04, 0.075)))
@@ -277,28 +334,33 @@ def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None)
             if top + row_h >= h:
                 break
             cv2.rectangle(variant, (x_cut, top), (w - int(w * 0.03), top + row_h), (255, 255, 255), thickness=-1)
-        cv2.line(variant, (x_cut, start_y), (x_cut, min(start_y + num_rows * (row_h + 4), h - 1)), (200, 200, 200), 1)
         label = "text-truncation"
 
     elif mode == "broken_image":
+        # Realistic: broken image placeholder with X icon and red-tinted border
+        # Enforces minimum 80x60px so it is always clearly visible to the AI.
         num_slots = int(rng.integers(1, 4))
         for _ in range(num_slots):
             ix1 = int(rng.integers(int(w * 0.05), int(w * 0.55) + 1))
             iy1 = int(rng.integers(int(h * 0.10), int(h * 0.60) + 1))
-            iw = int(rng.integers(int(w * 0.12), int(w * 0.30) + 1))
-            ih = int(rng.integers(int(h * 0.08), int(h * 0.20) + 1))
+            iw = max(80, int(rng.integers(int(w * 0.12), int(w * 0.30) + 1)))
+            ih = max(60, int(rng.integers(int(h * 0.08), int(h * 0.20) + 1)))
             ix2 = min(ix1 + iw, w - 1)
             iy2 = min(iy1 + ih, h - 1)
             cv2.rectangle(variant, (ix1, iy1), (ix2, iy2), (205, 205, 205), thickness=-1)
-            cv2.rectangle(variant, (ix1, iy1), (ix2, iy2), (140, 140, 140), thickness=2)
-            cv2.line(variant, (ix1 + 4, iy1 + 4), (ix2 - 4, iy2 - 4), (160, 160, 160), 2)
-            cv2.line(variant, (ix2 - 4, iy1 + 4), (ix1 + 4, iy2 - 4), (160, 160, 160), 2)
+            cv2.rectangle(variant, (ix1, iy1), (ix2, iy2), (110, 110, 190), thickness=3)
+            cv2.line(variant, (ix1 + 6, iy1 + 6), (ix2 - 6, iy2 - 6), (130, 130, 130), 2)
+            cv2.line(variant, (ix2 - 6, iy1 + 6), (ix1 + 6, iy2 - 6), (130, 130, 130), 2)
             cx, cy = (ix1 + ix2) // 2, (iy1 + iy2) // 2
-            icon_size = max(8, min(iw, ih) // 5)
-            cv2.rectangle(variant, (cx - icon_size, cy - icon_size), (cx + icon_size, cy + icon_size), (170, 170, 170), thickness=2)
+            icon_size = max(12, min(iw, ih) // 5)
+            cv2.rectangle(variant,
+                          (cx - icon_size, cy - icon_size),
+                          (cx + icon_size, cy + icon_size),
+                          (150, 150, 150), thickness=2)
         label = "broken-image"
 
     elif mode == "misaligned_fields":
+        # Unchanged (works adequately)
         num_fields = int(rng.integers(3, 8))
         field_start_y = int(h * float(rng.uniform(0.20, 0.45)))
         field_h = int(h * float(rng.uniform(0.04, 0.07)))
@@ -309,27 +371,19 @@ def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None)
         offset_y = int(rng.integers(8, 26)) * [-1, 1][int(rng.integers(2))]
         gap = int(h * 0.065)
         label_x = int(w * 0.05)
-
         for idx in range(num_fields):
             fy = field_start_y + idx * gap
             if fy + field_h >= h:
                 break
-
             cv2.rectangle(variant, (label_x, fy), (label_x + label_w, fy + field_h - 4), (200, 200, 200), thickness=-1)
-
             new_x = max(0, min(input_x + offset_x, w - input_w - 1))
             new_y = max(0, min(fy + offset_y, h - field_h - 1))
             cv2.rectangle(variant, (new_x, new_y), (new_x + input_w, new_y + field_h - 4), (230, 230, 230), thickness=-1)
             cv2.rectangle(variant, (new_x, new_y), (new_x + input_w, new_y + field_h - 4), (160, 160, 160), thickness=1)
-
-        ref_x = input_x
-        line_top = field_start_y
-        line_bottom = min(field_start_y + num_fields * gap, h - 1)
-        cv2.line(variant, (ref_x, line_top), (ref_x, line_bottom), (180, 100, 100), 1)
-
         label = "misaligned-fields"
 
     elif mode == "unreadable_text":
+        # Unchanged (works adequately)
         text_patterns = ["low_contrast", "washed"]
         pattern = text_patterns[int(rng.integers(len(text_patterns)))]
         num_rows = int(rng.integers(3, 9))
@@ -354,4 +408,50 @@ def _apply_defect_variant(image: np.ndarray, seed: int, mode: str | None = None)
                 variant[ry: ry + row_h, x1: rx2] = np.clip(roi, 0, 255).astype(np.uint8)
         label = "unreadable-text"
 
+    elif mode == "z_index_issue":
+        # Unchanged (works adequately)
+        bx1 = int(rng.integers(int(w * 0.15), int(w * 0.45) + 1))
+        by1 = int(rng.integers(int(h * 0.15), int(h * 0.45) + 1))
+        bw = int(rng.integers(int(w * 0.20), int(w * 0.35) + 1))
+        bh = int(rng.integers(int(h * 0.15), int(h * 0.30) + 1))
+        bx2 = min(bx1 + bw, w - 1)
+        by2 = min(by1 + bh, h - 1)
+        # A blank white panel covering existing content — no debug text: a
+        # real z-index/stacking bug never labels itself, so burning "Z-INDEX
+        # CORRUPT" into the pixels was pure answer leakage the model could
+        # OCR-shortcut on instead of learning the actual occlusion pattern.
+        cv2.rectangle(variant, (bx1, by1), (bx2, by2), (255, 255, 255), thickness=-1)
+        cv2.rectangle(variant, (bx1, by1), (bx2, by2), (40, 40, 40), thickness=2)
+        label = "z-index-issue"
+
+    elif mode == "font_change":
+        # Realistic: simulate CSS font-size increase by upscaling the content region
+        # Real CSS font-size change makes text rows taller; content below shifts down.
+        # We take the actual page content in that area and vertically scale it up
+        # (1.4x to 1.9x), giving the visual appearance of larger rendered text.
+        start_y = int(h * float(rng.uniform(0.15, 0.50)))
+        region_h = int(h * float(rng.uniform(0.10, 0.22)))
+        region_x1 = int(w * float(rng.uniform(0.03, 0.15)))
+        region_x2 = int(w * float(rng.uniform(0.60, 0.92)))
+        region_y1 = start_y
+        region_y2 = min(start_y + region_h, h - 1)
+
+        if region_y2 > region_y1 + 10 and region_x2 > region_x1 + 20:
+            region = variant[region_y1:region_y2, region_x1:region_x2].copy()
+            reg_h, reg_w = region.shape[:2]
+            scale = float(rng.uniform(1.40, 1.90))
+            new_h = min(int(reg_h * scale), h - region_y1)
+            # Upscale region vertically (bigger font -> taller rows)
+            scaled = cv2.resize(region, (reg_w, new_h), interpolation=cv2.INTER_LINEAR)
+            paste_h = min(scaled.shape[0], h - region_y1)
+            variant[region_y1:region_y1 + paste_h, region_x1:region_x2] = scaled[:paste_h, :]
+            # Fill the overflow gap with page background (content pushed down)
+            fill_y1 = region_y1 + paste_h
+            fill_y2 = min(region_y2 + int(reg_h * (scale - 1.0)), h - 1)
+            if fill_y2 > fill_y1:
+                bg_color = _sample_bg_color(image, region_x1, region_y1)
+                cv2.rectangle(variant, (region_x1, fill_y1), (region_x2, fill_y2), bg_color, thickness=-1)
+        label = "font-change"
+
     return variant, label
+

@@ -11,7 +11,7 @@ def test_build_dashboard_snapshot(tmp_path: Path):
 
     baseline_dir = paths.baselines_dir / "home"
     baseline_dir.mkdir(parents=True)
-    (baseline_dir / "baseline.png").write_bytes(b"png")
+    (baseline_dir / "baseline.webp").write_bytes(b"webp")
     (baseline_dir / "metadata.json").write_text(
         json.dumps(
             {
@@ -69,7 +69,7 @@ def test_build_dashboard_snapshot(tmp_path: Path):
     assert snapshot["metrics"]["locale_coverage"] == 1
     assert snapshot["runs"][0]["ai_label"] is None
     assert snapshot["runs"][0]["review_status"] == "unreviewed"
-    assert snapshot["runs"][0]["baseline_image_href"].endswith("/baseline/home/baseline.png")
+    assert snapshot["runs"][0]["baseline_image_href"].endswith("/baseline/home/baseline.webp")
     assert snapshot["runs"][0]["severity"]["label"] == "high"
     assert snapshot["runs"][0]["decision_status"] == "pending"
     assert snapshot["baselines"][0]["version_count"] == 1

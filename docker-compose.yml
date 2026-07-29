@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   visual-regression:
     build:
@@ -7,13 +5,27 @@ services:
       dockerfile: Dockerfile
     container_name: visual-regression-app
     ports:
+      # For production, change to "127.0.0.1:8130:8130" to restrict to loopback only
       - "8130:8130"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
     volumes:
       # Persist the sqlite database, runs, reports, and models
       - visual_regression_data:/app/.visual-regression
     environment:
       - PORT=8130
       - HOST=0.0.0.0
+      # Enforce secure passwords in production using docker-compose validation syntax
+      - LENS_ADMIN_PASSWORD=${LENS_ADMIN_PASSWORD:?LENS_ADMIN_PASSWORD environment variable must be set}
+      - LENS_DEVELOPER_PASSWORD=${LENS_DEVELOPER_PASSWORD:?LENS_DEVELOPER_PASSWORD environment variable must be set}
+      # Additional configuration examples:
+      # - DATABASE_URL=postgresql://user:pass@db:5432/lens
+      # - GITHUB_OAUTH_CLIENT_ID=your_client_id
+      # - GITHUB_OAUTH_CLIENT_SECRET=your_client_secret
+      # - LENS_SECURE_COOKIES=true
     restart: unless-stopped
 
 volumes:

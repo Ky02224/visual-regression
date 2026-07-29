@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import json
+import logging
 from pathlib import Path
 from typing import Any, Dict
 
 from .baseline_manager import BaselineManager
-from .config import WorkspacePaths
+from .config import WorkspacePaths, resolve_image_path
 from .integrations_manager import IntegrationsManager
+
+logger = logging.getLogger(__name__)
 
 
 def handle_run_upload(
@@ -15,6 +17,7 @@ def handle_run_upload(
     parts: Dict[str, Any],
     github_repo_url: str,
     dashboard_base_url: str,
+    store: Any = None,
 ) -> Dict[str, Any]:
     name = parts.get("name")
     current_image_part = parts.get("current_image")
@@ -42,20 +45,25 @@ def handle_run_upload(
     from .decision import decide_pass_fail
     from .reporter import generate_html_report, save_image, write_json
     from .ai_training import assess_result
-    
+    import cv2
+    import numpy as np
+
     now_str = now_stamp_precise()
     browser_part = _slug_part(parts.get("browser"), "upload-client")
     device_part = _slug_part(parts.get("device"), "desktop")
     locale_part = _slug_part(parts.get("locale"), "default")
     run_name = f"{now_str}_{BaselineManager.normalize_name(name)}_{browser_part}_{device_part}_{locale_part}"
-    
+
     run_dir = paths.runs_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    decoded_upload = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if decoded_upload is None:
+        raise ValueError("Uploaded 'current_image' could not be decoded as an image")
+    current_path = run_dir / "current.webp"
+    save_image(current_path, decoded_upload)
     
-    current_path = run_dir / "current.png"
-    current_path.write_bytes(image_bytes)
-    
-    baseline_image_path = manager.baseline_image_path(name)
+    baseline_image_path = manager.resolve_baseline_image_path(name)
     
     try:
         threshold_pct = float(parts.get("threshold_pct", 0.1))
@@ -95,8 +103,8 @@ def handle_run_upload(
     )
     
     baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
-    diff_overlay_path = run_dir / "diff_overlay.png"
-    binary_diff_path = run_dir / "binary_diff.png"
+    diff_overlay_path = run_dir / "diff_overlay.webp"
+    binary_diff_path = run_dir / "binary_diff.webp"
     report_path = run_dir / "report.html"
     json_path = run_dir / "result.json"
     
@@ -105,21 +113,27 @@ def handle_run_upload(
     
     ai_model_path = resolve_ai_model_path(paths, None, no_ai)
     ai_assessment = {}
+    ai_error = False
     ai_model_available = bool(ai_model_path and ai_model_path.exists())
     if ai_model_available:
-        ai_assessment = assess_result(
-            result=result,
-            model_path=ai_model_path,
-            baseline_image_path=baseline_image_path,
-            current_image_path=current_path,
-        ).to_dict()
-    
+        try:
+            ai_assessment = assess_result(
+                result=result,
+                model_path=ai_model_path,
+                baseline_image_path=baseline_image_path,
+                current_image_path=current_path,
+            ).to_dict()
+        except Exception:
+            ai_error = True
+            logger.exception("AI assessment failed; falling back to pixel-only decision")
+
     passed, comparison_decision = decide_pass_fail(
         comparison_mode=comparison_mode,
         mismatch_pct=result.mismatch_pct,
         threshold_pct=threshold_pct,
         ai_assessment=ai_assessment,
         ai_model_available=ai_model_available,
+        ai_error=ai_error,
     )
     
     decision = _initial_decision_status(passed)
@@ -174,14 +188,25 @@ def handle_run_upload(
         },
     }
     write_json(json_path, output_payload)
+    try:
+        active_store = store
+        if active_store is None:
+            from .database import get_store
+            active_store = get_store(paths.db_path)
+        # result.json has no "run"/"run_id" key of its own — without this,
+        # upsert_run_index can't resolve a run_id and silently no-ops.
+        output_payload["run_id"] = run_dir.name
+        active_store.upsert_run_index(output_payload)
+    except Exception as e:
+        print(f"[DB Index Warning] Failed to upsert run index on upload: {e}", flush=True)
     
     generate_html_report(
         report_path=report_path,
         test_name=name,
-        baseline_image=Path("baseline.png"),
-        current_image=Path("current.png"),
-        diff_image=Path("diff_overlay.png"),
-        binary_image=Path("binary_diff.png"),
+        baseline_image=Path("baseline.webp"),
+        current_image=Path("current.webp"),
+        diff_image=Path("diff_overlay.webp"),
+        binary_image=Path("binary_diff.webp"),
         result=result,
         threshold_pct=threshold_pct,
         ignore_regions=ignore_regions,
@@ -230,6 +255,7 @@ def handle_ignore_regions_update(
     find_selectors_fn: Any,
     github_repo_url: str,
     dashboard_base_url: str,
+    store: Any = None,
 ) -> Dict[str, Any]:
     manager = BaselineManager(paths)
     manager.save_ignore_regions(name, ignore_regions)
@@ -249,8 +275,8 @@ def handle_ignore_regions_update(
                 with open(result_file, "r", encoding="utf-8") as f:
                     run_payload = _json.load(f)
 
-                baseline_path = run_dir / "baseline.png"
-                current_path = run_dir / "current.png"
+                baseline_path = resolve_image_path(run_dir, "baseline")
+                current_path = resolve_image_path(run_dir, "current")
                 if baseline_path.exists() and current_path.exists():
                     threshold_pct = float(run_payload.get("threshold_pct", 0.5))
                     pixel_threshold = int(run_payload.get("pixel_threshold") or 20)
@@ -269,12 +295,13 @@ def handle_ignore_regions_update(
                         ignore_regions=ignore_tuples
                     )
 
-                    save_image(run_dir / "diff_overlay.png", diff_overlay)
-                    save_image(run_dir / "binary_diff.png", binary_diff)
+                    save_image(run_dir / "diff_overlay.webp", diff_overlay)
+                    save_image(run_dir / "binary_diff.webp", binary_diff)
 
                     no_ai = False
                     ai_model_path = resolve_ai_model_path(paths, None, no_ai)
                     ai_assessment = {}
+                    ai_error = False
                     ai_model_available = bool(ai_model_path and ai_model_path.exists())
                     if ai_model_available:
                         try:
@@ -284,13 +311,23 @@ def handle_ignore_regions_update(
                                 current_image_path=current_path,
                             ).to_dict()
                         except Exception:
-                            pass
+                            ai_error = True
+                            logger.exception("AI assessment failed; falling back to pixel-only decision")
 
                     passed, comparison_decision = decide_pass_fail(
                         comparison_mode="hybrid", mismatch_pct=result.mismatch_pct,
                         threshold_pct=threshold_pct, ai_assessment=ai_assessment,
-                        ai_model_available=ai_model_available,
+                        ai_model_available=ai_model_available, ai_error=ai_error,
                     )
+
+                    # Auto rolling baseline update
+                    try:
+                        bm = BaselineManager(paths)
+                        case_name = run_payload.get("case_name") or run_payload.get("baseline_name")
+                        if case_name:
+                            bm.check_and_rolling_update(case_name, current_path, passed)
+                    except Exception as rolling_err:
+                        logger.warning("Rolling baseline auto-update failed: %s", rolling_err)
 
                     run_payload["status"] = "PASS" if passed else "FAIL"
                     run_payload["ignore_regions"] = ignore_regions
@@ -303,14 +340,25 @@ def handle_ignore_regions_update(
                     run_payload["ai_explanation"] = build_ai_explanation(result, ai_assessment)
 
                     write_json(result_file, run_payload)
+                    try:
+                        active_store = store
+                        if active_store is None:
+                            from .database import get_store
+                            active_store = get_store(paths.db_path)
+                        # result.json has no "run"/"run_id" key of its own — without this,
+                        # upsert_run_index can't resolve a run_id and silently no-ops.
+                        run_payload["run_id"] = run_id
+                        active_store.upsert_run_index(run_payload)
+                    except Exception as e:
+                        print(f"[DB Index Warning] Failed to upsert run index on ignore region update: {e}", flush=True)
 
                     generate_html_report(
                         report_path=run_dir / "report.html",
                         test_name=run_payload.get("case_name", name),
-                        baseline_image=Path("baseline.png"),
-                        current_image=Path("current.png"),
-                        diff_image=Path("diff_overlay.png"),
-                        binary_image=Path("binary_diff.png"),
+                        baseline_image=Path("baseline.webp"),
+                        current_image=Path("current.webp"),
+                        diff_image=Path("diff_overlay.webp"),
+                        binary_image=Path("binary_diff.webp"),
                         result=result,
                         threshold_pct=threshold_pct,
                         ignore_regions=ignore_tuples,

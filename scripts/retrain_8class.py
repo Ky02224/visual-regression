@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from visual_regression.ai_training import StreamingSyntheticDataset, train_model
@@ -26,7 +26,7 @@ LEARNING_RATE = 3e-4
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    paths = WorkspacePaths(ROOT)
+    paths = WorkspacePaths(root=ROOT / ".visual-regression")
     paths.ensure()
     MODEL_OUT.parent.mkdir(parents=True, exist_ok=True)
 

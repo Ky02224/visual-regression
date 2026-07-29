@@ -7,6 +7,17 @@ import json
 from pathlib import Path
 from .config import WorkspacePaths
 
+# HTTP status codes that indicate a request will never succeed on retry
+# (bad/expired token, missing permissions, wrong repo/PR) — retrying just
+# wastes time up to the full backoff budget for no benefit.
+_NON_RETRIABLE_HTTP_CODES = {400, 401, 403, 404, 422}
+
+
+def _is_permanent_error(exc: Exception) -> bool:
+    import urllib.error
+    return isinstance(exc, urllib.error.HTTPError) and exc.code in _NON_RETRIABLE_HTTP_CODES
+
+
 def post_to_github(markdown_body: str, is_fail: bool, failed_count: int, total_count: int) -> None:
     import os
     import urllib.request
@@ -21,7 +32,11 @@ def post_to_github(markdown_body: str, is_fail: bool, failed_count: int, total_c
         print("GitHub integration skipped: GITHUB_TOKEN or GITHUB_REPOSITORY not set in environment.")
         return
 
-    # 1. Update Commit Status
+    # Update Commit Status
+    import time
+    max_retries = 3
+    retry_delay = 2.0
+
     if sha:
         status_url = f"https://api.github.com/repos/{repo}/statuses/{sha}"
         status_data = {
@@ -32,22 +47,30 @@ def post_to_github(markdown_body: str, is_fail: bool, failed_count: int, total_c
         if dashboard_url:
             status_data["target_url"] = dashboard_url
 
-        try:
-            req = urllib.request.Request(
-                status_url,
-                data=_json.dumps(status_data).encode("utf-8"),
-                headers={
-                    "Authorization": f"token {token}",
-                    "Accept": "application/vnd.github.v3+json",
-                    "User-Agent": "Python-VisualRegression-Workbench",
-                    "Content-Type": "application/json",
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req) as resp:
-                print(f"GitHub Commit Status updated successfully (HTTP {resp.status})")
-        except Exception as e:
-            print(f"Error updating GitHub Commit Status: {e}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                req = urllib.request.Request(
+                    status_url,
+                    data=_json.dumps(status_data).encode("utf-8"),
+                    headers={
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "Python-VisualRegression-Workbench",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    print(f"GitHub Commit Status updated successfully (HTTP {resp.status})")
+                    break
+            except Exception as e:
+                if attempt == max_retries or _is_permanent_error(e):
+                    print(f"Error updating GitHub Commit Status (not retrying): {e}")
+                    break
+                else:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    print(f"Error updating GitHub Commit Status: {e}. Retrying in {delay}s (Attempt {attempt}/{max_retries})...")
+                    time.sleep(delay)
 
     # 2. Post PR Comment (if PR number is available)
     pr_number = None
@@ -76,25 +99,33 @@ def post_to_github(markdown_body: str, is_fail: bool, failed_count: int, total_c
         comment_data = {
             "body": markdown_body
         }
-        try:
-            req = urllib.request.Request(
-                comment_url,
-                data=_json.dumps(comment_data).encode("utf-8"),
-                headers={
-                    "Authorization": f"token {token}",
-                    "Accept": "application/vnd.github.v3+json",
-                    "User-Agent": "Python-VisualRegression-Workbench",
-                    "Content-Type": "application/json",
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req) as resp:
-                print(f"GitHub PR comment posted successfully (HTTP {resp.status})")
-        except Exception as e:
-            print(f"Error posting GitHub PR comment: {e}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                req = urllib.request.Request(
+                    comment_url,
+                    data=_json.dumps(comment_data).encode("utf-8"),
+                    headers={
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "Python-VisualRegression-Workbench",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    print(f"GitHub PR comment posted successfully (HTTP {resp.status})")
+                    break
+            except Exception as e:
+                if attempt == max_retries or _is_permanent_error(e):
+                    print(f"Error posting GitHub PR comment (not retrying): {e}")
+                    break
+                else:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    print(f"Error posting GitHub PR comment: {e}. Retrying in {delay}s (Attempt {attempt}/{max_retries})...")
+                    time.sleep(delay)
 
 def main() -> None:
-    paths = WorkspacePaths(Path(__file__).parent.parent.resolve())
+    paths = WorkspacePaths(root=Path(__file__).parent.parent.resolve() / ".visual-regression")
     runs_dir = paths.runs_dir
     
     if not runs_dir.exists():
@@ -111,8 +142,8 @@ def main() -> None:
             try:
                 data = json.loads(result_json.read_text(encoding="utf-8"))
                 results.append(data)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Skipping unreadable run result {result_json}: {e}")
                 
     if not results:
         print("No test results found.")

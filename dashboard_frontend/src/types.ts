@@ -4,16 +4,20 @@ export type Status = 'passed' | 'failed' | 'attention' | 'error';
 export type ReviewStatus = 'no_changes' | 'unreviewed' | 'approved' | 'rejected';
 export type Severity = 'critical' | 'high' | 'medium' | 'low';
 
-/** All 8 defect categories recognised by the AI model (ResNet50 Siamese) */
+/** All defect categories recognised by the AI model (ResNet50 Siamese) */
 export type AILabel = 
-  | 'missing-element'     // UI element is absent
-  | 'layout-shift'        // structural position change
-  | 'color-regression'    // unexpected colour change
-  | 'text-truncation'     // clipped or shortened text
-  | 'overlay-obstruction' // modal / banner blocking content
-  | 'broken-image'        // image failed to load
-  | 'misaligned-fields'   // form fields / elements out of position
-  | 'unreadable-text';    // low-contrast or obscured text
+  | 'missing-element'
+  | 'layout-shift'
+  | 'color-regression'
+  | 'text-truncation'
+  | 'overlay-obstruction'
+  | 'broken-image'
+  | 'misaligned-fields'
+  | 'unreadable-text'
+  | 'insignificant-change'
+  | 'layout-issue'
+  | 'text-issue'
+  | 'font-change';    // low-contrast or obscured text
 
 export interface Baseline {
   id: string;
@@ -26,6 +30,14 @@ export interface Baseline {
   version: string;
   imageUrl: string;
   archivedVersions?: BaselineVersion[];
+  /** 'website-capture' for single captures, 'auto-crawl' for multiple crawl captures */
+  source: 'website-capture' | 'auto-crawl' | 'local-image';
+  /** Hostname extracted from url, e.g. 'example.com' */
+  host: string;
+  /** Number of archived versions available */
+  versionCount: number;
+  /** For auto-crawl baselines: the starting URL used for the crawl */
+  startUrl?: string;
 }
 
 export interface BaselineVersion {
@@ -53,6 +65,7 @@ export interface TestRun {
   reportHref?: string;
   severity?: Severity;
   decisionStatus?: 'approved' | 'rejected' | 'pending';
+  lowConfidence?: boolean;
 }
 
 export interface DiffRegion {
@@ -135,7 +148,7 @@ export interface DashboardData {
     pending: number;
   };
   baseline_count?: number;
-  run_count?: number;
+  // run_count removed — derive from runs.length instead
   pending_decisions?: number;
   approved_decisions?: number;
 }
@@ -164,3 +177,60 @@ export interface ApiSuccess<T = unknown> {
 }
 
 export type ApiResponse<T = unknown> = ApiSuccess<T> | ApiError;
+
+/** Raw (snake_case) shapes as returned by GET /api/dashboard — distinct from
+ * the camelCase domain types above, which pages map these into as needed. */
+
+export interface RunRowWire {
+  id: string;
+  mismatch_pct?: number;
+  mismatch?: number;
+  review_status?: string;
+  decision_status?: string;
+  status?: string;
+  ai_label?: string;
+  aiLabel?: string;
+  browser?: string;
+  device?: string;
+  locale?: string;
+}
+
+export interface SuiteSummaryCaseWire {
+  name: string;
+  status: string;
+  message?: string;
+  report?: string;
+  mismatch_pct?: number;
+  decision_status?: string;
+  ai_label?: string;
+}
+
+export interface SuiteSummaryWire {
+  file?: string;
+  suite?: string;
+  suite_name?: string;
+  cases?: SuiteSummaryCaseWire[];
+  finished_at?: string;
+  started_at?: string;
+  timestamp?: string | number;
+  passed?: number;
+  passed_cases?: number;
+  failed?: number;
+  failed_cases?: number;
+  errors?: number;
+  total?: number;
+  total_cases?: number;
+  total_runs?: number;
+}
+
+export interface CIBuildWire {
+  build_id: string;
+  commit_message?: string;
+  branch?: string;
+  commit_sha?: string;
+  passed_count?: number;
+  failed_count?: number;
+  total_count?: number;
+  status?: string;
+  created_at?: string | number;
+}

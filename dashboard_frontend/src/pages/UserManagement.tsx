@@ -254,7 +254,7 @@ function DeleteConfirmModal({ target, error, deleting, onConfirm, onClose }: {
 }
 
 export function UserManagement() {
-  const { role, userEmail } = useRole();
+  const { role, userEmail, loading } = useRole();
   const [users, setUsers] = useState<UserRecord[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -264,8 +264,6 @@ export function UserManagement() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
   const [togglingEmail, setTogglingEmail] = useState<string | null>(null);
-
-  if (role !== 'admin') return <Navigate to="/" replace />;
 
   const fetchUsers = useCallback(async () => {
     setLoadingUsers(true);
@@ -314,6 +312,16 @@ export function UserManagement() {
 
   const formatDate = (epoch: number) =>
     new Date(epoch * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh] text-sm text-[var(--on-surface-variant)] font-medium">
+        Loading session...
+      </div>
+    );
+  }
+
+  if (role !== 'admin') return <Navigate to="/" replace />;
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
@@ -397,10 +405,11 @@ export function UserManagement() {
       </div>
 
       <AnimatePresence>
-        {showCreate && <CreateUserModal onClose={() => setShowCreate(false)} onCreated={fetchUsers} />}
-        {editTarget && <EditUserModal user={editTarget} currentUserEmail={userEmail} onClose={() => setEditTarget(null)} onUpdated={fetchUsers} />}
+        {showCreate && <CreateUserModal key="create-user-modal" onClose={() => setShowCreate(false)} onCreated={fetchUsers} />}
+        {editTarget && <EditUserModal key="edit-user-modal" user={editTarget} currentUserEmail={userEmail} onClose={() => setEditTarget(null)} onUpdated={fetchUsers} />}
         {deleteTarget && (
           <DeleteConfirmModal
+            key="delete-confirm-modal"
             target={deleteTarget}
             error={deleteError}
             deleting={deletingEmail === deleteTarget.email}

@@ -4,61 +4,85 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from ._file_lock import FileLock, atomic_replace
+
+
+def _restrict_key_file_permissions(key_file: Path) -> None:
+    """Best-effort lock-down of the on-disk secret key to owner read/write.
+
+    ``os.chmod`` is largely a no-op on Windows (no POSIX mode bits), so this
+    must never raise there — it's a defense-in-depth measure on POSIX where
+    it actually restricts access.
+    """
+    try:
+        os.chmod(key_file, 0o600)
+    except OSError:
+        pass
+
 
 def _get_encryption_key(key_dir: Path) -> bytes:
     key_file = key_dir / ".secret_key"
     if not key_file.exists():
         secret = secrets.token_hex(32)
         key_file.write_text(secret, encoding="utf-8")
+        _restrict_key_file_permissions(key_file)
         return secret.encode("utf-8")
     return key_file.read_text(encoding="utf-8").strip().encode("utf-8")
 
 def _encrypt_value(value: str, key: bytes) -> str:
-    """Encrypt *value* with AES-256-CTR + HMAC-SHA256 (authenticated encryption).
+    """Encrypt *value* with AES-256-GCM (authenticated encryption).
 
-    Format: ``enc2:<base64(salt[16] + nonce[16] + ciphertext + hmac[32])>``
+    Format: ``enc3:<base64(salt[16] + nonce[12] + ciphertext_with_tag)>``
 
-    Uses only Python stdlib (hashlib, hmac, os) — no extra dependency required.
+    Uses the `cryptography` library's AESGCM primitive rather than a
+    hand-rolled cipher; the AES key is still derived per-value via PBKDF2
+    from the on-disk secret so the stored ``.secret_key`` format doesn't
+    change across the enc2 -> enc3 migration.
     """
     if not value:
         return ""
     salt = os.urandom(16)
-    nonce = os.urandom(16)
-    # Derive separate keys for encryption and authentication via PBKDF2
-    enc_key = hashlib.pbkdf2_hmac("sha256", key, salt + b"enc", 100_000, 32)
-    mac_key = hashlib.pbkdf2_hmac("sha256", key, salt + b"mac", 100_000, 32)
-
-    # AES-CTR approximation: use a PBKDF2-derived keystream block (good enough
-    # for short secrets like OAuth tokens; blocks are 32 bytes each).
-    val_bytes = value.encode("utf-8")
-    keystream_blocks = []
-    for block_idx in range((len(val_bytes) + 31) // 32):
-        block = hashlib.pbkdf2_hmac(
-            "sha256", enc_key, nonce + block_idx.to_bytes(4, "big"), 1, 32
-        )
-        keystream_blocks.append(block)
-    keystream = b"".join(keystream_blocks)[: len(val_bytes)]
-    ciphertext = bytes(a ^ b for a, b in zip(val_bytes, keystream))
-
-    # Authenticate: HMAC over salt + nonce + ciphertext
-    tag = hmac.new(mac_key, salt + nonce + ciphertext, "sha256").digest()
-    combined = salt + nonce + ciphertext + tag
-    return "enc2:" + base64.b64encode(combined).decode("ascii")
+    nonce = os.urandom(12)
+    enc_key = hashlib.pbkdf2_hmac("sha256", key, salt + b"enc3", 100_000, 32)
+    ciphertext = AESGCM(enc_key).encrypt(nonce, value.encode("utf-8"), None)
+    combined = salt + nonce + ciphertext
+    return "enc3:" + base64.b64encode(combined).decode("ascii")
 
 
 def _decrypt_value(encrypted_str: str, key: bytes) -> str:
     """Decrypt a value produced by *_encrypt_value*.
 
-    Supports both the legacy ``enc:`` format (XOR, no auth) and the new
-    ``enc2:`` format (CTR + HMAC-SHA256) for backward compatibility.
+    Supports the current ``enc3:`` format (AES-256-GCM via the
+    `cryptography` library) plus the older ``enc2:`` (hand-rolled CTR +
+    HMAC-SHA256) and ``enc:`` (unauthenticated XOR) formats for backward
+    compatibility with values encrypted by earlier versions of this file.
     """
     if not encrypted_str:
         return encrypted_str
 
-    # ── New authenticated format ──────────────────────────────────────────────
+    # ── Current AES-GCM format ────────────────────────────────────────────────
+    if encrypted_str.startswith("enc3:"):
+        try:
+            combined = base64.b64decode(encrypted_str[5:])
+            # salt(16) + nonce(12) + ciphertext_with_tag(≥16)
+            if len(combined) < 44:
+                return ""
+            salt = combined[:16]
+            nonce = combined[16:28]
+            ciphertext = combined[28:]
+            enc_key = hashlib.pbkdf2_hmac("sha256", key, salt + b"enc3", 100_000, 32)
+            return AESGCM(enc_key).decrypt(nonce, ciphertext, None).decode("utf-8")
+        except Exception:
+            return ""
+
+    # ── Legacy hand-rolled CTR + HMAC-SHA256 format (read-only backward compat) ─
     if encrypted_str.startswith("enc2:"):
         try:
             combined = base64.b64decode(encrypted_str[5:])
@@ -150,7 +174,19 @@ class IntegrationsManager:
         if github and github.get("access_token"):
             key = _get_encryption_key(self.config_path.parent)
             github["access_token"] = _encrypt_value(github["access_token"], key)
-        self.config_path.write_text(json.dumps(config_to_save, indent=2), encoding="utf-8")
+
+        lock_path = self.config_path.with_name(self.config_path.name + ".lock")
+        with FileLock(lock_path, timeout=10.0):
+            with tempfile.NamedTemporaryFile(
+                "w",
+                dir=self.config_path.parent,
+                delete=False,
+                suffix=".tmp",
+                encoding="utf-8",
+            ) as tmp:
+                tmp.write(json.dumps(config_to_save, indent=2))
+                tmp_path = Path(tmp.name)
+            atomic_replace(tmp_path, self.config_path)
 
     def get_config(self) -> Dict[str, Any]:
         config = self._load()
@@ -182,6 +218,9 @@ class IntegrationsManager:
     def update_webhook(self, url: str, threshold: float):
         if url and not url.startswith(("https://", "http://")):
             raise ValueError("Webhook URL must start with http:// or https://")
+        if url:
+            from .notifier import validate_webhook_url
+            validate_webhook_url(url)
         config = self._load()
         config["webhook_url"] = url
         config["webhook_threshold"] = max(0.0, min(float(threshold), 100.0))  # clamp 0-100%
@@ -282,15 +321,30 @@ class IntegrationsManager:
         github = self.get_config().get("github", {})
         if not github.get("connected") or not github.get("access_token"):
             return {"ok": False, "error": "GitHub not connected"}
-        
+
         import re
         import urllib.request
         import urllib.error
-        
+
+        # sha ultimately reaches an f-string-built API URL below, so an
+        # unvalidated value containing "/" (or other URL-structural
+        # characters) could redirect the request to a different GitHub
+        # REST path — using this integration's own stored, privileged
+        # access token — than the commit-status endpoint the caller is
+        # meant to be limited to. A real commit SHA is always 7-40 hex
+        # characters, so anything else is rejected outright rather than
+        # merely URL-encoded, since encoding alone wouldn't stop a caller
+        # from steering the request to a same-repo endpoint that already
+        # accepts arbitrary path segments (there are none here, but hex-only
+        # validation is simpler to reason about than encoding + trusting the
+        # rest of the URL shape stays fixed as this function evolves).
+        if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha or ""):
+            return {"ok": False, "error": "Invalid commit sha"}
+
         match = re.search(r"github\.com[:/]([^/]+/[^/.]+)(?:\.git)?", repo_url)
         if not match:
             return {"ok": False, "error": f"Invalid GitHub repo URL: {repo_url}"}
-        
+
         repo_path = match.group(1)
         api_url = f"https://api.github.com/repos/{repo_path}/statuses/{sha}"
         

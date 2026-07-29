@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Layers } from 'lucide-react';
 import { useRole } from '../context/RoleContext';
 import { Button } from '../components/ui/Button';
@@ -11,11 +11,17 @@ export function Login() {
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const navigate = useNavigate();
+  const location = useLocation();
   const { login, authenticated } = useRole();
 
+  // ProtectedRoute attaches the page a logged-out user was trying to reach
+  // as router state before bouncing them here — send them back to it
+  // instead of always landing on the Dashboard.
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname || '/';
+
   React.useEffect(() => {
-    if (authenticated) navigate('/', { replace: true });
-  }, [authenticated, navigate]);
+    if (authenticated) navigate(from, { replace: true });
+  }, [authenticated, navigate, from]);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +30,7 @@ export function Login() {
     const result = await login(email, password);
     setSubmitting(false);
     if (!result.ok) { setError(result.error || 'Login failed'); return; }
-    navigate('/', { replace: true });
+    navigate(from, { replace: true });
   };
 
   return (

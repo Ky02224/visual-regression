@@ -58,9 +58,18 @@ class AIAssessment:
     threshold: float
     model_name: str
     meaningful_change: bool = False
+    calibrated_score: float = 0.0
+    low_confidence: bool = False
+    ai_explanation: str = ""
+    # True when `label` came from diagnose_from_dom_diff (real before/after
+    # element structure comparison) rather than the CNN's own score — see
+    # decide_pass_fail's hybrid-mode branch for why this distinction matters
+    # for pass/fail decisions specifically.
+    dom_confirmed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
 
 
 @dataclass

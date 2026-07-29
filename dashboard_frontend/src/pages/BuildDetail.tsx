@@ -8,46 +8,26 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { TestRun } from '../types';
 import { useApiData } from '../hooks/useApiData';
+import { useGroupedRuns } from '../hooks/useGroupedRuns';
 import { ChangeTypeBadge } from '../components/ui/ChangeTypeBadge';
 import { ReviewStatusBadge } from '../components/ui/ReviewStatusBadge';
 import { normalizeReviewStatus, mismatchPctClass, reviewBorderClass } from '../lib/reviewStatus';
+import { parseUrl, relativeTime } from '../lib/format';
 import { ImageFrame } from '../components/ui/ImageFrame';
 import { Button } from '../components/ui/Button';
-
-interface GroupedRuns { url: string; runs: TestRun[]; }
-
-function parseUrl(url: string): { host: string; path: string } {
-  try {
-    const u = new URL(url.startsWith('http') ? url : `https://${url}`);
-    return { host: u.host, path: u.pathname + (u.search || '') };
-  } catch {
-    const slash = url.indexOf('/');
-    if (slash !== -1) return { host: url.slice(0, slash), path: url.slice(slash) };
-    return { host: url, path: '/' };
-  }
-}
-
-function relativeTime(ts: string | number | null | undefined): string | null {
-  if (!ts) return null;
-  const d = typeof ts === 'number' ? new Date(ts < 1e12 ? ts * 1000 : ts) : new Date(ts);
-  if (isNaN(d.getTime())) return null;
-  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+import { EmptyState } from '../components/ui/EmptyState';
 
 export function BuildDetail() {
   const { buildId } = useParams<{ buildId: string }>();
-  const { data: dashboardData, loading } = useApiData<any>('/api/dashboard', { ttl: 30000, onError: () => {} });
+  const { data: dashboardData, loading, error, refetch } = useApiData<any>('/api/dashboard', { ttl: 30000 });
 
   const build = React.useMemo(() =>
     (dashboardData?.builds || []).find((b: any) => b.build_id === buildId),
     [dashboardData, buildId]
   );
 
-  const [groupedRuns, setGroupedRuns] = React.useState<GroupedRuns[]>([]);
+  const buildRunFilter = React.useCallback((r: any) => r.build_id === buildId, [buildId]);
+  const groupedRuns = useGroupedRuns(dashboardData?.runs, buildRunFilter);
   const [expandedUrls, setExpandedUrls] = React.useState<string[]>([]);
   const [selectedRun, setSelectedRun] = React.useState<TestRun | null>(null);
   const [searchQuery, setSearchQuery] = React.useState('');
@@ -58,31 +38,6 @@ export function BuildDetail() {
   React.useEffect(() => {
     setPreviewTab('current');
   }, [selectedRun?.id]);
-
-  React.useEffect(() => {
-    if (!dashboardData) return;
-    const runs = (dashboardData.runs || []).filter((r: any) => r.build_id === buildId);
-    const groups: Record<string, TestRun[]> = {};
-    runs.forEach((r: any) => {
-      const urlStr = r.url || 'Unknown';
-      const mapped: TestRun = {
-        ...r,
-        id: r.id || r.run,
-        name: r.name || r.case_name || r.id,
-        mismatch: Number(r.mismatch ?? r.mismatch_pct ?? 0),
-        reviewStatus: normalizeReviewStatus(r.review_status ?? r.status),
-        status: r.status,
-        browser: r.browser || 'Unknown',
-        device: r.device || 'Unknown',
-        locale: r.locale || 'Unknown',
-        aiLabel: r.ai_label ?? r.aiLabel,
-      };
-      if (!groups[urlStr]) groups[urlStr] = [];
-      groups[urlStr].push(mapped);
-    });
-    const arr = Object.keys(groups).map(url => ({ url, runs: groups[url] }));
-    setGroupedRuns(arr);
-  }, [dashboardData, buildId]);
 
   const filteredGroups = React.useMemo(() => {
     return groupedRuns
@@ -114,6 +69,26 @@ export function BuildDetail() {
         <div className="h-8 bg-slate-200/50 rounded w-1/3" />
         <div className="h-24 bg-slate-200/50 rounded" />
         <div className="h-64 bg-slate-200/50 rounded" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-8 max-w-7xl mx-auto">
+        <EmptyState
+          icon={<AlertTriangle className="w-8 h-8 text-red-500" />}
+          title="Failed to load build"
+          description={error.message}
+          action={
+            <button
+              onClick={() => refetch()}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition-colors"
+            >
+              Retry
+            </button>
+          }
+        />
       </div>
     );
   }
@@ -197,13 +172,14 @@ export function BuildDetail() {
           <input
             ref={searchRef}
             type="text"
+            aria-label="Search by case name or URL"
             placeholder="Search by case name or URL…"
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full pl-11 pr-12 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md text-sm outline-none focus:ring-2 focus:ring-accent/20 transition-all font-medium shadow-sm"
           />
           {searchQuery && (
-            <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-600 transition-colors">
+            <button onClick={() => setSearchQuery('')} aria-label="Clear search" className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-600 transition-colors">
               <X className="w-3 h-3" />
             </button>
           )}
@@ -314,8 +290,17 @@ export function BuildDetail() {
                           <div
                             key={run.id}
                             onClick={() => setSelectedRun(selectedRun?.id === run.id ? null : run)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                setSelectedRun(selectedRun?.id === run.id ? null : run);
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            aria-pressed={selectedRun?.id === run.id}
                             className={cn(
-                              "px-5 py-3.5 flex items-center justify-between cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-800/30 border-l-[3px]",
+                              "px-5 py-3.5 flex items-center justify-between cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-800/30 border-l-[3px] focus-visible:outline-none focus-visible:bg-slate-50 dark:focus-visible:bg-slate-800/30",
                               selectedRun?.id === run.id
                                 ? "bg-blue-50/50 dark:bg-slate-800/60 border-l-accent"
                                 : reviewBorderClass(run.reviewStatus ?? normalizeReviewStatus(run.status))
@@ -323,12 +308,18 @@ export function BuildDetail() {
                           >
                             <div className="flex items-center gap-3 min-w-0 flex-1">
                               <div className="w-14 shrink-0 rounded-md overflow-hidden border border-[var(--outline)]">
-                                <ImageFrame src={`/artifacts/${run.id}/current.png`} alt="" aspectRatio="16/10" />
+                                <ImageFrame src={`/artifacts/${run.id}/current.webp`} alt={`Current snapshot for ${run.name}`} aspectRatio="16/10" />
                               </div>
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2">
                                   <p className="font-semibold text-slate-900 dark:text-slate-200 text-sm truncate">{run.name}</p>
                                   <ChangeTypeBadge label={(run as any).ai_label ?? run.aiLabel} />
+                                  {run.lowConfidence && (
+                                    <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.2 rounded border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400">
+                                      ⚠️ Low
+                                    </span>
+                                  )}
+
                                 </div>
                                 <p className="text-[10px] text-slate-400 font-medium">{run.browser} · {run.device}</p>
                               </div>
@@ -392,8 +383,14 @@ export function BuildDetail() {
               <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-4">{selectedRun.name}</h3>
               <div className="flex flex-wrap items-center gap-2 mb-4">
                 <ChangeTypeBadge label={(selectedRun as any).ai_label ?? selectedRun.aiLabel} />
+                {selectedRun.lowConfidence && (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400">
+                    ⚠️ Low Confidence
+                  </span>
+                )}
                 <ReviewStatusBadge status={selectedRun.reviewStatus ?? normalizeReviewStatus(selectedRun.status)} />
               </div>
+
               <div className="flex rounded-md bg-stone-100 dark:bg-zinc-800 p-0.5 mb-3">
                 {(['baseline', 'current', 'diff'] as const).map(tab => (
                   <button
@@ -413,7 +410,7 @@ export function BuildDetail() {
               </div>
               <div className="rounded-md overflow-hidden border border-[var(--outline)] mb-4">
                 <ImageFrame 
-                  src={`/artifacts/${selectedRun.id}/${previewTab === 'diff' ? 'diff_overlay' : previewTab}.png`} 
+                  src={`/artifacts/${selectedRun.id}/${previewTab === 'diff' ? 'diff_overlay' : previewTab}.webp`}
                   alt={`${previewTab} preview`} 
                   aspectRatio="16/10" 
                 />

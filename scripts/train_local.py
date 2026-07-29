@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from visual_regression.ai_training import train_model, StreamingSyntheticDataset
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
 
-    paths = WorkspacePaths(ROOT)
+    paths = WorkspacePaths(root=ROOT / ".visual-regression")
     paths.ensure()
 
     import torch

@@ -45,14 +45,22 @@
   --sidebar-bg: #27272A;
 }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--on-surface-variant) transparent;
+}
+
 @layer base {
-  body { @apply bg-[var(--bg-main)] text-[var(--on-surface)] font-sans antialiased transition-colors duration-200; }
+  body { @apply bg-[var(--bg-main)] text-[var(--on-surface)] font-sans antialiased; }
+  @media (prefers-reduced-motion: no-preference) {
+    body { transition: background-color 200ms, color 200ms; }
+  }
   h1, h2, h3, h4 { @apply tracking-tight font-semibold; }
 }
 
 @layer components {
   .panel { @apply bg-[var(--surface)] border border-[var(--outline)] rounded-md; }
-  .review-layout { display: grid; height: calc(100vh - 4rem); overflow: hidden; grid-template-columns: 260px 300px 1fr; }
+  .review-layout { display: grid; height: calc(100vh - var(--navbar-height, 4rem)); overflow: hidden; grid-template-columns: 260px 300px 1fr; }
   .snapshot-card { @apply border border-[var(--outline)] rounded-md overflow-hidden bg-[var(--surface)] transition-colors; }
   .snapshot-card-active { @apply border-indigo-500 ring-1 ring-indigo-500/30; }
 }
@@ -79,3 +87,17 @@ input::-ms-reveal,
 input::-ms-clear {
   display: none;
 }
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.animate-indeterminate {
+  animation: indeterminate 1.5s infinite ease-in-out;
+}
+

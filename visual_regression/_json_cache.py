@@ -71,8 +71,17 @@ class JsonCache:
                 if entry.mtime == current_mtime:
                     return copy.deepcopy(entry.data)
         
-        # Cache miss or stale: read and cache
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # Cache miss or stale: read and cache with transient read-conflict retries
+        import time
+        max_read_retries = 3
+        for attempt in range(1, max_read_retries + 1):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                break
+            except (json.JSONDecodeError, PermissionError):
+                if attempt == max_read_retries:
+                    raise
+                time.sleep(0.02 * attempt)
         
         with cls._lock:
             cls._cache[path] = _CacheEntry(data, current_mtime)

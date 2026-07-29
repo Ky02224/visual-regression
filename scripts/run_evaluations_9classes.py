@@ -5,14 +5,14 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 # Add visual_regression paths
-sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from visual_regression.config import WorkspacePaths, CaptureConfig
 from visual_regression.baseline_manager import BaselineManager
 from visual_regression.cli import _run_compare, resolve_ai_model_path
 
 def main():
-    root_path = Path(__file__).resolve().parent
+    root_path = Path(__file__).resolve().parent.parent
     workspace_paths = WorkspacePaths(root=root_path / ".visual-regression")
     workspace_paths.ensure()
     manager = BaselineManager(workspace_paths)
@@ -100,14 +100,21 @@ def main():
                 ai_score = extra.get("ai_score") or 1.0
                 mismatch_pct = extra.get("mismatch_pct", 0.0)
                 diff_regions = extra.get("diff_regions", 0)
-                
-                simplified_expected = expected_label
-                if expected_label in {"misaligned-fields", "overlay-obstruction"}:
-                    simplified_expected = "layout-shift"
-                elif expected_label == "unreadable-text":
-                    simplified_expected = "text-truncation"
 
-                is_correct = (ai_label == simplified_expected)
+                # The model emits a mix of consolidated ("text-issue") and raw
+                # ("layout-shift") labels depending on the veto path, so score
+                # both sides in the consolidated class space.
+                from visual_regression.ai_training import _consolidate_label
+
+                def _to_consolidated(name: str) -> str:
+                    if name in {"benign", "no-change"}:
+                        name = "insignificant-change"
+                    return _consolidate_label(name)
+
+                simplified_expected = _to_consolidated(expected_label)
+                simplified_predicted = _to_consolidated(ai_label)
+
+                is_correct = (simplified_predicted == simplified_expected)
                 results.append({
                     "expected": expected_label,
                     "baseline": baseline_name,

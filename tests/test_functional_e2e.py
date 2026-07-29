@@ -22,14 +22,12 @@ T-09  DoS protection: oversized Content-Length in _read_json returns 400
 from __future__ import annotations
 
 import base64
-import io
 import json
 import socket
 import threading
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 from functools import partial
 
 import pytest
@@ -217,6 +215,28 @@ def test_t03_sdk_create_baseline(srv):
     assert baseline_dir.is_dir(), "Baseline directory was not created"
 
 
+def test_t03b_sdk_snapshot_rejects_viewer_role(srv):
+    # /api/sdk/snapshot creates/overwrites baselines — a mutating action
+    # that must be restricted the same way create-baseline/compare/etc.
+    # are, not left open to any authenticated session. Regression test for
+    # a real broken-access-control gap found via independent security
+    # review: this endpoint (and several /api/actions/* siblings) used to
+    # accept any authenticated role, including the intentionally
+    # read-only "viewer" role.
+    port, paths, store = srv
+    store.create_user(email="viewer@example.com", password="viewer1234", role="viewer")
+    cookie = _login(port, email="viewer@example.com", password="viewer1234")
+
+    status, data = _api(
+        port, "/api/sdk/snapshot",
+        method="POST",
+        body={"name": "viewer-should-not-create-this", "image": _b64_png()},
+        cookie=cookie,
+    )
+    assert status == 403, f"Expected 403 for viewer role, got {status}: {data}"
+    assert not (paths.baselines_dir / "viewer-should-not-create-this").is_dir()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # T-04 — SDK snapshot: compare against existing baseline → PASS (identical image)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -287,8 +307,8 @@ def test_t06_baseline_delete(srv):
     assert status == 200, f"Delete failed: {data}"
     assert data["ok"] is True
 
-    # Baseline dir should be gone (or at least no baseline.png)
-    assert not (paths.baselines_dir / "to-be-deleted" / "baseline.png").exists()
+    # Baseline dir should be gone (or at least no baseline.webp)
+    assert not (paths.baselines_dir / "to-be-deleted" / "baseline.webp").exists()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

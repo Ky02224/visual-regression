@@ -12,4 +12,12 @@ dashboard_frontend/dist/
 dashboard_frontend/.env
 dashboard_frontend/.env.local
 dashboard_frontend/.env.*.local
+.env
+.env.local
 *.zip
+*.bak
+storage.db
+storage.db-shm
+storage.db-wal
+
+.idea/

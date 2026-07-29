@@ -1,17 +1,21 @@
 from __future__ import annotations
 import base64
 import json
+import mimetypes
 from pathlib import Path
 from html import escape
 from typing import Any, Dict
+
+from .config import resolve_image_path
 
 
 def _img_to_b64(path: Path) -> str:
     """Read an image file and return a base64 data URI."""
     if not path.exists():
         return ""
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
     data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{data}"
+    return f"data:{mime_type};base64,{data}"
 
 
 def generate_standalone_report(run_dir: Path) -> str:
@@ -25,15 +29,18 @@ def generate_standalone_report(run_dir: Path) -> str:
 
     payload: Dict[str, Any] = json.loads(json_path.read_text(encoding="utf-8"))
 
-    baseline_b64 = _img_to_b64(run_dir / "baseline.png")
-    current_b64 = _img_to_b64(run_dir / "current.png")
-    diff_b64 = _img_to_b64(run_dir / "diff_overlay.png")
+    baseline_b64 = _img_to_b64(resolve_image_path(run_dir, "baseline"))
+    current_b64 = _img_to_b64(resolve_image_path(run_dir, "current"))
+    diff_b64 = _img_to_b64(resolve_image_path(run_dir, "diff_overlay"))
 
     status = payload.get("status", "UNKNOWN")
     case_name = escape(str(payload.get("case_name") or payload.get("baseline_name") or run_dir.name))
     result = payload.get("result") or {}
-    mismatch = result.get("mismatch_pct", 0)
-    diff_px = result.get("diff_pixels", 0)
+    # SKIP/ERROR rows (cli.py) persist mismatch_pct as an explicit null, not
+    # an absent key, so .get(..., 0) doesn't catch it — float(None) crashes
+    # the whole report instead of rendering it.
+    mismatch = result.get("mismatch_pct") if result.get("mismatch_pct") is not None else 0
+    diff_px = result.get("diff_pixels") if result.get("diff_pixels") is not None else 0
     ssim = result.get("ssim_score")
     regions = result.get("regions", [])
     ai = payload.get("ai_assessment") or {}

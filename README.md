@@ -1,6 +1,6 @@
 # Visual Regression Workbench
 
-Website-first visual regression platform for QA, frontend engineers and release owners. (Triggering CI test run)
+Website-first visual regression platform for QA, frontend engineers and release owners.
 
 ## What It Includes
 
@@ -13,12 +13,23 @@ Website-first visual regression platform for QA, frontend engineers and release 
 - AI-assisted change classification with a ResNet50 Siamese + OpenCV/SSIM fusion model
 - Public UI dataset ingestion for WebUI / RICO / Screen Annotation manifests
 - HTML report, JSON summary and JUnit output
+- Role-based access control (admin / developer / viewer) with session auth
+- SQLite by default, with an optional PostgreSQL backend via `DATABASE_URL`
+- GitHub OAuth integration for repo commit-status checks
+- Docker deployment via `docker-compose up`
 
 ## Setup
 
 ```powershell
 .\setup.ps1
 .\.venv\Scripts\Activate.ps1
+```
+
+Or with Docker:
+
+```bash
+cp .env.example .env   # set LENS_ADMIN_PASSWORD / LENS_DEVELOPER_PASSWORD
+docker-compose up --build
 ```
 
 ## Main Way To Use It
@@ -73,8 +84,8 @@ For cross-browser testing, install all Playwright browsers first:
 
 ```powershell
 .\setup.ps1 -InstallAllBrowsers
-python -m visual_regression.cli create-suite-baselines --suite suite.cross-matrix.yaml --overwrite
-python -m visual_regression.cli run-suite --suite suite.cross-matrix.yaml
+python -m visual_regression.cli create-suite-baselines --suite suites\suite.cross-matrix.yaml --overwrite
+python -m visual_regression.cli run-suite --suite suites\suite.cross-matrix.yaml
 ```
 
 ## AI Workflow
@@ -112,7 +123,7 @@ Evaluation summaries are written to `.visual-regression\reports\ai-eval-*.json` 
 
 ## Files
 
-- dashboard UI: `dashboard_ui/`
+- dashboard UI: `dashboard_frontend/`
 - demo site: `demo_portal/`
 - core backend: `visual_regression/`
 - runtime artifacts: `.visual-regression/`

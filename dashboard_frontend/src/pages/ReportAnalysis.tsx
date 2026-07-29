@@ -9,12 +9,14 @@ import { ComparisonToolbar, type ComparisonViewMode, type ZoomLevel } from '../c
 import { DiffHighlightFrame } from '../components/ui/DiffHighlightFrame';
 import { clearApiCacheEntry } from '../hooks/useApiData';
 import { Button } from '../components/ui/Button';
+import { useSSE } from '../hooks/useSSE';
 import { Panel } from '../components/ui/Panel';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ImageFrame } from '../components/ui/ImageFrame';
 import { ChangeTypeBadge } from '../components/ui/ChangeTypeBadge';
 import { ReviewStatusBadge } from '../components/ui/ReviewStatusBadge';
 import { normalizeReviewStatus, mismatchPctClass } from '../lib/reviewStatus';
+import { api } from '../services/apiClient';
 
 type ThumbView = 'baseline' | 'current' | 'diff';
 
@@ -32,10 +34,10 @@ export function ReportAnalysis() {
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [summaryOpen, setSummaryOpen] = React.useState(true);
   const [historyOpen, setHistoryOpen] = React.useState(false);
-  const [thumbView, setThumbView] = React.useState<ThumbView>('current');
+  const [thumbView, setThumbView] = React.useState<ThumbView>('diff');
   const [mainView, setMainView] = React.useState<ThumbView | 'compare'>('compare');
-  const [viewMode, setViewMode] = React.useState<ComparisonViewMode>('slider');
-  const [showDiffOverlay, setShowDiffOverlay] = React.useState(false);
+  const [viewMode, setViewMode] = React.useState<ComparisonViewMode>('overlay');
+  const [showDiffOverlay, setShowDiffOverlay] = React.useState(true);
   const [zoom, setZoom] = React.useState<ZoomLevel>('fit');
   const [allRuns, setAllRuns] = React.useState<any[]>([]);
   const [isDrawing, setIsDrawing] = React.useState(false);
@@ -51,6 +53,140 @@ export function ReportAnalysis() {
   React.useEffect(() => { isDrawingRef.current = isDrawing; }, [isDrawing]);
   React.useEffect(() => { localRegionsRef.current = localIgnoreRegions; }, [localIgnoreRegions]);
   const [imageVersion, setImageVersion] = React.useState(0);
+  const [windowSize, setWindowSize] = React.useState({ w: window.innerWidth, h: window.innerHeight });
+
+  React.useEffect(() => {
+    const handleResize = () => {
+      setWindowSize({ w: window.innerWidth, h: window.innerHeight });
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Comments state and callbacks
+  const [comments, setComments] = React.useState<any[]>([]);
+  const [isCommenting, setIsCommenting] = React.useState(false);
+  const [pendingComment, setPendingComment] = React.useState<{ x_pct: number; y_pct: number } | null>(null);
+  const [newCommentText, setNewCommentText] = React.useState('');
+  const [activeCommentId, setActiveCommentId] = React.useState<string | null>(null);
+
+  const [commentsError, setCommentsError] = React.useState<string | null>(null);
+
+  const fetchComments = React.useCallback(async () => {
+    if (!id) return;
+    setCommentsError(null);
+    try {
+      const payload = await api.get<{ ok: boolean; comments?: any[] }>(`/api/comments?run_id=${id}`);
+      if (payload.ok) {
+        setComments(payload.comments || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch comments", err);
+      setCommentsError("Could not load comments.");
+    }
+  }, [id]);
+
+  React.useEffect(() => {
+    fetchComments();
+  }, [id, fetchComments]);
+
+  useSSE('/api/events/stream', {
+    onEvent: React.useCallback((event: any) => {
+      if (event.type === 'comment_updated' && event.data && event.data.run_id === id) {
+        fetchComments();
+      }
+    }, [id, fetchComments])
+  });
+
+  const submitComment = async () => {
+    if (!id || !pendingComment || !newCommentText.trim()) return;
+    try {
+      const payload = await api.post<{ ok: boolean; error?: string }>('/api/comments/create', {
+        run_id: id,
+        x_pct: pendingComment.x_pct,
+        y_pct: pendingComment.y_pct,
+        content: newCommentText.trim()
+      });
+      if (payload.ok) {
+        setPendingComment(null);
+        setNewCommentText('');
+        fetchComments();
+      } else {
+        setActionError(payload.error || 'Failed to post comment');
+      }
+    } catch {
+      setActionError('Network error. Please try again.');
+    }
+  };
+
+  const deleteComment = async (commentId: string) => {
+    try {
+      const payload = await api.post<{ ok: boolean; error?: string }>('/api/comments/delete', {
+        comment_id: commentId
+      });
+      if (payload.ok) {
+        if (activeCommentId === commentId) {
+          setActiveCommentId(null);
+        }
+        fetchComments();
+      } else {
+        setActionError(payload.error || 'Failed to delete comment');
+      }
+    } catch {
+      setActionError('Network failure — please try again.');
+    }
+  };
+
+  // AI suggestions state and callbacks
+  const [aiSuggestions, setAiSuggestions] = React.useState<any[]>([]);
+
+  const fetchSuggestions = React.useCallback(async () => {
+    if (!data?.baseline_name || !id) return;
+    try {
+      const payload = await api.get<{ ok: boolean; suggestions?: any[] }>(`/api/ai-suggestions?baseline_name=${data.baseline_name}&run_id=${id}`);
+      if (payload.ok) {
+        setAiSuggestions(payload.suggestions || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch suggestions", err);
+    }
+  }, [data?.baseline_name, id]);
+
+  React.useEffect(() => {
+    if (data) {
+      fetchSuggestions();
+    }
+  }, [data, fetchSuggestions]);
+
+  const applyAiSuggestions = () => {
+    const formatted = aiSuggestions.map(s => ({
+      x: s.x,
+      y: s.y,
+      width: s.width,
+      height: s.height
+    }));
+    
+    const merged = [...localIgnoreRegions];
+    formatted.forEach(f => {
+      const exists = merged.some(m => m.x === f.x && m.y === f.y && m.width === f.width && m.height === f.height);
+      if (!exists) {
+        merged.push(f);
+      }
+    });
+    
+    setLocalIgnoreRegions(merged);
+    saveIgnoreRegionsOnBackend(merged);
+    setAiSuggestions([]);
+  };
+
+  const handleImageClickForComment = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const x_pct = (x / rect.width) * 100;
+    const y_pct = (y / rect.height) * 100;
+    setPendingComment({ x_pct, y_pct });
+  };
 
   const fetchData = React.useCallback((silent = false) => {
     if (!id) return;
@@ -58,8 +194,7 @@ export function ReportAnalysis() {
       setLoading(true);
     }
     setLoadError(false);
-    fetch(`/api/run?id=${id}`)
-      .then(res => { if (!res.ok) throw new Error('not found'); return res.json(); })
+    api.get<any>(`/api/run?id=${id}`)
       .then(run => {
         setData(run);
         setInsight(run.ai_explanation || 'No automated summary for this run.');
@@ -86,14 +221,10 @@ export function ReportAnalysis() {
 
   const saveIgnoreRegionsOnBackend = React.useCallback(async (regions: typeof localIgnoreRegions) => {
     try {
-      await fetch('/api/ignore-regions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: data?.baseline_name,
-          run_id: id,
-          ignore_regions: regions
-        })
+      await api.post<any>('/api/ignore-regions', {
+        name: data?.baseline_name,
+        run_id: id,
+        ignore_regions: regions
       });
       clearApiCacheEntry('/api/dashboard');
       fetchData(true);
@@ -204,6 +335,7 @@ export function ReportAnalysis() {
           >
             {isDrawing && (
               <button
+                aria-label="Delete ignore region"
                 onClick={(e) => {
                   e.stopPropagation();
                   deleteIgnoreRegion(idx);
@@ -227,8 +359,7 @@ export function ReportAnalysis() {
   };
 
   React.useEffect(() => {
-    fetch('/api/dashboard')
-      .then(res => res.json())
+    api.get<any>('/api/dashboard')
       .then(d => { if (d && d.runs) setAllRuns(d.runs); })
       .catch(() => {});
   }, []);
@@ -264,6 +395,29 @@ export function ReportAnalysis() {
     return Array.from(new Set(relatedRuns.map((r: any) => r.device || 'desktop').filter(Boolean)));
   }, [relatedRuns]);
 
+  const submitReview = React.useCallback(async (decision: 'approved' | 'rejected') => {
+    if (!id) return;
+    setIsExecuting(true);
+    try {
+      const result = await api.post<{ ok: boolean; error?: string }>('/api/actions/review', {
+        run: id,
+        decision,
+        reviewer: userName || userEmail || role
+      });
+      if (result.ok) {
+        clearApiCacheEntry('/api/dashboard');
+        setActionError(null);
+        fetchData();
+      } else {
+        setActionError(result.error || `Failed to ${decision === 'approved' ? 'approve' : 'reject'} change`);
+      }
+    } catch {
+      setActionError('Network failure — please try again.');
+    } finally {
+      setIsExecuting(false);
+    }
+  }, [id, userName, userEmail, role, fetchData]);
+
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -272,11 +426,11 @@ export function ReportAnalysis() {
       if (e.key === 'd') {
         setShowDiffOverlay(prev => !prev);
       } else if (e.key === 'i') {
-        setIsDrawing(prev => !prev);
+        if (can('manage_baselines')) setIsDrawing(prev => !prev);
       } else if (e.key === 'a') {
-        submitReview('approved');
+        if (can('approve')) submitReview('approved');
       } else if (e.key === 'r') {
-        submitReview('rejected');
+        if (can('approve')) submitReview('rejected');
       } else if (e.key === ' ') {
         e.preventDefault();
         setMainView(prev => prev === 'baseline' ? 'current' : 'baseline');
@@ -295,34 +449,9 @@ export function ReportAnalysis() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [data, allRuns, id]);
+  }, [data, allRuns, id, submitReview, navigate, navState, can]);
 
-  React.useEffect(() => { fetchData(); }, [id]);
-
-  const submitReview = async (decision: 'approved' | 'rejected') => {
-    if (!id) return;
-    setIsExecuting(true);
-    try {
-      const res = await fetch('/api/actions/review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ run: id, decision, reviewer: userName || userEmail || role }),
-      });
-      const result = await res.json();
-      if (result.ok) {
-        clearApiCacheEntry('/api/dashboard');
-        setActionError(null);
-        fetchData();
-      } else {
-        setActionError(result.error || `Failed to ${decision === 'approved' ? 'approve' : 'reject'} change`);
-      }
-    } catch {
-      setActionError('Network failure — please try again.');
-    } finally {
-      setIsExecuting(false);
-    }
-  };
+  React.useEffect(() => { fetchData(); }, [id, fetchData]);
 
   if (loading) {
     return (
@@ -361,9 +490,9 @@ export function ReportAnalysis() {
   const isPass = status === 'PASS';
   const isFailed = status === 'FAIL' || status === 'FAILED';
 
-  const baselineUrl = `/baseline/${data.baseline_name}/baseline.png`;
-  const currentUrl = `/artifacts/${id}/current.png`;
-  const diffUrl = `/artifacts/${id}/diff_overlay.png?v=${imageVersion}`;
+  const baselineUrl = `/baseline/${data.baseline_name}/baseline.webp`;
+  const currentUrl = `/artifacts/${id}/current.webp`;
+  const diffUrl = `/artifacts/${id}/diff_overlay.webp?v=${imageVersion}`;
 
 
   const reviewStatus = normalizeReviewStatus(data.review_status ?? decision.status ?? status);
@@ -392,6 +521,12 @@ export function ReportAnalysis() {
                 </span>
               )}
               <ChangeTypeBadge label={data.ai_assessment?.label ?? data.ai_label} />
+              {data.ai_assessment?.low_confidence && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400">
+                  ⚠️ Low Confidence
+                </span>
+              )}
+
             </div>
             <h1 className="text-base font-semibold leading-snug">{data.case_name || data.baseline_name}</h1>
             <p className="text-xs text-[var(--on-surface-variant)] font-mono">Run #{id}</p>
@@ -402,21 +537,40 @@ export function ReportAnalysis() {
                 variant={isDrawing ? "approve" : "secondary"}
                 className="w-full text-xs py-1"
                 onClick={() => setIsDrawing(!isDrawing)}
+                disabled={!can('manage_baselines')}
               >
                 {isDrawing ? "Save & Finish" : "✏️ Draw Ignore Regions"}
               </Button>
+              {aiSuggestions.length > 0 && can('manage_baselines') && (
+                <div className="p-3 bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/30 rounded-lg space-y-2">
+                  <p className="text-[10px] font-bold text-indigo-700 dark:text-indigo-400 flex items-center gap-1">
+                    ✨ AI Suggestion ({aiSuggestions.length})
+                  </p>
+                  <p className="text-[10px] text-indigo-600 dark:text-indigo-500 leading-normal font-normal">
+                    AI detected repeating dynamic changes in {aiSuggestions[0].frequency}/{aiSuggestions[0].total_runs_analyzed} past runs.
+                  </p>
+                  <button
+                    onClick={applyAiSuggestions}
+                    className="w-full py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-bold cursor-pointer transition-colors"
+                  >
+                    Auto-Apply AI Ignore Regions
+                  </button>
+                </div>
+              )}
               {localIgnoreRegions.length > 0 ? (
                 <ul className="space-y-1.5 max-h-32 overflow-y-auto">
                   {localIgnoreRegions.map((rect, idx) => (
                     <li key={idx} className="text-xs font-mono text-[var(--on-surface-variant)] flex items-center justify-between bg-stone-50 dark:bg-zinc-800 px-2 py-1 rounded">
                       <span>[{rect.x}, {rect.y}] · {rect.width}×{rect.height}px</span>
-                      <button
-                        onClick={() => deleteIgnoreRegion(idx)}
-                        className="text-red-500 hover:text-red-700 font-bold ml-2 cursor-pointer"
-                        title="Remove region"
-                      >
-                        ×
-                      </button>
+                      {can('manage_baselines') && (
+                        <button
+                          onClick={() => deleteIgnoreRegion(idx)}
+                          className="text-red-500 hover:text-red-700 font-bold ml-2 cursor-pointer"
+                          title="Remove region"
+                        >
+                          ×
+                        </button>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -474,7 +628,64 @@ export function ReportAnalysis() {
               <p className="text-xs text-[var(--on-surface-variant)]">No regions detected</p>
             )}
           </Panel>
+          <Panel title="Collaborative Comments">
+            <div className="space-y-3">
+              {comments.length > 0 ? (
+                <ul className="space-y-2.5 max-h-48 overflow-y-auto">
+                  {comments.map((c: any) => (
+                    <li key={c.id} className="text-xs p-2 rounded-md bg-stone-50 dark:bg-zinc-800/50 border border-[var(--outline)] relative group">
+                      <div className="flex justify-between items-center gap-2 mb-0.5">
+                        <span className="font-semibold text-indigo-600 dark:text-indigo-400 text-[10px] truncate">{c.author}</span>
+                        <span className="text-[9px] text-stone-400">{new Date(c.created_at * 1000).toLocaleTimeString()}</span>
+                      </div>
+                      <p className="text-[var(--on-surface)] break-words whitespace-pre-wrap">{c.content}</p>
+                      <div className="flex items-center justify-between gap-2 mt-1.5">
+                        <button
+                          onClick={() => {
+                            setViewMode('overlay');
+                            setMainView('compare');
+                            setActiveCommentId(c.id);
+                          }}
+                          className="text-[9px] text-indigo-500 hover:underline cursor-pointer"
+                        >
+                          Show on Image
+                        </button>
+                        {(role === 'admin' || c.author === userEmail) && (
+                          <button
+                            onClick={() => deleteComment(c.id)}
+                            className="text-[9px] text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer font-medium"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-[var(--on-surface-variant)] leading-relaxed">
+                  No comments yet. Switch to Overlay view mode to drop comment pins directly over layout differences.
+                </p>
+              )}
+            </div>
+          </Panel>
+          <Panel title="Export Report">
+            <div className="space-y-2">
+              <a
+                href={`/artifacts/${id}/report.html`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center justify-center gap-1.5 w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-bold transition-colors cursor-pointer text-center no-underline"
+              >
+                📄 Open HTML Report
+              </a>
+              <p className="text-[10px] text-[var(--on-surface-variant)] text-center leading-normal">
+                Open a standalone interactive report page that you can save or print to PDF.
+              </p>
+            </div>
+          </Panel>
           <div>
+
             <button type="button" onClick={() => setSummaryOpen(v => !v)} className="flex items-center justify-between w-full text-xs font-medium text-[var(--on-surface-variant)] mb-2">
               Change summary {summaryOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
@@ -687,7 +898,14 @@ export function ReportAnalysis() {
               </div>
             </div>
           ) : mainView === 'baseline' ? (
-            <div className="flex-1 min-h-0 panel overflow-hidden flex flex-col cursor-pointer select-none" onClick={() => setMainView('current')}>
+            <div
+              className="flex-1 min-h-0 panel overflow-hidden flex flex-col cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-inset"
+              onClick={() => setMainView('current')}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setMainView('current'); } }}
+              role="button"
+              tabIndex={0}
+              aria-label="Baseline image. Click or press Enter to flip to current."
+            >
               <div className="px-3 py-2 border-b border-[var(--outline)] text-xs font-medium flex justify-between items-center bg-stone-50 dark:bg-zinc-900">
                 <span>Baseline (Click to flash toggle)</span>
                 <span className="text-[10px] text-indigo-500 font-mono">SPACE to toggle</span>
@@ -695,12 +913,128 @@ export function ReportAnalysis() {
               <div className="flex-1 min-h-0 relative"><div className="absolute inset-0"><ImageFrame src={baselineUrl} alt="Baseline" fill className="h-full w-full" /></div></div>
             </div>
           ) : mainView === 'current' ? (
-            <div className="flex-1 min-h-0 panel overflow-hidden flex flex-col cursor-pointer select-none" onClick={() => setMainView('baseline')}>
+            <div
+              className="flex-1 min-h-0 panel overflow-hidden flex flex-col cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-inset"
+              onClick={() => setMainView('baseline')}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setMainView('baseline'); } }}
+              role="button"
+              tabIndex={0}
+              aria-label="Changes image. Click or press Enter to flip to baseline."
+            >
               <div className="px-3 py-2 border-b border-[var(--outline)] text-xs font-medium flex justify-between items-center bg-stone-50 dark:bg-zinc-900">
                 <span>Changes (Click to flash toggle)</span>
                 <span className="text-[10px] text-indigo-500 font-mono">SPACE to toggle</span>
               </div>
               <div className="flex-1 min-h-0 relative"><div className="absolute inset-0"><DiffHighlightFrame currentUrl={currentUrl} diffOverlayUrl={diffUrl} showDiff={showDiffOverlay} zoom={zoom === 'fit' ? 1 : zoom} fill className="h-full w-full" alt="Changes" /></div></div>
+            </div>
+          ) : viewMode === 'overlay' ? (
+            <div 
+              className="flex-1 min-h-0 panel overflow-hidden flex flex-col select-none" 
+            >
+              <div className="px-3 py-2 border-b border-[var(--outline)] text-xs font-semibold flex justify-between items-center bg-stone-50 dark:bg-zinc-900 shrink-0">
+                <span className="text-[var(--on-surface)]">
+                  {showDiffOverlay ? 'Diff Highlight Overlay' : 'Current Snapshot'}
+                </span>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant={isCommenting ? "approve" : "secondary"}
+                    size="sm"
+                    className="text-[10px] px-2 py-0.5"
+                    onClick={() => { setIsCommenting(!isCommenting); setPendingComment(null); }}
+                  >
+                    {isCommenting ? "💬 Close Comments" : "💬 Add Comments"}
+                  </Button>
+                  <span className="text-[10px] text-indigo-500 font-mono">D to toggle diff · Click image to {isCommenting ? "drop comment pin" : "toggle diff"}</span>
+                </div>
+              </div>
+              <div className="flex-1 min-h-0 relative flex items-center justify-center p-4 bg-stone-100 dark:bg-zinc-900/50 overflow-auto">
+                <div 
+                  className={cn("relative inline-block max-w-full", isCommenting ? "cursor-chat" : "cursor-pointer")}
+                  onClick={(e) => {
+                    if (isCommenting) {
+                      handleImageClickForComment(e);
+                    } else {
+                      setShowDiffOverlay(!showDiffOverlay);
+                    }
+                  }}
+                >
+                  <DiffHighlightFrame 
+                    currentUrl={currentUrl} 
+                    diffOverlayUrl={diffUrl} 
+                    showDiff={showDiffOverlay} 
+                    zoom={zoom === 'fit' ? 1 : zoom} 
+                    fill={false} 
+                    className="max-h-[calc(100vh-16rem)] max-w-full block" 
+                    alt="Current Screenshot" 
+                  />
+                  {/* Render Comments Pins */}
+                  {comments.map((c: any) => (
+                    <div
+                      key={c.id}
+                      className="absolute w-6 h-6 bg-indigo-600 border-2 border-white text-white rounded-full flex items-center justify-center text-[10px] font-bold shadow-lg transform -translate-x-1/2 -translate-y-1/2 cursor-pointer hover:scale-110 hover:bg-indigo-700 transition-all z-20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                      style={{ left: `${c.x_pct}%`, top: `${c.y_pct}%` }}
+                      title={`${c.author}: ${c.content}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveCommentId(activeCommentId === c.id ? null : c.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setActiveCommentId(activeCommentId === c.id ? null : c.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Comment by ${c.author}: ${c.content}`}
+                    >
+                      📍
+                      {activeCommentId === c.id && (
+                        <div 
+                          className="absolute left-7 top-0 w-56 p-3 bg-white dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg shadow-xl z-30 text-xs text-left cursor-default select-text"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <p className="font-semibold text-[10px] text-indigo-600 dark:text-indigo-400 mb-0.5 truncate">{c.author}</p>
+                          <p className="text-[var(--on-surface)] break-words whitespace-pre-wrap leading-normal font-normal">{c.content}</p>
+                          <p className="text-[9px] text-stone-400 mt-1.5">{new Date(c.created_at * 1000).toLocaleString()}</p>
+                          {(role === 'admin' || c.author === userEmail) && (
+                            <button
+                              onClick={() => deleteComment(c.id)}
+                              className="text-[9px] text-red-500 hover:text-red-700 font-bold mt-2 cursor-pointer block"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Render Pending Comment Input */}
+                  {pendingComment && (
+                    <div 
+                      className="absolute p-3 bg-white dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded-lg shadow-xl z-30 text-xs w-64 transform -translate-x-1/2 mt-3 cursor-default"
+                      style={{ left: `${pendingComment.x_pct}%`, top: `${pendingComment.y_pct}%` }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <p className="font-bold text-[10px] text-[var(--on-surface-variant)] uppercase tracking-wider mb-2">New Comment Pin</p>
+                      <textarea
+                        value={newCommentText}
+                        onChange={(e) => setNewCommentText(e.target.value)}
+                        placeholder="Write a comment..."
+                        rows={3}
+                        className="w-full p-2 border border-[var(--outline)] bg-[var(--surface)] rounded-md text-xs resize-none outline-none focus:ring-2 focus:ring-indigo-500/20 text-[var(--on-surface)]"
+                        autoFocus
+                      />
+                      <div className="flex justify-end gap-2 mt-2">
+                        <button onClick={() => setPendingComment(null)} className="px-2.5 py-1.5 border border-[var(--outline)] rounded-md font-bold text-[10px] text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer">Cancel</button>
+                        <button onClick={submitComment} className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md font-bold text-[10px] cursor-pointer">Post</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           ) : viewMode === 'slider' ? (
             <div className="flex-1 min-h-0 flex flex-col panel overflow-hidden">

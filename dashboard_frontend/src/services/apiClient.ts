@@ -17,7 +17,7 @@ export class ApiClientError extends Error {
 
 class ApiClient {
   private static instance: ApiClient;
-  private baseUrl = '';
+  private baseUrl = (import.meta.env.VITE_API_BASE_URL as string) || '';
 
   private constructor() {}
 
@@ -41,7 +41,7 @@ class ApiClient {
         message: `${res.status}: ${res.statusText}`,
         timestamp: new Date().toISOString(),
       };
-      
+
       try {
         const body = await res.json();
         error.message = body.error || error.message;
@@ -52,6 +52,13 @@ class ApiClient {
       throw new ApiClientError(res.status, error.message);
     }
 
+    // A 204 No Content (the normal REST convention for DELETE, and valid for
+    // PUT/POST too) has no body — res.json() throws on it, which used to be
+    // indistinguishable from a real parse failure.
+    if (res.status === 204) {
+      return undefined as T;
+    }
+
     try {
       return await res.json() as T;
     } catch (error) {
@@ -60,16 +67,26 @@ class ApiClient {
     }
   }
 
+  // Builds the final fetch config with `options` spread first, so method/
+  // headers/body/credentials always win over anything in `options` instead
+  // of `...options` (previously spread last) silently clobbering the
+  // carefully merged headers or JSON-stringified body.
+  private buildInit(method: string, options: RequestInit | undefined, body?: unknown): RequestInit {
+    return {
+      credentials: 'include',
+      ...options,
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    };
+  }
+
   async get<T>(url: string, options?: RequestInit): Promise<T> {
     try {
-      const res = await fetch(`${this.baseUrl}${url}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
-        },
-        ...options,
-      });
+      const res = await fetch(`${this.baseUrl}${url}`, this.buildInit('GET', options));
       return this.handleResponse<T>(res);
     } catch (error) {
       if (error instanceof ApiClientError) {
@@ -83,15 +100,7 @@ class ApiClient {
 
   async post<T>(url: string, body?: unknown, options?: RequestInit): Promise<T> {
     try {
-      const res = await fetch(`${this.baseUrl}${url}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
-        },
-        body: body ? JSON.stringify(body) : undefined,
-        ...options,
-      });
+      const res = await fetch(`${this.baseUrl}${url}`, this.buildInit('POST', options, body));
       return this.handleResponse<T>(res);
     } catch (error) {
       if (error instanceof ApiClientError) {
@@ -105,15 +114,7 @@ class ApiClient {
 
   async put<T>(url: string, body?: unknown, options?: RequestInit): Promise<T> {
     try {
-      const res = await fetch(`${this.baseUrl}${url}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
-        },
-        body: body ? JSON.stringify(body) : undefined,
-        ...options,
-      });
+      const res = await fetch(`${this.baseUrl}${url}`, this.buildInit('PUT', options, body));
       return this.handleResponse<T>(res);
     } catch (error) {
       if (error instanceof ApiClientError) {
@@ -127,14 +128,7 @@ class ApiClient {
 
   async delete<T>(url: string, options?: RequestInit): Promise<T> {
     try {
-      const res = await fetch(`${this.baseUrl}${url}`, {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
-        },
-        ...options,
-      });
+      const res = await fetch(`${this.baseUrl}${url}`, this.buildInit('DELETE', options));
       return this.handleResponse<T>(res);
     } catch (error) {
       if (error instanceof ApiClientError) {

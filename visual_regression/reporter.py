@@ -10,16 +10,54 @@ import cv2
 from .models import CompareResult
 
 
+# WebP encodes width/height as 14-bit fields, so it hard-caps both dimensions
+# at 16383px. Full-page diffs of long pages can exceed that.
+_WEBP_MAX_DIMENSION = 16383
+
+
 def save_image(path: Path, image) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(path), image)
+    if image is None or getattr(image, "size", 0) == 0 or len(image.shape) < 2 or image.shape[0] == 0 or image.shape[1] == 0:
+        raise ValueError(f"save_image received an empty or invalid image for {path}")
+
+    h, w = image.shape[:2]
+    ok = False
+    if h <= _WEBP_MAX_DIMENSION and w <= _WEBP_MAX_DIMENSION:
+        ok, buf = cv2.imencode('.webp', image, [cv2.IMWRITE_WEBP_QUALITY, 90])
     if not ok:
-        raise ValueError(f"Failed to save image to {path}")
+        # Falls back to PNG bytes under the same requested path (rather than
+        # failing outright) when the image is too large for WebP or WebP
+        # encoding otherwise fails.
+        ok, buf = cv2.imencode('.png', image)
+        if not ok:
+            raise ValueError(f"Failed to encode image for {path}")
+        print(
+            f"[Warning] Image for {path} ({w}x{h}) exceeds WebP's {_WEBP_MAX_DIMENSION}px "
+            f"dimension limit (or WebP encoding failed); saved as PNG bytes under {path.name}.",
+            flush=True,
+        )
+    path.write_bytes(buf.tobytes())
+
+
+
+def _mask_sensitive(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        masked = {}
+        for k, v in obj.items():
+            if any(s in str(k).lower() for s in ["password", "token", "secret", "private_key"]):
+                masked[k] = "***" if v else ""
+            else:
+                masked[k] = _mask_sensitive(v)
+        return masked
+    elif isinstance(obj, list):
+        return [_mask_sensitive(item) for item in obj]
+    return obj
 
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    clean_payload = _mask_sensitive(payload)
+    path.write_text(json.dumps(clean_payload, indent=2), encoding="utf-8")
 
 
 def _regions_table_rows(result: CompareResult) -> str:
@@ -292,11 +330,44 @@ def render_html_report_from_payload(report_path: Path, payload: Dict[str, Any]) 
       padding: 9px 8px;
       font-size: 14px;
     }}
+    .btn-print {{
+      float: right;
+      padding: 8px 16px;
+      background: #10b981;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 13px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+      transition: all 0.2s;
+    }}
+    .btn-print:hover {{
+      background: #059669;
+    }}
+    @media print {{
+      body {{
+        background: white;
+        padding: 0;
+      }}
+      .btn-print, #zoom, #compare-slider, label[for="zoom"], label[for="compare-slider"] {{
+        display: none !important;
+      }}
+      .card {{
+        box-shadow: none !important;
+        border: 1px solid var(--line) !important;
+        page-break-inside: avoid;
+      }}
+    }}
+
   </style>
 </head>
 <body>
   <div class="card">
+    <button onclick="window.print()" class="btn-print">🖨️ Print / Save as PDF</button>
     <div class="hero">
+
       <div>
         <h1>Visual Regression Report</h1>
         <div class="badge {status_class}">{status_text}</div>
@@ -359,27 +430,27 @@ def render_html_report_from_payload(report_path: Path, payload: Dict[str, Any]) 
     <figure>
       <figcaption>Before / After Slider</figcaption>
       <div class="zoom-wrap compare-stack">
-        <img src="{_artifact_name(artifacts.get("current"), 'current.png')}" alt="current layer" />
+        <img src="{_artifact_name(artifacts.get("current"), 'current.webp')}" alt="current layer" />
         <div class="baseline-layer" id="baseline-layer">
-          <img src="{_artifact_name(artifacts.get("baseline"), 'baseline.png')}" alt="baseline layer" />
+          <img src="{_artifact_name(artifacts.get("baseline"), 'baseline.webp')}" alt="baseline layer" />
         </div>
       </div>
     </figure>
     <figure>
       <figcaption>Baseline</figcaption>
-      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("baseline"), 'baseline.png')}" alt="baseline" /></div>
+      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("baseline"), 'baseline.webp')}" alt="baseline" /></div>
     </figure>
     <figure>
       <figcaption>Current</figcaption>
-      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("current"), 'current.png')}" alt="current" /></div>
+      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("current"), 'current.webp')}" alt="current" /></div>
     </figure>
     <figure>
       <figcaption>Diff Overlay</figcaption>
-      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("diff_overlay"), 'diff_overlay.png')}" alt="diff" /></div>
+      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("diff_overlay"), 'diff_overlay.webp')}" alt="diff" /></div>
     </figure>
     <figure>
       <figcaption>Binary Diff</figcaption>
-      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("binary_diff"), 'binary_diff.png')}" alt="binary" /></div>
+      <div class="zoom-wrap"><img src="{_artifact_name(artifacts.get("binary_diff"), 'binary_diff.webp')}" alt="binary" /></div>
     </figure>
   </div>
 

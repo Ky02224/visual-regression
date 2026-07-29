@@ -1,8 +1,26 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
+
+
+def resolve_image_path(directory: Path, base_name: str) -> Path:
+    """Resolve an image that may exist as .webp (current format) or .png
+    (legacy format, from data captured before the WebP migration).
+
+    Prefers .webp; falls back to .png if that's what's actually on disk.
+    Returns the .webp path (whether or not it exists yet) if neither is
+    found, since that's the canonical target for new writes.
+    """
+    webp_path = directory / f"{base_name}.webp"
+    if webp_path.exists():
+        return webp_path
+    legacy_path = directory / f"{base_name}.png"
+    if legacy_path.exists():
+        return legacy_path
+    return webp_path
 
 
 @dataclass
@@ -26,7 +44,6 @@ class WorkspacePaths:
         self.datasets_dir = self.root / "datasets"
         self.builds_dir = self.root / "builds"
         
-        import os
         db_env = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_PATH")
         if db_env:
             if db_env.startswith("sqlite:///"):
@@ -55,8 +72,8 @@ class CaptureConfig:
     device: str | None = None
     viewport: Tuple[int, int] = (1440, 900)
     wait_ms: int = 1200
-    wait_until: str = "networkidle"
-    navigation_timeout_ms: int = 45000
+    wait_until: str = "load"
+    navigation_timeout_ms: int = 15000
     full_page: bool = True
     disable_animations: bool = True
     locale: str | None = None
@@ -66,6 +83,22 @@ class CaptureConfig:
     hide_selectors: List[str] = field(default_factory=list)
     wait_for_selector: str | None = None
     mock_routes: Dict[str, Any] = field(default_factory=dict)
+    login_url: str | None = None
+    login_username: str | None = None
+    login_password: str | None = None
+    username_selector: str | None = None
+    password_selector: str | None = None
+    submit_selector: str | None = None
+
+    def __repr__(self) -> str:
+        fields = [
+            f"name={self.name!r}",
+            f"url={self.url!r}",
+            f"browser={self.browser!r}",
+            f"device={self.device!r}",
+            f"login_password={'***' if self.login_password else None!r}",
+        ]
+        return f"CaptureConfig({', '.join(fields)})"
 
 
 @dataclass

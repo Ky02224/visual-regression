@@ -1,15 +1,80 @@
+import ipaddress
 import logging
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 _WEBHOOK_MAX_RETRIES = 3
 _WEBHOOK_RETRY_BASE_DELAY = 1.0  # seconds; doubles each attempt
+
+
+def validate_webhook_url(url: str) -> None:
+    """Reject webhook URLs pointed at the cloud metadata endpoint or any
+    other private/internal network address.
+
+    Unlike a capture URL (the user's own site under test, often legitimately
+    localhost during dev — see browser.py's validate_url_ssrf, which allows
+    local addresses by default), a webhook is meant to notify an *external*
+    service and this server makes the outbound request itself. An admin
+    (accidentally or via a compromised session) pointing it at the cloud
+    metadata IP, or at an internal-only service reachable from this host,
+    would let the server act as an SSRF pivot — fetching IAM/instance
+    credentials or probing internal infrastructure on their behalf and
+    handing the response back verbatim in the webhook delivery-status API.
+    This check is unconditional (unlike capture URLs, which allow local/
+    internal addresses by default for local dev testing).
+    """
+    if not url:
+        return
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Invalid URL scheme '{parsed.scheme}'. Only http and https are allowed.")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise ValueError("Webhook URL must include a hostname.")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError(f"Access to local hostname '{hostname}' is blocked for security.")
+    if hostname in {"169.254.169.254", "metadata.google.internal"} or hostname.startswith("169.254."):
+        raise ValueError(f"Access to restricted metadata IP '{hostname}' is blocked for security.")
+    _reject_if_private_address(hostname)
+
+
+def _reject_if_private_address(hostname: str) -> None:
+    """Block literal private/loopback/link-local IPs, and — best-effort — any
+    hostname that resolves to one. DNS resolution failures are not treated
+    as a rejection: this check only *adds* restrictions on top of the
+    scheme/metadata checks above, so a transient/offline resolver must not
+    turn into a hard failure for what may still be a legitimate public URL.
+    """
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_unspecified:
+            raise ValueError(f"Access to private/internal address '{hostname}' is blocked for security.")
+        return
+    except ValueError as exc:
+        if "Access to private" in str(exc):
+            raise
+        # Not a literal IP — fall through to DNS resolution below.
+    try:
+        resolved = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror:
+        return
+    for ip_str in resolved:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_unspecified:
+            raise ValueError(
+                f"Webhook hostname '{hostname}' resolves to private/internal address '{ip_str}', which is blocked for security."
+            )
 
 def _is_teams_url(url: str) -> bool:
     return "powerplatform.com" in url or "webhook.office.com" in url or "logic.azure.com" in url
@@ -167,6 +232,11 @@ def trigger_webhook_detailed(url: str, payload: Dict[str, Any]) -> Dict[str, Any
     """
     if not url:
         return {"ok": False, "error": "Webhook URL is empty.", "attempts": 0}
+
+    try:
+        validate_webhook_url(url)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "attempts": 0}
 
     if _is_teams_url(url):
         send_payload = _to_teams_adaptive_card(payload)

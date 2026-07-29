@@ -260,14 +260,34 @@ body {
 }
 
 .missing-cta .cta-box {
-  opacity: 0.15;
+  display: none !important;
+}
+
+/* dashboard.html has no .cta-box — drop the chart instead so the defect renders there too */
+.missing-cta .chart {
+  display: none !important;
 }
 
 .theme-shift .topbar {
   background: linear-gradient(135deg, #5b1f72 0%, #251942 100%);
 }
 
+/* login.html has no .topbar — shift the brand color on the primary button and badge */
+.theme-shift .btn.primary {
+  background: linear-gradient(135deg, #5b1f72 0%, #251942 100%);
+}
+
+.theme-shift .locale-badge {
+  background: #e9d9f7;
+  color: #5b1f72;
+}
+
 .shift-card .summary-card:nth-child(2) {
+  transform: translateY(18px);
+}
+
+/* login.html has no .summary-card — shift the button row instead */
+.shift-card .button-row {
   transform: translateY(18px);
 }
 
@@ -279,14 +299,34 @@ body {
   max-width: 180px;
 }
 
+/* login.html has no .hero — truncate the form intro copy instead */
+.text-truncation .form-card > p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
 .unreadable-text .hero h1 {
   color: #f2f5f8 !important;
+  text-shadow: none !important;
+}
+
+/* login.html has no .hero — wash out the form heading instead */
+.unreadable-text .form-card h2 {
+  color: #f5f7fa !important;
   text-shadow: none !important;
 }
 
 .misaligned-fields .field:nth-child(5) input {
   margin-left: 45px;
   width: calc(100% - 45px);
+}
+
+/* index/dashboard have no .field — nudge a KPI card out of alignment instead */
+.misaligned-fields .summary-card:nth-child(3) {
+  margin-left: 45px;
+  margin-right: -45px;
 }
 
 .overlay-obstruction::after {
@@ -308,15 +348,49 @@ body {
   z-index: 9999;
 }
 
-.broken-image .topbar::before {
-  content: "❌ broken_logo.png";
-  font-size: 11px;
-  color: #ff3b30;
-  background: #ffe5e5;
-  border: 1px dashed #ff3b30;
-  padding: 4px 8px;
-  margin-right: 12px;
-  border-radius: 4px;
+/* Broken image: in-place grey placeholder with an ✕, like a real failed <img>.
+   Absolutely positioned so surrounding layout does not reflow. */
+.broken-image .hero {
+  position: relative;
+}
+
+.broken-image .hero::after {
+  content: "✕";
+  position: absolute;
+  top: 18px;
+  right: 24px;
+  width: 180px;
+  height: 100px;
+  background: #cdcdcd;
+  border: 3px solid #be6e6e;
+  color: #828282;
+  font-size: 40px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* login.html has no .hero — place the placeholder on the form card instead */
+.broken-image .form-card {
+  position: relative;
+}
+
+.broken-image .form-card::before {
+  content: "✕";
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  width: 150px;
+  height: 90px;
+  background: #cdcdcd;
+  border: 3px solid #be6e6e;
+  color: #828282;
+  font-size: 36px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 @media (max-width: 900px) {

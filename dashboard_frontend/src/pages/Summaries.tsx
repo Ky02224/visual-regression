@@ -1,25 +1,20 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, GitBranch, Layers, ChevronDown, ChevronRight } from 'lucide-react';
+import { Activity, GitBranch, Layers, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
 import { PageHeader } from '../components/ui/PageHeader';
 import { Panel } from '../components/ui/Panel';
 import { Badge } from '../components/ui/Badge';
 import { EmptyState } from '../components/ui/EmptyState';
+import { CIBuildWire, SuiteSummaryWire } from '../types';
+import { relativeTime as relativeTimeOrNull } from '../lib/format';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function relativeTime(ts: string | number | null | undefined): string {
-  if (!ts) return '—';
-  const d = typeof ts === 'number' ? new Date(ts < 1e12 ? ts * 1000 : ts) : new Date(ts);
-  if (isNaN(d.getTime())) return '—';
-  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  return relativeTimeOrNull(ts) ?? '—';
 }
 
-function suiteLabel(batch: any) {
+function suiteLabel(batch: SuiteSummaryWire) {
   const raw = batch.suite || batch.suite_name || batch.file || 'Manual Run';
   const normalized = String(raw).replace(/\\/g, '/');
   const tail = normalized.split('/').pop() || normalized;
@@ -41,7 +36,7 @@ interface BuildEntry {
   link: string | null;
 }
 
-function fromCIBuild(b: any): BuildEntry {
+function fromCIBuild(b: CIBuildWire): BuildEntry {
   const passed = b.passed_count || 0;
   const failed = b.failed_count || 0;
   const total = b.total_count || 0;
@@ -59,7 +54,7 @@ function fromCIBuild(b: any): BuildEntry {
   };
 }
 
-function fromSuiteBatch(b: any): BuildEntry {
+function fromSuiteBatch(b: SuiteSummaryWire): BuildEntry {
   const passed = b.passed ?? b.passed_cases ?? 0;
   const failed = (b.failed ?? b.failed_cases ?? 0) + (b.errors ?? 0);
   const total = b.total ?? b.total_cases ?? b.total_runs ?? 0;
@@ -74,7 +69,7 @@ function fromSuiteBatch(b: any): BuildEntry {
     total,
     status: failed === 0 ? 'passed' : 'failed',
     time: relativeTime(b.finished_at || b.started_at || b.timestamp),
-    link: `/suite/${encodeURIComponent(name)}`,
+    link: `/suite/${encodeURIComponent(name)}${b.file ? `?file=${encodeURIComponent(b.file)}` : ''}`,
   };
 }
 
@@ -95,20 +90,30 @@ interface GroupedBuilds {
 export function Summaries() {
   const [entries, setEntries] = React.useState<BuildEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [retryToken, setRetryToken] = React.useState(0);
   const [expandedGroups, setExpandedGroups] = React.useState<string[]>([]);
 
   React.useEffect(() => {
+    setLoading(true);
+    setError(null);
     fetch('/api/dashboard')
-      .then(res => res.json())
-      .then(data => {
+      .then(res => {
+        if (!res.ok) throw new Error(`Request failed (${res.status})`);
+        return res.json();
+      })
+      .then((data: { builds?: CIBuildWire[]; recent_summaries?: SuiteSummaryWire[] }) => {
         const ciBuilds: BuildEntry[] = (data.builds || []).map(fromCIBuild);
         const suiteBuilds: BuildEntry[] = (data.recent_summaries || []).map(fromSuiteBatch);
         const all = [...ciBuilds, ...suiteBuilds];
         setEntries(all);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to load builds');
+        setLoading(false);
+      });
+  }, [retryToken]);
 
   const groups = React.useMemo(() => {
     const map: { [key: string]: BuildEntry[] } = {};
@@ -156,6 +161,29 @@ export function Summaries() {
     );
   }
 
+  if (error) {
+    return (
+      <div className="p-8 max-w-6xl mx-auto">
+        <PageHeader title="Builds" description="All test runs — suite executions and CI builds." />
+        <Panel>
+          <EmptyState
+            icon={<AlertTriangle className="w-8 h-8 text-red-500" />}
+            title="Failed to load builds"
+            description={error}
+            action={
+              <button
+                onClick={() => setRetryToken(t => t + 1)}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition-colors"
+              >
+                Retry
+              </button>
+            }
+          />
+        </Panel>
+      </div>
+    );
+  }
+
   if (!entries.length) {
     return (
       <div className="p-8 max-w-6xl mx-auto">
@@ -182,7 +210,16 @@ export function Summaries() {
             {/* Accordion Header */}
             <div
               onClick={() => toggleGroup(group.key)}
-              className="flex items-center justify-between gap-4 px-5 py-4 cursor-pointer select-none bg-stone-50/70 dark:bg-zinc-900/40 hover:bg-stone-50 dark:hover:bg-zinc-900 transition-colors border-b border-[var(--outline)]"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  toggleGroup(group.key);
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              aria-expanded={isExpanded}
+              className="flex items-center justify-between gap-4 px-5 py-4 cursor-pointer select-none bg-stone-50/70 dark:bg-zinc-900/40 hover:bg-stone-50 dark:hover:bg-zinc-900 transition-colors border-b border-[var(--outline)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-inset"
             >
               <div className="flex items-center gap-3 min-w-0">
                 {isExpanded ? <ChevronDown className="w-4 h-4 text-stone-400" /> : <ChevronRight className="w-4 h-4 text-stone-400" />}

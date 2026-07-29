@@ -336,7 +336,7 @@ function GitHubConnectionModule() {
 }
 
 function ApiTokensModule() {
-  const { role, updateAccessKey } = useRole();
+  const { role } = useRole();
   const [maskedKey, setMaskedKey] = React.useState('••••••••');
   const [revealedKey, setRevealedKey] = React.useState('');
   const [showKey, setShowKey] = React.useState(false);
@@ -414,7 +414,6 @@ function ApiTokensModule() {
       setRevealedKey(data.api_key || '');
       setShowKey(true);
       setMaskedKey(data.api_key || maskedKey);
-      updateAccessKey(data.api_key || null);
       setNotice({ tone: 'success', message: 'API key rotated. Update your GitHub secret with the new value.' });
       await loadConfig();
     } catch (error) {
@@ -764,16 +763,24 @@ function PipelineFeedModule() {
   const [loading, setLoading] = React.useState(true);
   const [showAll, setShowAll] = React.useState(false);
   const [isCardExpanded, setIsCardExpanded] = React.useState(true);
+  const [notice, setNotice] = React.useState<Notice | null>(null);
 
   const fetchActivity = React.useCallback(() => {
     setLoading(true);
     fetch('/api/integrations/activity')
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error('Request failed');
+        return res.json();
+      })
       .then((data) => {
         setRuns(data.activity || []);
+        setNotice(null);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setNotice({ tone: 'error', message: 'Unable to load integration activity.' });
+        setLoading(false);
+      });
   }, []);
 
   React.useEffect(() => {
@@ -785,9 +792,18 @@ function PipelineFeedModule() {
   return (
     <section className="rounded-md border border-slate-200 bg-white p-8 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-8 flex items-center justify-between gap-4">
-        <div 
-          className="flex items-center gap-4 cursor-pointer select-none"
+        <div
+          className="flex items-center gap-4 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 rounded-lg"
           onClick={() => setIsCardExpanded(!isCardExpanded)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setIsCardExpanded(!isCardExpanded);
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={isCardExpanded}
         >
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-100 bg-slate-50 text-accent dark:border-slate-700 dark:bg-slate-800">
             <Terminal className="h-5 w-5" />
@@ -823,13 +839,15 @@ function PipelineFeedModule() {
 
       {isCardExpanded && (
         <div className="space-y-4">
+          <NoticeBanner notice={notice} />
+
           {loading && runs.length === 0 && (
             <div className="rounded-md border-2 border-dashed border-slate-200 px-6 py-10 text-center text-xs font-bold font-medium text-[var(--on-surface-variant)] dark:border-slate-700 dark:text-slate-500">
               Loading integration activity...
             </div>
           )}
 
-          {!loading && runs.length === 0 && (
+          {!loading && !notice && runs.length === 0 && (
             <div className="rounded-md border-2 border-dashed border-slate-200 px-6 py-10 text-center text-sm font-medium text-slate-500 dark:border-slate-700 dark:text-[var(--on-surface-variant)]">
               No integration activity yet. Save a webhook, rotate a key, or run CI/CD once to populate this feed.
             </div>

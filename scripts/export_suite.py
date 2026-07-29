@@ -39,7 +39,7 @@ def main():
             continue
         
         metadata_path = os.path.join(folder_path, "metadata.json")
-        image_path = os.path.join(folder_path, "baseline.png")
+        image_path = os.path.join(folder_path, "baseline.webp")
         if not os.path.exists(metadata_path) or not os.path.exists(image_path):
             continue
             

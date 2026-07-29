@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -11,6 +12,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 # Thread-local storage so each thread reuses its own SQLite connection
 # instead of opening a new file handle on every _connect() call.
@@ -60,9 +63,24 @@ class AuthUser:
 
 class SqliteStore:
     def __init__(self, db_path: Path):
+        import threading
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self._session_cache = {}  # {token: (expiry_time, AuthUser)}
+        self._session_cache_lock = threading.Lock()
+        threading.Thread(target=self._cleanup_expired_loop, daemon=True).start()
+
+    def _cleanup_expired_loop(self) -> None:
+        import time
+        while True:
+            try:
+                now = _utc_epoch()
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM sessions WHERE expires_at < ?;", (now,))
+            except Exception:
+                logger.debug("Session cleanup pass failed; will retry next cycle", exc_info=True)
+            time.sleep(3600)
 
     def _connect(self) -> sqlite3.Connection:
         """Return a per-thread cached SQLite connection.
@@ -75,11 +93,42 @@ class SqliteStore:
         db_path_str = str(self.db_path)
         # Re-create if the connection doesn't exist or points to a different DB
         if conn is None or getattr(_thread_local, "db_path", None) != db_path_str:
-            conn = sqlite3.connect(db_path_str, check_same_thread=False)
+            conn = sqlite3.connect(db_path_str, timeout=30.0, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             _thread_local.conn = conn
             _thread_local.db_path = db_path_str
+            conn.execute("PRAGMA busy_timeout=30000;")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL;")
+            except Exception:
+                pass
+        conn.execute("PRAGMA foreign_keys=ON;")
         return conn
+
+    def _execute_query(self, query: str, params: tuple | list | dict = (), commit: bool = False, fetch: bool = False) -> List[Dict[str, Any]]:
+        max_retries = 5
+        base_delay = 0.05
+        for attempt in range(max_retries):
+            try:
+                with self._connect() as conn:
+                    cursor = conn.execute(query, params)
+                    if commit:
+                        # sqlite3 automatically commits when using connection as context manager,
+                        # but explicit commit is safe and matches PostgresStore signature.
+                        try:
+                            conn.commit()
+                        except Exception:
+                            pass
+                    if fetch:
+                        rows = cursor.fetchall()
+                        return [dict(row) for row in rows]
+                    return []
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+                    continue
+                raise
+
 
 
     def _init_db(self) -> None:
@@ -113,8 +162,9 @@ class SqliteStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);")
             try:
                 conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';")
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e).lower():
+                    raise
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -163,13 +213,68 @@ class SqliteStore:
                   locale TEXT,
                   url TEXT,
                   report_href TEXT,
+                  decider TEXT,
+                  decision_comment TEXT,
+                  ai_score REAL,
+                  build_id TEXT,
                   created_at INTEGER NOT NULL
                 );
                 """
             )
+            try:
+                conn.execute("ALTER TABLE runs_index ADD COLUMN decider TEXT;")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE runs_index ADD COLUMN decision_comment TEXT;")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE runs_index ADD COLUMN ai_score REAL;")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE runs_index ADD COLUMN build_id TEXT;")
+            except sqlite3.OperationalError:
+                pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_case ON runs_index(case_name);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_suite ON runs_index(suite_name);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs_index(status);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_build ON runs_index(build_id);")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comments (
+                  id TEXT PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  x_pct REAL NOT NULL,
+                  y_pct REAL NOT NULL,
+                  author TEXT NOT NULL,
+                  content TEXT NOT NULL,
+                  created_at INTEGER NOT NULL,
+                  FOREIGN KEY(run_id) REFERENCES runs_index(run_id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_run ON comments(run_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_email);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_baseline ON runs_index(baseline_name);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs_index(status);")
+            # ── Performance indexes added for Storage & Database optimisation ──────
+            # Supports ORDER BY created_at DESC in run history / dashboard queries.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs_index(created_at DESC);"
+            )
+            # Fast lookup of baselines by name (covers prefix/equality searches).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_baselines_name ON baselines_index(name);"
+            )
+            # Composite covering index: baseline_name + created_at for
+            # 'show all runs for baseline X sorted by date' queries.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runs_baseline_created "
+                "ON runs_index(baseline_name, created_at DESC);"
+            )
 
     def upsert_baseline_index(self, item: Dict[str, Any]) -> None:
         name = str(item.get("name") or "").strip()
@@ -221,14 +326,26 @@ class SqliteStore:
         severity_label = ""
         if isinstance(severity, dict):
             severity_label = str(severity.get("label") or "")
+        
+        decision = item.get("decision") or {}
+        decider = decision.get("reviewer") or decision.get("decider") or item.get("decider") or ""
+        decision_comment = decision.get("comment") or item.get("decision_comment") or ""
+        decision_status = decision.get("status") or item.get("decision_status") or "pending"
+        decided_at = decision.get("timestamp") or item.get("decided_at") or ""
+
+        ai_assessment = item.get("ai_assessment") or {}
+        ai_score = ai_assessment.get("score") if "score" in ai_assessment else item.get("ai_score")
+        if ai_score is not None:
+            ai_score = float(ai_score)
+
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO runs_index(
                   run_id, case_name, baseline_name, suite_name, status, mismatch_pct, diff_regions,
                   decision_status, decided_at, severity_label, ai_label, browser, device, locale, url, report_href,
-                  created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  decider, decision_comment, ai_score, build_id, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(run_id) DO UPDATE SET
                   case_name=excluded.case_name,
                   baseline_name=excluded.baseline_name,
@@ -244,18 +361,22 @@ class SqliteStore:
                   device=excluded.device,
                   locale=excluded.locale,
                   url=excluded.url,
-                  report_href=excluded.report_href;
+                  report_href=excluded.report_href,
+                  decider=excluded.decider,
+                  decision_comment=excluded.decision_comment,
+                  ai_score=excluded.ai_score,
+                  build_id=excluded.build_id;
                 """,
                 (
                     run_id,
-                    item.get("case_name"),
+                    item.get("case_name") or item.get("name"),
                     item.get("baseline_name"),
                     item.get("suite_name"),
                     item.get("status"),
-                    item.get("mismatch_pct"),
-                    item.get("diff_regions"),
-                    item.get("decision_status"),
-                    item.get("decided_at"),
+                    item.get("mismatch_pct") or item.get("mismatch"),
+                    item.get("diff_regions") or 0,
+                    decision_status,
+                    decided_at,
                     severity_label,
                     item.get("ai_label"),
                     item.get("browser"),
@@ -263,6 +384,10 @@ class SqliteStore:
                     item.get("locale"),
                     item.get("url"),
                     item.get("report_href"),
+                    decider,
+                    decision_comment,
+                    ai_score,
+                    item.get("build_id"),
                     now,
                 ),
             )
@@ -344,17 +469,29 @@ class SqliteStore:
             if not row:
                 raise FileNotFoundError("user not found")
             user_id = int(row["id"])
+            
+            # SS-03: Limit to max 5 concurrent sessions per user (LRU eviction)
+            sessions = conn.execute("SELECT token FROM sessions WHERE user_id=? ORDER BY created_at ASC;", (user_id,)).fetchall()
+            if len(sessions) >= 5:
+                oldest_token = sessions[0]["token"]
+                conn.execute("DELETE FROM sessions WHERE token=?;", (oldest_token,))
+                with self._session_cache_lock:
+                    if oldest_token in self._session_cache:
+                        del self._session_cache[oldest_token]
+
             conn.execute(
                 "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?);",
                 (token, user_id, now, expires_at),
             )
-            conn.execute("DELETE FROM sessions WHERE expires_at < ?;", (now,))
         return token
 
     def delete_session(self, token: str) -> None:
         token = (token or "").strip()
         if not token:
             return
+        with self._session_cache_lock:
+            if token in self._session_cache:
+                del self._session_cache[token]
         with self._connect() as conn:
             conn.execute("DELETE FROM sessions WHERE token=?;", (token,))
 
@@ -362,6 +499,16 @@ class SqliteStore:
         token = (token or "").strip()
         if not token:
             return None
+        import time
+        now_time = time.time()
+        with self._session_cache_lock:
+            if token in self._session_cache:
+                expiry, user = self._session_cache[token]
+                if now_time < expiry:
+                    return user
+                else:
+                    del self._session_cache[token]
+
         now = _utc_epoch()
         with self._connect() as conn:
             row = conn.execute(
@@ -378,7 +525,10 @@ class SqliteStore:
             if int(row["expires_at"]) < now:
                 conn.execute("DELETE FROM sessions WHERE token=?;", (token,))
                 return None
-            return AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
+            user = AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
+            with self._session_cache_lock:
+                self._session_cache[token] = (now_time + 5.0, user)
+            return user
 
     def list_users(self) -> list:
         with self._connect() as conn:
@@ -458,16 +608,153 @@ class SqliteStore:
         for row in rows:
             detail = {}
             try:
-                detail = json.loads(row[5] or "{}")
+                detail = json.loads(row["detail_json"] or "{}")
             except Exception:
                 pass
             result.append({
-                "id": row[0],
-                "timestamp": row[1],
-                "actor_email": row[2],
-                "actor_role": row[3],
-                "action": row[4],
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "actor_email": row["actor_email"],
+                "actor_role": row["actor_role"],
+                "action": row["action"],
                 "detail": detail,
             })
         return result
+
+    def add_comment(self, comment_id: str, run_id: str, x_pct: float, y_pct: float, author: str, content: str) -> None:
+        content = content[:5000]
+        now = _utc_epoch()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO comments(id, run_id, x_pct, y_pct, author, content, created_at)
+                VALUES(?,?,?,?,?,?,?);
+                """,
+                (comment_id, run_id, x_pct, y_pct, author.strip(), content.strip(), now),
+            )
+
+    def list_comments(self, run_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, run_id, x_pct, y_pct, author, content, created_at
+                FROM comments
+                WHERE run_id=?
+                ORDER BY created_at ASC;
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "run_id": str(row["run_id"]),
+                "x_pct": float(row["x_pct"]),
+                "y_pct": float(row["y_pct"]),
+                "author": str(row["author"]),
+                "content": str(row["content"]),
+                "created_at": int(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def delete_comment(self, comment_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM comments WHERE id=?;", (comment_id,))
+
+    # ── Bulk operations ───────────────────────────────────────────────────────
+
+    def bulk_insert_runs(self, runs_list: list[dict]) -> int:
+        """Insert or replace multiple run index records in a single transaction.
+
+        Uses :meth:`sqlite3.Connection.executemany` for batch efficiency and wraps
+        the entire operation in a single explicit transaction so that either all
+        rows succeed or none do.
+
+        Duplicate ``run_id`` values are handled with ``INSERT OR REPLACE`` (upsert),
+        which is equivalent to DELETE + INSERT at the SQLite level.
+
+        Args:
+            runs_list: Sequence of dicts, each with the same keys accepted by
+                       :meth:`upsert_run_index` (``run_id`` / ``run``, ``case_name``,
+                       ``baseline_name``, ``suite_name``, ``status``, ``mismatch_pct``,
+                       ``diff_regions``, ``decision_status``, ``decided_at``,
+                       ``severity``, ``ai_label``, ``browser``, ``device``,
+                       ``locale``, ``url``, ``report_href``).
+
+        Returns:
+            The number of rows written (inserted or replaced).
+
+        Raises:
+            sqlite3.Error: If the transaction fails; the error is propagated after
+                           an automatic rollback.
+        """
+        if not runs_list:
+            return 0
+
+        now = _utc_epoch()
+
+        def _row(item: dict) -> tuple:
+            run_id = str(item.get("run") or item.get("run_id") or "").strip()
+            severity = item.get("severity") or {}
+            severity_label = ""
+            if isinstance(severity, dict):
+                severity_label = str(severity.get("label") or "")
+            
+            decision = item.get("decision") or {}
+            decider = decision.get("reviewer") or decision.get("decider") or item.get("decider") or ""
+            decision_comment = decision.get("comment") or item.get("decision_comment") or ""
+            decision_status = decision.get("status") or item.get("decision_status") or "pending"
+            decided_at = decision.get("timestamp") or item.get("decided_at") or ""
+
+            ai_assessment = item.get("ai_assessment") or {}
+            ai_score = ai_assessment.get("score") if "score" in ai_assessment else item.get("ai_score")
+            if ai_score is not None:
+                ai_score = float(ai_score)
+
+            return (
+                run_id,
+                item.get("case_name") or item.get("name"),
+                item.get("baseline_name"),
+                item.get("suite_name"),
+                item.get("status"),
+                item.get("mismatch_pct") or item.get("mismatch") or 0.0,
+                item.get("diff_regions") or 0,
+                decision_status,
+                decided_at,
+                severity_label,
+                item.get("ai_label"),
+                item.get("browser"),
+                item.get("device"),
+                item.get("locale"),
+                item.get("url"),
+                item.get("report_href"),
+                decider,
+                decision_comment,
+                ai_score,
+                item.get("build_id"),
+                now,
+            )
+
+        rows = [_row(item) for item in runs_list if str(item.get("run") or item.get("run_id") or "").strip()]
+        if not rows:
+            return 0
+
+        sql = """
+            INSERT OR REPLACE INTO runs_index(
+              run_id, case_name, baseline_name, suite_name, status, mismatch_pct,
+              diff_regions, decision_status, decided_at, severity_label, ai_label,
+              browser, device, locale, url, report_href, decider, decision_comment, ai_score, build_id, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+        """
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            conn.executemany(sql, rows)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+        return len(rows)
 

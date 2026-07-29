@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { clearApiCache } from '../hooks/useApiData';
 
 export type Role = 'admin' | 'developer' | 'viewer';
 
@@ -11,10 +12,7 @@ interface RoleContextType {
   login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
-  setRole: (role: Role, pin?: string) => Promise<boolean>;
   can: (action: 'approve' | 'capture' | 'manage_baselines') => boolean;
-  accessKey: string | null;
-  updateAccessKey: (value: string | null) => void;
 }
 
 const RoleContext = createContext<RoleContextType | undefined>(undefined);
@@ -31,16 +29,6 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [userName, setUserName] = useState<string | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [accessKey, setAccessKey] = useState<string | null>(null);
-
-  const updateAccessKey = (value: string | null) => {
-    setAccessKey(value);
-    if (value) {
-      localStorage.setItem('lens-access-key', value);
-    } else {
-      localStorage.removeItem('lens-access-key');
-    }
-  };
 
   const refreshSession = async () => {
     try {
@@ -91,18 +79,12 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } finally {
+      clearApiCache();
       await refreshSession();
     }
   };
 
-  const setRole = async (newRole: Role, pin?: string): Promise<boolean> => {
-    // Legacy API: keep, but no longer used by the UI.
-    // Role is now derived from backend session.
-    await refreshSession();
-    return newRole === role;
-  };
-
-  const can = (action: 'approve' | 'capture' | 'manage_baselines'): boolean => {
+  const can =(action: 'approve' | 'capture' | 'manage_baselines'): boolean => {
     if (role === 'admin') return true;
     if (role === 'developer') {
       return action === 'capture';
@@ -121,10 +103,7 @@ export const RoleProvider: React.FC<{ children: React.ReactNode }> = ({ children
         login,
         logout,
         refreshSession,
-        setRole,
         can,
-        accessKey,
-        updateAccessKey,
       }}
     >
       {children}

@@ -1,8 +1,8 @@
 import React from 'react';
-import { Columns2, GitCompare, Layers, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
+import { Columns2, GitCompare, Layers, ZoomIn, ZoomOut, Maximize2, Eye } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type ComparisonViewMode = 'side-by-side' | 'slider';
+export type ComparisonViewMode = 'side-by-side' | 'slider' | 'overlay';
 export type ZoomLevel = 'fit' | 1 | 1.25 | 1.5 | 2;
 
 const ZOOM_STEPS: ZoomLevel[] = ['fit', 1, 1.25, 1.5, 2];
@@ -23,6 +23,9 @@ export function ComparisonToolbar({ viewMode, onViewModeChange, showDiff, onShow
 
   return (
     <div className="shrink-0 flex items-center gap-1 px-3 py-2 border-b border-[var(--outline)] bg-[var(--surface)] flex-wrap">
+      <ToolbarButton active={viewMode === 'overlay'} onClick={() => onViewModeChange('overlay')} title="Single page overlay">
+        <Eye className="w-4 h-4" /><span className="hidden sm:inline">Overlay</span>
+      </ToolbarButton>
       <ToolbarButton active={viewMode === 'side-by-side'} onClick={() => onViewModeChange('side-by-side')} title="Side by side">
         <Columns2 className="w-4 h-4" /><span className="hidden sm:inline">Side by side</span>
       </ToolbarButton>

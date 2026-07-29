@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from visual_regression.baseline_manager import BaselineManager
@@ -28,11 +27,11 @@ def test_baseline_versioning_and_details(tmp_path: Path):
 
     listing = manager.list_baselines()
     assert listing[0]["version_count"] == 1
-    assert listing[0]["thumbnail_href"].endswith("/baseline/home/baseline.png")
+    assert listing[0]["thumbnail_href"].endswith("/baseline/home/baseline.webp")
     assert len(listing[0]["history"]) == 2
 
     details = manager.get_baseline_details("home")
-    assert details["current_image_href"].endswith("/baseline/home/baseline.png")
+    assert details["current_image_href"].endswith("/baseline/home/baseline.webp")
     assert len(details["versions"]) == 1
-    assert details["versions"][0]["image_href"].endswith("/baseline/home/versions/" + details["versions"][0]["version"] + "/baseline.png")
+    assert details["versions"][0]["image_href"].endswith("/baseline/home/versions/" + details["versions"][0]["version"] + "/baseline.webp")
     assert details["history"][-1]["actor"] == "Bob"

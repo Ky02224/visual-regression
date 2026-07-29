@@ -14,7 +14,7 @@ type Props = {
 };
 
 /**
- * Percy-style diff toggle: swap to server-generated diff_overlay.png (no canvas).
+ * Percy-style diff toggle: swap to server-generated diff_overlay.webp (no canvas).
  * Avoids CORS/taint issues and blank screen while compositing.
  */
 export function DiffHighlightFrame({ currentUrl, diffOverlayUrl, showDiff = false, zoom = 1, fill = false, aspectRatio, className, alt = 'Screenshot' }: Props) {
