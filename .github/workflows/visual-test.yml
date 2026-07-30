@@ -18,6 +18,7 @@ jobs:
   frontend-checks:
     name: Frontend Lint, Test & Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: dashboard_frontend
@@ -48,6 +49,7 @@ jobs:
   visual-test:
     name: Run Headless Visual Regression
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - name: Checkout Code

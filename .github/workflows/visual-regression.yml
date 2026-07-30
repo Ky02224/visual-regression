@@ -12,6 +12,7 @@ concurrency:
 jobs:
   visual-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,8 +38,12 @@ jobs:
           for _ in range(30):
               try:
                   urllib.request.urlopen("http://127.0.0.1:8130/demo/index.html", timeout=3)
-                  print("Dashboard demo ready."); break
-              except: time.sleep(1)
+                  print("Dashboard demo ready.")
+                  break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Dashboard demo did not become ready in time.")
           PY
 
       - name: Bootstrap baselines
