@@ -847,7 +847,7 @@ def get_health(store=Depends(get_store_dep)):
     return {"ok": True, "status": "healthy" if db_ok else "degraded", "db": db_ok}
 
 @app.get("/api/tasks/status")
-def get_tasks_status(id: str = Query(None)):
+def get_tasks_status(id: str = Query(None), _user=Depends(require_auth)):
     if not id:
         raise HTTPException(status_code=400, detail="Missing task id")
     status = _tasks_status.get(id)
@@ -856,7 +856,7 @@ def get_tasks_status(id: str = Query(None)):
     return {"ok": True, "task": status}
 
 @app.get("/api/actions/task-status")
-def get_actions_task_status(id: str = Query(None)):
+def get_actions_task_status(id: str = Query(None), _user=Depends(require_auth)):
     if not id:
         raise HTTPException(status_code=400, detail="Missing task id")
     status = _tasks_status.get(id)
@@ -1060,7 +1060,7 @@ def get_run_export(run_id: str, paths=Depends(get_paths_dep), user=Depends(requi
     )
 
 @app.get("/api/events/stream")
-def get_events_stream():
+def get_events_stream(_user=Depends(require_auth)):
     q = queue.Queue(maxsize=100)
     with _SSE_SUBSCRIBERS_LOCK:
         if len(_SSE_SUBSCRIBERS) < 50:

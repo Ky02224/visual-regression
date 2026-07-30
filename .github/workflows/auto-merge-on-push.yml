@@ -10,13 +10,14 @@ permissions:
 jobs:
   test-and-merge:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -66,6 +67,7 @@ jobs:
   merge-fix-branch:
     needs: test-and-merge
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: ${{ needs.test-and-merge.result == 'success' }}
 
     steps:

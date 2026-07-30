@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -49,14 +49,28 @@ jobs:
   visual-test:
     name: Run Headless Visual Regression
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      # A baseline captured from the very commit under test and then compared
+      # against that same commit always matches, so a run with no committed
+      # baselines cannot fail no matter what changed. Surface that as a warning
+      # on the run summary instead of reporting a green check that proves
+      # nothing. See the "Generate Baselines" workflow for how to produce
+      # Linux-captured baselines worth committing.
+      - name: Check Baseline Provenance
+        run: |
+          if [ -n "$(ls -A .visual-regression/baselines 2>/dev/null)" ]; then
+            echo "Using committed baselines — comparison is meaningful."
+          else
+            echo "::warning title=Visual check is self-comparing::No committed baselines found, so baselines are captured from this commit and compared against themselves. This run CANNOT detect a visual regression. Run the 'Generate Baselines' workflow, then commit .visual-regression/baselines/."
+          fi
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -69,22 +83,32 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
 
       - name: Install Python Dependencies
+        timeout-minutes: 12
         run: |
           pip install -r requirements-dev.txt
           playwright install --with-deps chromium
 
       - name: Create Workspace Directories
+        timeout-minutes: 2
         run: |
           python -c "from visual_regression.config import WorkspacePaths; WorkspacePaths().ensure()"
 
       - name: Run Python Test Suite
+        timeout-minutes: 15
         run: |
           python -m pytest -q
 
       - name: Start Dashboard Server
-        run: python -m visual_regression.cli serve-dashboard --port 8130 &
+        timeout-minutes: 3
+        # Output is redirected to a file: a backgrounded process that keeps the
+        # step's stdout pipe open can stall the runner instead of letting the
+        # step complete.
+        run: |
+          nohup python -m visual_regression.cli serve-dashboard --port 8130 > dashboard-server.log 2>&1 &
+          echo "server pid=$!"
 
       - name: Wait For Dashboard Demo
+        timeout-minutes: 3
         run: |
           python - <<'PY'
           import time, urllib.request
@@ -100,6 +124,7 @@ jobs:
           PY
 
       - name: Bootstrap Missing Baselines
+        timeout-minutes: 8
         run: |
           python -m visual_regression.cli create-suite-baselines --suite suite.ci-smoke.yaml
 
@@ -110,8 +135,15 @@ jobs:
         # full 12-case suite (each doing real CNN inference) was taking 30+
         # minutes here. suite.demo.yaml remains the full suite for local/dashboard use.
         # If there are visual regressions, this step exits with code 1.
+        timeout-minutes: 15
         run: |
           python -m visual_regression.cli run-suite --suite suite.ci-smoke.yaml --create-missing-baseline
+
+      - name: Dump Dashboard Server Log
+        if: always()
+        run: |
+          echo "--- dashboard-server.log ---"
+          cat dashboard-server.log 2>/dev/null || echo "(no server log produced)"
 
       - name: Generate PR Markdown Comment
         if: failure() && github.event_name == 'pull_request'

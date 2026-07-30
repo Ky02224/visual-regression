@@ -17,6 +17,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # See visual-test.yml for why a run without committed baselines cannot
+      # detect a regression.
+      - name: Check baseline provenance
+        run: |
+          if [ -n "$(ls -A .visual-regression/baselines 2>/dev/null)" ]; then
+            echo "Using committed baselines — comparison is meaningful."
+          else
+            echo "::warning title=Visual check is self-comparing::No committed baselines found, so baselines are captured from this commit and compared against themselves. This run CANNOT detect a visual regression. Run the 'Generate Baselines' workflow, then commit .visual-regression/baselines/."
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -26,10 +36,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          python -m playwright install chromium
+          python -m playwright install --with-deps chromium
 
       - name: Start dashboard server
-        run: python -m visual_regression.cli serve-dashboard --port 8130 &
+        timeout-minutes: 3
+        # Output is redirected to a file: a backgrounded process that keeps the
+        # step's stdout pipe open can stall the runner instead of letting the
+        # step complete.
+        run: |
+          nohup python -m visual_regression.cli serve-dashboard --port 8130 > dashboard-server.log 2>&1 &
+          echo "server pid=$!"
 
       - name: Wait for dashboard demo
         run: |
@@ -46,8 +62,13 @@ jobs:
               raise SystemExit("Dashboard demo did not become ready in time.")
           PY
 
+      # No --overwrite: regenerating baselines on every run overwrites any
+      # committed reference, which makes the comparison below self-vs-self and
+      # therefore incapable of ever failing. Existing baselines are kept and
+      # only missing ones are captured.
       - name: Bootstrap baselines
-        run: python -m visual_regression.cli create-suite-baselines --suite suite.demo.yaml --overwrite
+        timeout-minutes: 25
+        run: python -m visual_regression.cli create-suite-baselines --suite suite.demo.yaml
 
       - name: Run visual regression suite
         run: python -m visual_regression.cli run-suite --suite suite.demo.yaml --no-junit
