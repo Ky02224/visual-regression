@@ -69,6 +69,21 @@ jobs:
             echo "::warning title=Visual check is self-comparing::No committed baselines found, so baselines are captured from this commit and compared against themselves. This run CANNOT detect a visual regression. Run the 'Generate Baselines' workflow, then commit .visual-regression/baselines/."
           fi
 
+      # suite.ci-smoke.yaml asks for comparison_mode: ai, but the trained model
+      # lives under the ignored workspace and is far too large to commit, so it
+      # is never present here. resolve_ai_model_path() then returns None and
+      # decision.py falls back to pixel with decision_source
+      # "pixel-fallback-no-model". That is recorded per result but nothing reads
+      # it, so the job goes green while the AI never ran. Say so out loud rather
+      # than let a green check imply the model was exercised.
+      - name: Check AI Model Availability
+        run: |
+          if [ -f .visual-regression/models/visual_ai.pt ]; then
+            echo "AI model present — the suite's ai comparison mode will actually run."
+          else
+            echo "::warning title=AI comparison not exercised::No model at .visual-regression/models/visual_ai.pt, so the suite falls back to pixel comparison (decision_source=pixel-fallback-no-model). This run does NOT validate the AI. Publishing the model to CI needs a distribution choice (Git LFS, a release asset, or a restored cache)."
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
