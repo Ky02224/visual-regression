@@ -35,17 +35,16 @@ export default defineConfig(({mode}) => {
       },
     },
     build: {
-      rollupOptions: {
-        output: {
-          manualChunks(id) {
-            if (id.includes('node_modules')) {
-              if (id.includes('react')) return 'vendor.react';
-              if (id.includes('vite') || id.includes('react-router')) return 'vendor.vendors';
-              return 'vendor';
-            }
-          }
-        }
-      },
+      // No manualChunks. Splitting vendors by substring broke the production
+      // build outright: `id.includes('react')` sent react and react-dom to
+      // vendor.react while scheduler and motion — neither has "react" in its
+      // path — stayed in vendor, even though both sides import each other.
+      // That circular chunk dependency let vendor evaluate before React's
+      // bindings were live, so motion hit `undefined.createContext` and the
+      // app rendered nothing at all. (The react-router branch was also dead:
+      // the react check above it matched react-router first.)
+      // Rollup's default chunking derives order from the real import graph
+      // and does not have this failure mode.
       chunkSizeWarningLimit: 600,
     },
   };
