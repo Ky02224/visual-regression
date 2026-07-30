@@ -452,10 +452,18 @@ def _build_context_options(playwright: Playwright, cfg: CaptureConfig) -> dict:
 _THREAD_LOCAL = threading.local()
 
 def set_shared_browser(playwright: Playwright | None, browser: Any) -> None:
+    previous_playwright = getattr(_THREAD_LOCAL, "playwright", None)
+    previous_browser = getattr(_THREAD_LOCAL, "browser", None)
     _THREAD_LOCAL.playwright = playwright
     _THREAD_LOCAL.browser = browser
     if playwright or browser:
         register_instances(playwright, browser)
+    else:
+        # Clearing the slot is how close_shared_browser() reports that it already
+        # shut these down. Without dropping them from the registry they stay
+        # there as closed handles, and the atexit sweep tries to close them a
+        # second time against a driver process that no longer exists.
+        unregister_instances(previous_playwright, previous_browser)
 
 class SessionCache:
     """TTL cache for login states."""
@@ -824,11 +832,37 @@ def unregister_instances(playwright: Any | None = None, browser: Any | None = No
         if browser and browser in _ALL_BROWSER_INSTANCES:
             _ALL_BROWSER_INSTANCES.remove(browser)
 
+# Nothing reached from the atexit handler may block shutdown without bound.
+# Closing a Playwright object talks to its driver subprocess, and that process
+# can already be gone by the time interpreter shutdown runs — awaiting a reply
+# that will never arrive parks the process in select() with no way out. This
+# was observed on Linux CI as a job that sat until the 6h ceiling with all of
+# its actual work long finished.
+_CLOSE_TIMEOUT_SECONDS = 10
+
+
+def _instance_is_live(instance) -> bool:
+    """Best-effort check for a handle worth closing.
+
+    Treats anything that cannot answer as live, so an unfamiliar object still
+    gets its close attempted (under the timeout) rather than being skipped.
+    """
+    is_connected = getattr(instance, "is_connected", None)
+    if is_connected is None:
+        return True
+    try:
+        return bool(is_connected())
+    except Exception:
+        return False
+
+
 def _close_instance(instance, method_name):
     import inspect
     import asyncio
     method = getattr(instance, method_name, None)
     if not method:
+        return
+    if method_name == "close" and not _instance_is_live(instance):
         return
     try:
         if inspect.iscoroutinefunction(method):
@@ -837,10 +871,12 @@ def _close_instance(instance, method_name):
                 if loop.is_running():
                     asyncio.run_coroutine_threadsafe(method(), loop)
                 else:
-                    loop.run_until_complete(method())
+                    loop.run_until_complete(
+                        asyncio.wait_for(method(), _CLOSE_TIMEOUT_SECONDS)
+                    )
             except Exception:
                 try:
-                    asyncio.run(method())
+                    asyncio.run(asyncio.wait_for(method(), _CLOSE_TIMEOUT_SECONDS))
                 except Exception:
                     pass
         else:
@@ -852,16 +888,13 @@ def _close_shared_browser_at_exit():
     # Close thread-local browser if any on main thread
     local_playwright = getattr(_THREAD_LOCAL, "playwright", None)
     local_browser = getattr(_THREAD_LOCAL, "browser", None)
+    # Routed through _close_instance so these get the same liveness check and
+    # bounded wait as the registry sweep below, rather than calling straight
+    # into a driver that may no longer be there.
     if local_browser:
-        try:
-            local_browser.close()
-        except Exception:
-            pass
+        _close_instance(local_browser, "close")
     if local_playwright:
-        try:
-            local_playwright.stop()
-        except Exception:
-            pass
+        _close_instance(local_playwright, "stop")
             
     # Clean up all globally tracked instances (across threads/pools)
     with _INSTANCES_LOCK:
