@@ -39,7 +39,13 @@ RUN playwright install chromium && playwright install-deps chromium
 
 # Copy Python backend files
 COPY visual_regression/ ./visual_regression/
-COPY suite.demo.yaml ./
+COPY suite.demo.yaml suite.ci-smoke.yaml ./
+
+# The demo portal is the target of every URL in suite.demo.yaml
+# (http://127.0.0.1:8130/demo/...) and is served by dashboard_server's
+# /demo/{file_path} route straight off the filesystem. Without it in the image
+# those routes 404 and the bundled suite cannot run at all.
+COPY demo_portal/ ./demo_portal/
 
 # Copy built frontend assets from Stage 1
 COPY --from=frontend-builder /app/dashboard_frontend/dist ./dashboard_frontend/dist

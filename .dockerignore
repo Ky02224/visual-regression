@@ -5,7 +5,14 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# Training & data artifacts (too large for Docker image)
+# Training & data artifacts (too large for Docker image).
+# The workspace lives under .visual-regression/ (see config.py WorkspacePaths),
+# so the bare datasets//runs//reports//models/ entries below match nothing —
+# they name root-level paths that don't exist. Ignoring the workspace root is
+# what actually keeps it out: it holds the trained models and captured runs
+# (~1.1GB locally) and none of it belongs in the image, since the Dockerfile
+# creates these directories itself and docker-compose mounts a volume over them.
+.visual-regression/
 datasets/
 runs/
 reports/
