@@ -125,8 +125,13 @@ jobs:
 
       - name: Bootstrap Missing Baselines
         timeout-minutes: 8
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
-          python -m visual_regression.cli create-suite-baselines --suite suite.ci-smoke.yaml
+          python -u -m visual_regression.cli create-suite-baselines --suite suite.ci-smoke.yaml
+          echo "--- baseline tree after bootstrap ---"
+          find .visual-regression -type f | head -50
+          echo "--- file count: $(find .visual-regression -type f | wc -l) ---"
 
       - name: Run Test Suite
         id: run_tests
@@ -135,9 +140,34 @@ jobs:
         # full 12-case suite (each doing real CNN inference) was taking 30+
         # minutes here. suite.demo.yaml remains the full suite for local/dashboard use.
         # If there are visual regressions, this step exits with code 1.
+        #
+        # This step has hung on the runner while finishing in ~30s locally, with
+        # no output past "Shared browser processes stopped". Two things make that
+        # diagnosable. PYTHONUNBUFFERED/-u, because progress is printed to stdout
+        # and a pipe is block-buffered, so a hang looks like total silence even
+        # where work did happen. And faulthandler.dump_traceback_later, which
+        # prints a traceback for every thread once the deadline passes, naming
+        # the exact frame that is stuck. It is used in preference to sending a
+        # signal because it needs no signal delivery to work.
         timeout-minutes: 15
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
-          python -m visual_regression.cli run-suite --suite suite.ci-smoke.yaml --create-missing-baseline
+          python -u - <<'PY'
+          import faulthandler, runpy, sys
+
+          # Well inside the 15 minute step budget, so the dump reaches the log
+          # instead of the runner killing the process first.
+          faulthandler.dump_traceback_later(600, exit=True)
+
+          sys.argv = [
+              "visual_regression.cli",
+              "run-suite",
+              "--suite", "suite.ci-smoke.yaml",
+              "--create-missing-baseline",
+          ]
+          runpy.run_module("visual_regression.cli", run_name="__main__")
+          PY
 
       - name: Dump Dashboard Server Log
         if: always()
