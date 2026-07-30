@@ -1,4 +1,14 @@
-.visual-regression/
+# The workspace is generated output and stays out of the repo — except for
+# baselines. A baseline is the reference a run is judged against, so it has to
+# be committed: with nothing to compare to, CI captures a baseline from the
+# commit under test and compares it against itself, and the check can never
+# fail. Ignoring the contents rather than the directory itself is what lets the
+# negation below apply — git cannot re-include a path whose parent directory is
+# excluded. Use the "Generate Baselines" workflow to produce baselines that
+# match what a Linux runner renders.
+.visual-regression/*
+!.visual-regression/baselines/
+.visual-regression/baselines/**/versions/
 __pycache__/
 *.pyc
 .venv/
