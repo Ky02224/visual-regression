@@ -23,7 +23,13 @@ jobs:
     strategy:
       matrix:
         python-version: [3.11]
-        node-version: [18]
+        # 20, not 18. vitest 4 declares engines ^20 || ^22 || >=24 and jsdom 29
+        # declares ^20.19 || ^22.13 || >=24 — on Node 18 the suite does not fail
+        # a test, it fails to start: jsdom's html-encoding-sniffer require()s a
+        # pure-ESM package and every worker dies with ERR_REQUIRE_ESM.
+        # Dockerfile and visual-test.yml were already on 20; this was the
+        # straggler.
+        node-version: [20]
 
     # tests/test_postgres_store_live.py skips itself when no server answers, and
     # nothing here started one — so the PostgreSQL backend, an advertised
