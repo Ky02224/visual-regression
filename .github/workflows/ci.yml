@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Branch prefixes were an allowlist, so work on any other prefix (test/*,
+  # docs/*, a bare branch name) pushed with no CI at all. Run on every push
+  # instead and let `concurrency` below cancel superseded runs.
   push:
-    branches: [ main, "fix/*", "chore/*", "feat/*" ]
   pull_request:
     branches: [ main ]
 
@@ -22,6 +24,28 @@ jobs:
       matrix:
         python-version: [3.11]
         node-version: [18]
+
+    # tests/test_postgres_store_live.py skips itself when no server answers, and
+    # nothing here started one — so the PostgreSQL backend, an advertised
+    # feature backed by 700 lines of its own store implementation, had never
+    # actually run in CI. This service makes those parity tests execute.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lens_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      LENS_TEST_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/lens_test
 
     steps:
       - uses: actions/checkout@v4
@@ -46,9 +70,28 @@ jobs:
           pip install pip-audit
           playwright install --with-deps chromium
 
+      # Narrow rule set (see ruff.toml): bug-catching rules only, so a failure
+      # here means something is actually wrong rather than unfashionable.
+      - name: Lint Python
+        run: python -m ruff check .
+
+      # Fails loudly if the Postgres parity tests silently skip again — the
+      # whole point of the service above is that they run.
+      - name: Verify the Postgres parity tests are not skipping
+        run: |
+          python -m pytest tests/test_postgres_store_live.py -q --no-header -rs 2>&1 | tee pg.log
+          if grep -q "No reachable Postgres" pg.log; then
+            echo "::error title=Postgres tests skipped::The postgres service did not come up, so the PostgreSQL backend went untested."
+            exit 1
+          fi
+
       - name: Run Python tests
         run: |
-          python -m pytest -q
+          python -m pytest -q \
+            --junitxml=reports/pytest-junit.xml \
+            --cov=visual_regression \
+            --cov-report=term-missing:skip-covered \
+            --cov-report=xml:reports/coverage.xml
 
       - name: Run pip-audit
         run: |
@@ -58,17 +101,40 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: dashboard_frontend/package-lock.json
 
+      # `npm ci` installs exactly the committed lockfile. The previous
+      # `rm -rf node_modules package-lock.json && npm install` threw the lockfile
+      # away and re-resolved the tree on every run, so CI never actually tested
+      # the versions this repo pins, and the npm audit result could change
+      # between two runs of the same commit.
       - name: Install frontend dependencies
         working-directory: dashboard_frontend
-        run: |
-          rm -rf node_modules package-lock.json
-          npm install
-          npm install --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.2
+        run: npm ci
+
+      - name: Typecheck frontend
+        working-directory: dashboard_frontend
+        run: npm run lint
+
+      # The vitest suite existed but only ran in visual-test.yml, which triggers
+      # on main/master alone — so on every feature branch these tests never ran.
+      - name: Run frontend unit tests
+        working-directory: dashboard_frontend
+        run: npm run test
 
       - name: Build frontend
         working-directory: dashboard_frontend
         run: npm run build
+
+      # The SDK is a separate package that nothing else imports, so nothing was
+      # compiling it — it sat broken (TS2347 on the require()'d test.extend)
+      # with no way for anyone to notice. Build it here so it stays working.
+      - name: Build Playwright SDK
+        working-directory: sdk
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
 
       - name: Run npm audit
         working-directory: dashboard_frontend
@@ -105,9 +171,39 @@ jobs:
         working-directory: dashboard_frontend
         run: npm run test:e2e
 
-      - name: Upload pytest results
+      # The positive test the suite was missing. Everything else here proves the
+      # tool does not cry wolf when nothing changed; this proves it actually
+      # fires when something did. Baselines come from the clean demo pages and
+      # each case then loads the same page with ?defect=<mode>, so a case that
+      # passes is a miss. benchmark_report.py exits non-zero on any miss or any
+      # control-group false alarm.
+      - name: Capture benchmark baselines (clean pages)
+        timeout-minutes: 15
+        run: |
+          python -m visual_regression.cli create-suite-baselines \
+            --suite suites/suite.benchmark.yaml --overwrite
+
+      - name: Run injected-defect benchmark
+        timeout-minutes: 20
+        run: |
+          python -m visual_regression.cli run-suite \
+            --suite suites/suite.benchmark.yaml --no-junit || true
+
+      - name: Score detection rate
+        timeout-minutes: 5
+        run: |
+          python scripts/benchmark_report.py --json-out reports/benchmark-summary.json
+
+      # `path: .` uploaded the entire workspace — .git, node_modules, the
+      # Playwright browser cache and storage.db included. Upload only the
+      # reports.
+      - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-report
-          path: .
+          name: test-reports
+          path: |
+            reports/
+            dashboard_frontend/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
