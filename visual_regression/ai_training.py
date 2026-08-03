@@ -3,9 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -34,6 +32,29 @@ from .config import WorkspacePaths
 from .image_compare import compare_arrays
 from .models import AIAssessment, CompareResult, DiffRegion
 
+# The network definition and the serialisation formats moved to ai_models and
+# ai_export. They are re-exported with the `X as X` form because cli.py,
+# dashboard_server.py, model_server.py and several tests import them from here —
+# including a test that monkeypatches _load_legacy_or_hybrid_model on this
+# module, which keeps working because model_server imports it at call time.
+from .ai_models import (  # noqa: E402
+    CompleteSiameseModel as CompleteSiameseModel,
+    FocalLoss as FocalLoss,
+    LegacyRuleMLP as LegacyRuleMLP,
+    PairSample as PairSample,
+    SiameseFusionHead as SiameseFusionHead,
+    _build_backbone as _build_backbone,
+    _build_resnet50_backbone as _build_resnet50_backbone,
+    _require_torch as _require_torch,
+    _require_torchvision as _require_torchvision,
+)
+from .ai_export import (  # noqa: E402
+    _load_legacy_or_hybrid_model as _load_legacy_or_hybrid_model,
+    compile_to_torchscript as compile_to_torchscript,
+    export_to_onnx as export_to_onnx,
+    quantize_onnx_model as quantize_onnx_model,
+)
+
 from .dataset_generator import (
     NO_DEFECT_LABEL_INDEX,
     BENIGN_LABEL_NAME,
@@ -51,36 +72,11 @@ from .dataset_generator import (
 DEFAULT_CONFIDENCE_FLOOR = 0.35
 
 
-def _require_torch():
-    try:
-        import torch
-        import torch.nn as nn
-    except Exception as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError(
-            "PyTorch is required for AI training. Install it first, then rerun train-ai."
-        ) from exc
-    return torch, nn
-
-
-def _require_torchvision():
-    try:
-        from torchvision.models import ResNet50_Weights, resnet50
-    except Exception as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError(
-            "torchvision is required for the ResNet50 Siamese model. Install torchvision, then rerun train-ai."
-        ) from exc
-    return resnet50, ResNet50_Weights
 
 
 
-@dataclass
-class PairSample:
-    baseline_rgb: np.ndarray
-    current_rgb: np.ndarray
-    rule_features: np.ndarray
-    label_index: int
-    label_name: str
-    dom_features: "np.ndarray | None" = None  # Optional DOM features for multimodal training
+
+
 
 
 def _extract_diff_crop(
@@ -571,69 +567,8 @@ def _compute_multiclass_metrics(
     }
 
 
-def _build_resnet50_backbone(pretrained: bool):
-    _, nn = _require_torch()
-    resnet50, ResNet50_Weights = _require_torchvision()
-
-    weights = None
-    weights_source = "random-init"
-    if pretrained:
-        try:
-            weights = ResNet50_Weights.DEFAULT
-            weights_source = "imagenet-default"
-        except Exception:
-            weights = None
-
-    try:
-        model = resnet50(weights=weights)
-    except Exception:
-        model = resnet50(weights=None)
-        weights_source = "random-init"
-
-    feature_dim = int(model.fc.in_features)
-    backbone = nn.Sequential(*list(model.children())[:-1])
-    freeze_backbone = weights_source == "imagenet-default"
-    for name, parameter in backbone.named_parameters():
-        if "7." in name or "layer4" in name:
-            parameter.requires_grad = True
-        else:
-            parameter.requires_grad = not freeze_backbone
-            
-    any_backbone_trainable = any(p.requires_grad for p in backbone.parameters())
-    freeze_backbone = not any_backbone_trainable
-    if freeze_backbone:
-        backbone.eval()
-    return backbone, feature_dim, weights_source, freeze_backbone
 
 
-def _build_backbone(backbone_name: str, pretrained: bool):
-    _, nn = _require_torch()
-    if backbone_name == "efficientnet_b3":
-        try:
-            from torchvision.models import efficientnet_b3, EfficientNet_B3_Weights
-            weights = EfficientNet_B3_Weights.DEFAULT if pretrained else None
-            model = efficientnet_b3(weights=weights)
-            feature_dim = int(model.classifier[1].in_features) # 1536
-            backbone = nn.Sequential(
-                model.features,
-                model.avgpool
-            )
-            freeze_backbone = pretrained
-            if pretrained:
-                for name, parameter in backbone.named_parameters():
-                    if any(x in name for x in [".6.", ".7.", ".8."]):
-                        parameter.requires_grad = True
-                    else:
-                        parameter.requires_grad = False
-            else:
-                for parameter in backbone.parameters():
-                    parameter.requires_grad = True
-            weights_source = "efficientnet-b3-imagenet" if pretrained else "random-init"
-            return backbone, feature_dim, weights_source, freeze_backbone
-        except Exception as exc:
-            logger.warning("Failed to load EfficientNet-B3 backbone (%s). Falling back to ResNet50.", exc)
-            
-    return _build_resnet50_backbone(pretrained=pretrained)
 
 
 def _optimize_temperature(val_logits: np.ndarray, val_targets: np.ndarray) -> float:
@@ -658,76 +593,10 @@ def _optimize_temperature(val_logits: np.ndarray, val_targets: np.ndarray) -> fl
         return 1.3
 
 
-class LegacyRuleMLP:  # pragma: no cover - only used for older checkpoints
-    def __init__(self, torch_module, nn_module, checkpoint: Dict[str, object]):
-        self.torch = torch_module
-        self.model = nn_module.Sequential(
-            nn_module.Linear(int(checkpoint["input_dim"]), 32),
-            nn_module.ReLU(),
-            nn_module.Dropout(0.15),
-            nn_module.Linear(32, 16),
-            nn_module.ReLU(),
-            nn_module.Linear(16, 1),
-        )
-        self.model.load_state_dict(checkpoint["state_dict"])
-        self.model.eval()
-        self.threshold = float(checkpoint.get("threshold", 0.5))
-
-    def score(self, result: CompareResult) -> float:
-        vector = self.torch.tensor(feature_vector_from_result(result), dtype=self.torch.float32).unsqueeze(0)
-        with self.torch.no_grad():
-            return float(self.torch.sigmoid(self.model(vector)).item())
 
 
-class SiameseFusionHead:  
-    def __init__(self, nn_module, embedding_dim: int, rule_dim: int, output_dim: int, num_streams: int = 4):
-        self.model = nn_module.Sequential(
-            nn_module.Linear((embedding_dim * num_streams) + rule_dim, 1024),
-            nn_module.BatchNorm1d(1024),       
-            nn_module.ReLU(),
-            nn_module.Dropout(0.15),         
-            nn_module.Linear(1024, 256),
-            nn_module.BatchNorm1d(256),      
-            nn_module.ReLU(),
-            nn_module.Dropout(0.08),           
-            nn_module.Linear(256, output_dim),
-        )
 
 
-    def __call__(self, left_embedding, right_embedding, rule_features):
-        distance = (left_embedding - right_embedding).abs()
-        combined = self._concat(left_embedding, right_embedding, distance, rule_features)
-        return self.model(combined)
-
-    @staticmethod
-    def _concat(left_embedding, right_embedding, distance, rule_features):
-        import torch
-
-        return torch.cat([left_embedding, right_embedding, distance, rule_features], dim=1)
-
-
-class FocalLoss:
-    def __init__(self, torch_module, weight=None, gamma=2.0, ignore_index=-1):
-        self.torch = torch_module
-        self.weight = weight
-        self.gamma = gamma
-        self.ignore_index = ignore_index
-
-    def __call__(self, input_logits, target_labels):
-        import torch.nn.functional as F
-        
-        # Mask out ignore index
-        mask = target_labels != self.ignore_index
-        input_logits = input_logits[mask]
-        target_labels = target_labels[mask]
-        
-        if target_labels.numel() == 0:
-            return self.torch.tensor(0.0, device=input_logits.device, requires_grad=True)
-
-        ce_loss = F.cross_entropy(input_logits, target_labels, reduction='none', weight=self.weight)
-        pt = self.torch.exp(-ce_loss)
-        focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
-        return focal_loss.mean()
 
 
 def _detect_structural_shift(
@@ -1670,460 +1539,18 @@ except ImportError:
     nn = None
     _ModuleBase = object
 
-class CompleteSiameseModel(_ModuleBase):
-    def __init__(self, backbone, head):
-        super().__init__()
-        self.backbone = backbone
-        self.head = head
-
-    def forward(self, left_image, right_image, rule_features):
-        left_emb = self.backbone(left_image).flatten(1)
-        right_emb = self.backbone(right_image).flatten(1)
-        distance = (left_emb - right_emb).abs()
-
-        emb_dim = left_emb.shape[1]
-        try:
-            head_first = next(self.head.parameters())
-            expected_dim = head_first.shape[1]
-        except Exception:
-            expected_dim = (emb_dim * 3) + rule_features.shape[1]
-
-        if expected_dim >= (emb_dim * 4):
-            diff_img = torch.abs(left_image - right_image)
-            diff_emb = self.backbone(diff_img).flatten(1)
-            combined = torch.cat([left_emb, right_emb, distance, diff_emb, rule_features], dim=1)
-        else:
-            combined = torch.cat([left_emb, right_emb, distance, rule_features], dim=1)
-        return self.head(combined)
 
 
 
 
-def export_to_onnx(model_path: Path):
-    """Export the hybrid PyTorch Siamese model to ONNX format."""
-    torch, nn = _require_torch()
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-    model_type = checkpoint.get("model_type")
-    if model_type == "legacy-rule-mlp" or "classifier_state_dict" not in checkpoint:
-        logger.info(f"[ONNX Export] Model {model_path.name} is a legacy MLP model; skipping ONNX export.")
-        return
-
-    backbone, embedding_dim, _, _ = _build_resnet50_backbone(pretrained=False)
-    backbone.load_state_dict(checkpoint["backbone_state_dict"])
-    backbone.eval()
-
-    class_names = list(checkpoint.get("class_names", []))
-    output_dim = len(class_names) if class_names else 1
-    
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    classifier_state = checkpoint["classifier_state_dict"]
-    first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-    in_features = classifier_state[first_weight_key].shape[1]
-    num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
-
-    head_model = SiameseFusionHead(
-        nn,
-        embedding_dim=embedding_dim,
-        rule_dim=rule_dim,
-        output_dim=output_dim,
-        num_streams=num_streams,
-    ).model
-
-    head_model.load_state_dict(checkpoint["classifier_state_dict"])
-    head_model.eval()
-
-    wrapper_model = CompleteSiameseModel(backbone, head_model)
-    wrapper_model.eval()
-
-    img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
-    dummy_left = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
-    dummy_right = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
-    # Use the actual rule_dim from the model head to handle both old and new DOM-extended models
-    saved_rule_names = list(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    dummy_rule = torch.zeros(1, len(saved_rule_names), dtype=torch.float32)
-
-    onnx_path = model_path.with_suffix(".onnx")
-    logger.info(f"[ONNX Export] Exporting to {onnx_path.name}...")
-
-    torch.onnx.export(
-        wrapper_model,
-        (dummy_left, dummy_right, dummy_rule),
-        str(onnx_path),
-        input_names=["left_image", "right_image", "rule_features"],
-        output_names=["logits"],
-        dynamic_axes={
-            "left_image": {0: "batch_size"},
-            "right_image": {0: "batch_size"},
-            "rule_features": {0: "batch_size"},
-            "logits": {0: "batch_size"},
-        },
-        opset_version=17,
-    )
-
-    try:
-        import onnxruntime as ort
-        ort_sess = ort.InferenceSession(str(onnx_path))
-        
-        rand_left = np.random.randn(1, 3, img_size, img_size).astype(np.float32)
-        rand_right = np.random.randn(1, 3, img_size, img_size).astype(np.float32)
-        rand_rule = np.random.randn(1, len(saved_rule_names)).astype(np.float32)
-
-        with torch.no_grad():
-            pt_out = wrapper_model(
-                torch.tensor(rand_left),
-                torch.tensor(rand_right),
-                torch.tensor(rand_rule)
-            ).numpy()
-
-        ort_out = ort_sess.run(
-            ["logits"],
-            {
-                "left_image": rand_left,
-                "right_image": rand_right,
-                "rule_features": rand_rule
-            }
-        )[0]
-
-        diff = np.max(np.abs(pt_out - ort_out))
-        logger.info(f"[ONNX Validation] Maximum numerical diff: {diff:.2e}")
-    except Exception as e:
-        logger.warning(f"[ONNX Validation Warning] Validation failed: {e}")
-
-    try:
-        meta = {
-            "model_type": model_type,
-            "threshold": float(checkpoint.get("threshold", 0.5)),
-            "image_size": img_size,
-            "class_names": class_names,
-            "accuracy": float(checkpoint.get("accuracy", 1.0)),
-            "samples": int(checkpoint.get("samples", 0)),
-            # Without this, the TorchScript inference path (which reads this
-            # sidecar, not the checkpoint) can't tell a DOM-augmented model
-            # (48-dim rule vector) from a base one (9-dim) and always assumes
-            # 9 — feeding the wrong input width into a model traced with more.
-            "rule_feature_names": list(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES)),
-        }
-        json_path = model_path.with_suffix(".json")
-        json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        logger.info(f"[ONNX Export] Saved metadata sidecar to {json_path.name}")
-    except Exception as e:
-        logger.warning(f"[ONNX Export Warning] Failed to save metadata sidecar: {e}")
 
 
-def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], output_path: Path):
-    """Run static INT8 quantization on the exported ONNX model."""
-    try:
-        import onnx
-        from onnx.shape_inference import infer_shapes
-        from onnxruntime.quantization import quantize_static, QuantType, CalibrationDataReader
-        
-        class ONNXCalibrationDataReader(CalibrationDataReader):
-            def __init__(self, samples, image_size):
-                super().__init__()
-                self.samples = samples
-                self.image_size = image_size
-                self.index = 0
-
-            def get_next(self):
-                if self.index >= len(self.samples):
-                    return None
-                sample = self.samples[self.index]
-                self.index += 1
-                if isinstance(sample, tuple):
-                    baseline_rgb, current_rgb, rule_features = sample[0], sample[1], sample[2]
-                else:
-                    baseline_rgb = sample.baseline_rgb
-                    current_rgb = sample.current_rgb
-                    rule_features = sample.rule_features
-
-                left_batch = normalize_batch_uint8(np.expand_dims(baseline_rgb, 0))
-                right_batch = normalize_batch_uint8(np.expand_dims(current_rgb, 0))
-                # Pad rule features if they don't match the FULL_FEATURE_NAMES dim (48)
-                target_dim = len(FULL_FEATURE_NAMES)
-                if len(rule_features) < target_dim:
-                    rule_features = np.pad(rule_features, (0, target_dim - len(rule_features)), mode="constant")
-                rule_batch = np.expand_dims(rule_features, 0).astype(np.float32)
-                return {
-                    "left_image": left_batch,
-                    "right_image": right_batch,
-                    "rule_features": rule_batch
-                }
-
-        logger.info(f"[ONNX Quantization] Running shape inference on {onnx_path.name}...")
-        model = onnx.load(str(onnx_path))
-        inferred = infer_shapes(model)
-        inferred_path = onnx_path.with_suffix(".inferred.onnx")
-        onnx.save(inferred, str(inferred_path))
-
-        torch, _ = _require_torch()
-        checkpoint = torch.load(onnx_path.with_suffix(".pt"), map_location="cpu", weights_only=False) if onnx_path.with_suffix(".pt").exists() else {}
-        img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
-        reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size)
-
-        logger.info("[ONNX Quantization] Starting static INT8 quantization...")
-        quantize_static(
-            model_input=str(inferred_path),
-            model_output=str(output_path),
-            calibration_data_reader=reader,
-            quant_format=0,
-            activation_type=QuantType.QInt8,
-            weight_type=QuantType.QInt8,
-        )
-        logger.info(f"[ONNX Quantization] Saved quantized model to {output_path.name}")
-
-        if inferred_path.exists():
-            inferred_path.unlink()
-    except Exception as e:
-        logger.warning(f"[ONNX Quantization Warning] Quantization failed: {e}")
 
 
-_cached_loaded_model = None
-_cached_model_path = None
-_cached_model_mtime = None
-_model_cache_lock = threading.Lock()  # Guards the three variables above (thread-safety)
-
-_cached_mtime_time = 0.0
-_cached_mtime_val = None
-_mtime_check_lock = threading.Lock()
 
 
-def _load_legacy_or_hybrid_model(model_path: Path):
-    global _cached_loaded_model, _cached_model_path, _cached_model_mtime
-    global _cached_mtime_time, _cached_mtime_val
-    import os
-    import time
-    
-    now = time.time()
-    with _mtime_check_lock:
-        if now - _cached_mtime_time < 5.0 and _cached_mtime_val is not None:
-            mtime = _cached_mtime_val
-        else:
-            mtime = None
-            try:
-                mtime = os.path.getmtime(model_path)
-                _cached_mtime_time = now
-                _cached_mtime_val = mtime
-            except Exception:
-                pass
-
-    # Fast path: return cached model if path and mtime match.
-    if mtime is not None:
-        with _model_cache_lock:
-            if (
-                _cached_loaded_model is not None
-                and _cached_model_path == model_path
-                and _cached_model_mtime == mtime
-            ):
-                return _cached_loaded_model
-
-    # ── TorchScript fast-load branch (check before ONNX/PyTorch) ────────────
-    torchscript_path = model_path.with_suffix(".torchscript.pt")
-    if torchscript_path.exists():
-        try:
-            torch, _ = _require_torch()
-            json_path_ts = model_path.with_suffix(".json")
-            ts_meta: Dict[str, Any] = {}
-            if json_path_ts.exists():
-                ts_meta = json.loads(json_path_ts.read_text(encoding="utf-8"))
-            scripted = torch.jit.load(str(torchscript_path), map_location="cpu")
-            scripted.eval()
-            class_names_ts = list(ts_meta.get("class_names", []))
-            loaded_dict_ts: Dict[str, Any] = {
-                "type": "torchscript-multiclass" if class_names_ts else "torchscript-binary",
-                "torch": torch,
-                "scripted": scripted,
-                "threshold": float(ts_meta.get("threshold", DEFAULT_CONFIDENCE_FLOOR)),
-                "image_size": int(ts_meta.get("image_size", DEFAULT_IMAGE_SIZE)),
-                "model_type": ts_meta.get("model_type", "resnet50-siamese-rule-fusion-multiclass"),
-                "class_names": class_names_ts,
-                "rule_dim": len(ts_meta.get("rule_feature_names", RULE_FEATURE_NAMES)),
-            }
-            logger.info("[TorchScript] Loaded scripted model from %s", torchscript_path.name)
-            if mtime is not None:
-                with _model_cache_lock:
-                    _cached_loaded_model = loaded_dict_ts
-                    _cached_model_path = model_path
-                    _cached_model_mtime = mtime
-            return loaded_dict_ts
-        except Exception as ts_err:
-            logger.warning(
-                "[TorchScript] Failed to load %s: %s — falling back to ONNX/PyTorch.",
-                torchscript_path.name,
-                ts_err,
-            )
-
-    # Determine if we have ONNX & JSON sidecars
-    onnx_quant_path = model_path.with_suffix(".quant.onnx")
-    onnx_standard_path = model_path.with_suffix(".onnx")
-    json_path = model_path.with_suffix(".json")
-
-    has_onnx = onnx_quant_path.exists() or onnx_standard_path.exists()
-    has_json = json_path.exists()
-
-    if has_onnx and has_json:
-        try:
-            import onnxruntime as ort
-            # Load metadata from JSON
-            meta = json.loads(json_path.read_text(encoding="utf-8"))
-            model_type = meta.get("model_type")
-            class_names = meta.get("class_names", [])
-            threshold = float(meta.get("threshold", 0.5))
-            image_size = int(meta.get("image_size", DEFAULT_IMAGE_SIZE))
-
-            # Select model file
-            onnx_file = onnx_quant_path if onnx_quant_path.exists() else onnx_standard_path
-            logger.info(f"[ONNX Inference] Loading session for {onnx_file.name}...")
-            
-            # Disable unneeded ONNX logging to speed up startup
-            sess_opts = ort.SessionOptions()
-            sess_opts.log_severity_level = 3
-            session = ort.InferenceSession(str(onnx_file), sess_opts)
-
-            loaded_dict = {
-                "type": "onnx-hybrid-multiclass" if class_names else "onnx-hybrid-binary",
-                "session": session,
-                "threshold": threshold,
-                "image_size": image_size,
-                "model_type": model_type,
-                "class_names": class_names,
-            }
-            if mtime is not None:
-                with _model_cache_lock:
-                    _cached_loaded_model = loaded_dict
-                    _cached_model_path = model_path
-                    _cached_model_mtime = mtime
-            return loaded_dict
-        except Exception as e:
-            logger.warning(f"[ONNX Load Warning] Failed to load ONNX session: {e}. Falling back to PyTorch.")
-
-    # Slow path: load from disk (lock NOT held during I/O to avoid blocking other threads)
-    torch, nn = _require_torch()
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-    model_type = str(checkpoint.get("model_type") or "legacy-rule-mlp")
-
-    if model_type == "legacy-rule-mlp" or "classifier_state_dict" not in checkpoint:
-        loaded_dict = {
-            "type": "legacy",
-            "runner": LegacyRuleMLP(torch, nn, checkpoint),
-            "threshold": float(checkpoint.get("threshold", 0.5)),
-        }
-        if mtime is not None:
-            with _model_cache_lock:
-                _cached_loaded_model = loaded_dict
-                _cached_model_path = model_path
-                _cached_model_mtime = mtime
-        return loaded_dict
-
-    backbone_name = checkpoint.get("backbone_name", "resnet50")
-    backbone, embedding_dim, _, _ = _build_backbone(backbone_name, pretrained=bool(checkpoint.get("pretrained_backbone", True)))
-    backbone = backbone.to("cpu")
-    if checkpoint.get("backbone_state_dict"):
-        backbone.load_state_dict(checkpoint["backbone_state_dict"])
-    backbone.eval()
-
-    class_names = list(checkpoint.get("class_names", []))
-    output_dim = len(class_names) if class_names else 1
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    classifier_state = checkpoint["classifier_state_dict"]
-    first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-    in_features = classifier_state[first_weight_key].shape[1]
-    num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
-
-    head = SiameseFusionHead(
-        nn,
-        embedding_dim=embedding_dim,
-        rule_dim=rule_dim,
-        output_dim=output_dim,
-        num_streams=num_streams,
-    ).model
-
-    head.load_state_dict(checkpoint["classifier_state_dict"])
-    head.eval()
-
-    loaded_dict = {
-        "type": "hybrid-multiclass" if class_names else "hybrid-binary",
-        "torch": torch,
-        "backbone": backbone,
-        "head": head,
-        "threshold": float(checkpoint.get("threshold", 0.5)),
-        "image_size": int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE)),
-        "model_type": model_type,
-        "class_names": class_names,
-        "calibrated_temperature": float(checkpoint.get("calibrated_temperature", 1.3)),
-    }
-    if mtime is not None:
-        with _model_cache_lock:
-            _cached_loaded_model = loaded_dict
-            _cached_model_path = model_path
-            _cached_model_mtime = mtime
-    return loaded_dict
 
 
-def compile_to_torchscript(model_path: Path, output_path: Optional[Path] = None) -> Path:
-    """Trace the complete Siamese model with TorchScript and save to a .torchscript.pt file.
-
-    Args:
-        model_path: Path to the saved PyTorch checkpoint (.pt file).
-        output_path: Destination path for the TorchScript file. Defaults to
-            ``model_path.with_suffix('.torchscript.pt')``.
-
-    Returns:
-        The path where the TorchScript model was saved.
-
-    Raises:
-        RuntimeError: If tracing fails for any reason.
-    """
-    torch, nn = _require_torch()
-    output_path = output_path or model_path.with_suffix(".torchscript.pt")
-    logger.info("[TorchScript] Compiling model from %s -> %s", model_path.name, output_path.name)
-
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-    model_type = str(checkpoint.get("model_type") or "")
-    if model_type == "legacy-rule-mlp" or "classifier_state_dict" not in checkpoint:
-        raise RuntimeError(
-            "[TorchScript] Only hybrid ResNet50-Siamese models can be compiled to TorchScript."
-        )
-
-    backbone, embedding_dim, _, _ = _build_resnet50_backbone(pretrained=False)
-    if checkpoint.get("backbone_state_dict"):
-        backbone.load_state_dict(checkpoint["backbone_state_dict"])
-    backbone.eval()
-
-    class_names = list(checkpoint.get("class_names", []))
-    output_dim = len(class_names) if class_names else 1
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    classifier_state = checkpoint["classifier_state_dict"]
-    first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-    in_features = classifier_state[first_weight_key].shape[1]
-    num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
-
-    head_model = SiameseFusionHead(
-        nn,
-        embedding_dim=embedding_dim,
-        rule_dim=rule_dim,
-        output_dim=output_dim,
-        num_streams=num_streams,
-    ).model
-
-    head_model.load_state_dict(checkpoint["classifier_state_dict"])
-    head_model.eval()
-
-    wrapper = CompleteSiameseModel(backbone, head_model)
-    wrapper.eval()
-
-    img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    dummy_left = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
-    dummy_right = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
-    dummy_rule = torch.zeros(1, rule_dim, dtype=torch.float32)
-
-    with torch.no_grad():
-        traced = torch.jit.trace(wrapper, (dummy_left, dummy_right, dummy_rule))
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    traced.save(str(output_path))
-    logger.info("[TorchScript] Saved -> %s", output_path.name)
-    return output_path
 
 
 def _dom_diff_region(result: CompareResult) -> "DiffRegion | None":
