@@ -16,8 +16,24 @@
 # keeps ~270 dev-machine PNGs (Windows-rendered, useless to a Linux runner) from
 # being swept into the repo by `git add .visual-regression/`.
 .visual-regression/baselines/bmk-*/
+# The quantised ONNX (32MB) is the one model artefact that is versioned, via Git
+# LFS, so the CI smoke job can prove the AI path executed. Everything else in
+# models/ is 123-304MB and stays out. Re-included explicitly because
+# `.visual-regression/*` above excludes the whole directory. See
+# docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md.
+!.visual-regression/models/
+.visual-regression/models/*
+!.visual-regression/models/visual_ai.quant.onnx
 # CI writes junit/coverage/benchmark JSON here and uploads it as an artifact.
-reports/
+# live-eval-summary.json is the exception: it is the published classification
+# result (n=500), versioned rather than regenerated per run.
+#
+# `reports/*` rather than `reports/`: git cannot re-include a path whose parent
+# directory is excluded, so the negation below only works if the directory
+# itself stays un-excluded — the same reason .visual-regression/* is written
+# that way above.
+reports/*
+!reports/live-eval-summary.json
 __pycache__/
 *.pyc
 .venv/

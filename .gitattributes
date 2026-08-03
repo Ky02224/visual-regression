@@ -1,0 +1,32 @@
+# The quantised ONNX model is tracked with Git LFS so CI can restore it and
+# assert the AI inference path actually executed — see
+# docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md.
+#
+# ONLY the quantised export is tracked. The other artefacts in models/ are far
+# too large to version at all and stay gitignored:
+#
+#   visual_ai.quant.onnx    32MB   <- tracked here
+#   visual_ai.pt           124MB
+#   visual_ai.onnx         123MB
+#   visual_ai.onnx.data    124MB
+#   visual_ai.ckpt.pt      304MB
+#
+# Git LFS free tier is 1GB of bandwidth per month, so roughly 31 CI restores.
+# If that becomes tight the smoke job can move to a schedule; the detection
+# gate does not depend on the model and is unaffected either way.
+.visual-regression/models/visual_ai.quant.onnx filter=lfs diff=lfs merge=lfs -text
+
+# Normalise line endings so a file committed from Windows and one from a Linux
+# runner do not differ by \r alone. Without this the repo already emits a
+# "LF will be replaced by CRLF" warning on nearly every commit.
+* text=auto
+
+# Binary formats must never be line-ending converted — doing so corrupts them.
+*.png binary
+*.webp binary
+*.jpg binary
+*.jpeg binary
+*.pt binary
+*.onnx binary
+*.pkl binary
+*.zip binary
