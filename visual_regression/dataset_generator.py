@@ -64,34 +64,74 @@ DEFECT_MODE_TO_LABEL = {
 
 
 def _draw_base_ui(seed: int, width: int = 1440, height: int = 900) -> np.ndarray:
+    """Draw a synthetic dashboard-like page.
+
+    Every coordinate is a fraction of `width`/`height`. They used to be pixel
+    literals tuned for the 1440x900 default, which made both parameters a lie:
+    anything narrower than ~600px crashed in `rng.randint(440, width - 160)`
+    with "empty range", and anything shorter than ~830px silently drew its
+    content off the bottom of the canvas.
+    """
     rng = random.Random(seed)
     image = np.full((height, width, 3), 248, dtype=np.uint8)
 
-    cv2.rectangle(image, (0, 0), (width, 88), (28, 62, 106), thickness=-1)
-    cv2.rectangle(image, (40, 116), (360, 820), (255, 255, 255), thickness=-1)
-    cv2.rectangle(image, (396, 116), (width - 40, 820), (255, 255, 255), thickness=-1)
+    def px(fraction: float, total: int) -> int:
+        return max(0, min(total, int(round(fraction * total))))
 
+    topbar_h = px(0.098, height)
+    body_top = px(0.129, height)
+    body_bottom = px(0.911, height)
+    sidebar_left = px(0.028, width)
+    sidebar_right = px(0.25, width)
+    main_left = px(0.275, width)
+    main_right = px(0.972, width)
+
+    cv2.rectangle(image, (0, 0), (width, topbar_h), (28, 62, 106), thickness=-1)
+    cv2.rectangle(image, (sidebar_left, body_top), (sidebar_right, body_bottom), (255, 255, 255), thickness=-1)
+    cv2.rectangle(image, (main_left, body_top), (main_right, body_bottom), (255, 255, 255), thickness=-1)
+
+    nav_h = px(0.069, height)
+    nav_gap = px(0.12, height)
     for idx in range(5):
-        y = 150 + idx * 108
-        cv2.rectangle(image, (72, y), (330, y + 62), (236, 240, 245), thickness=-1)
+        y = px(0.167, height) + idx * nav_gap
+        if y + nav_h >= body_bottom:
+            break
+        cv2.rectangle(image, (px(0.05, width), y), (px(0.229, width), y + nav_h), (236, 240, 245), thickness=-1)
 
     card_colors = [(240, 247, 255), (241, 255, 246), (255, 247, 237), (245, 243, 255)]
+    card_w = px(0.125, width)
+    card_gap = px(0.16, width)
     for idx in range(4):
-        x = 440 + idx * 230
-        cv2.rectangle(image, (x, 160), (x + 180, 270), card_colors[idx], thickness=-1)
+        x = px(0.306, width) + idx * card_gap
+        if x + card_w >= main_right:
+            break
+        cv2.rectangle(image, (x, px(0.178, height)), (x + card_w, px(0.3, height)), card_colors[idx], thickness=-1)
 
+    row_h = px(0.049, height)
+    row_gap = px(0.08, height)
     for idx in range(6):
-        top = 328 + idx * 72
-        cv2.rectangle(image, (440, top), (width - 90, top + 44), (243, 244, 246), thickness=-1)
+        top = px(0.364, height) + idx * row_gap
+        if top + row_h >= body_bottom:
+            break
+        cv2.rectangle(image, (px(0.306, width), top), (px(0.938, width), top + row_h), (243, 244, 246), thickness=-1)
 
-    cv2.putText(image, "Visual Regression Demo", (56, 58), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-    cv2.putText(image, f"seed-{seed}", (width - 190, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (220, 235, 255), 2)
+    title_scale = max(0.3, width / 1440.0)
+    cv2.putText(image, "Visual Regression Demo", (px(0.039, width), px(0.064, height)),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0 * title_scale, (255, 255, 255), max(1, int(2 * title_scale)))
+    cv2.putText(image, f"seed-{seed}", (px(0.868, width), px(0.064, height)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8 * title_scale, (220, 235, 255), max(1, int(2 * title_scale)))
 
+    # Scattered text-line placeholders. The bounds are clamped so a narrow or
+    # short canvas still yields a valid (non-empty) random range.
+    blob_left = px(0.306, width)
+    blob_right = max(blob_left + 1, px(0.889, width))
+    blob_top = px(0.378, height)
+    blob_bottom = max(blob_top + 1, px(0.844, height))
     for _ in range(8):
-        x1 = rng.randint(440, width - 160)
-        y1 = rng.randint(340, 760)
-        x2 = min(width - 80, x1 + rng.randint(50, 120))
-        y2 = min(810, y1 + rng.randint(10, 22))
+        x1 = rng.randint(blob_left, blob_right)
+        y1 = rng.randint(blob_top, blob_bottom)
+        x2 = min(px(0.944, width), x1 + rng.randint(px(0.035, width), max(px(0.035, width) + 1, px(0.083, width))))
+        y2 = min(px(0.9, height), y1 + rng.randint(px(0.011, height), max(px(0.011, height) + 1, px(0.024, height))))
         cv2.rectangle(image, (x1, y1), (x2, y2), (223, 228, 235), thickness=-1)
     return image
 
