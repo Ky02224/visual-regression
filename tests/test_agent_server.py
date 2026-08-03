@@ -21,6 +21,13 @@ from visual_regression.cli import AgentHTTPHandler
 
 
 def _free_port() -> int:
+    """Ask the OS for an unused port.
+
+    Inherently racy — the port is released when this returns — so only use it
+    where the caller does not then bind it. To actually serve on one, bind port
+    0 and read the address back (see the agent_server fixture) so there is no
+    window between choosing and claiming.
+    """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
@@ -29,8 +36,12 @@ def _free_port() -> int:
 @pytest.fixture()
 def agent_server(monkeypatch):
     monkeypatch.setenv("VRT_AGENT_TOKEN", "test-shared-secret")
-    port = _free_port()
-    server = HTTPServer(("127.0.0.1", port), AgentHTTPHandler)
+    # Bind port 0 and let HTTPServer keep whatever the OS assigns. Picking a
+    # port with _free_port() first and binding it afterwards left a gap in which
+    # another test could take it, which showed up as an intermittent
+    # ConnectionError under the full suite and never in isolation.
+    server = HTTPServer(("127.0.0.1", 0), AgentHTTPHandler)
+    port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     yield port
