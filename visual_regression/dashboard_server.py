@@ -421,7 +421,6 @@ from .api.deps import (  # noqa: E402
     _API_KEY_CACHE,
     _API_KEY_LOCK,
     _API_KEY_TTL,
-    get_current_user,
     get_paths_dep,
     get_port_dep,
     get_project_root_dep,
@@ -432,6 +431,7 @@ from .api.deps import (  # noqa: E402
     require_dev_or_admin,
 )
 from .api import auth as auth_routes  # noqa: E402
+from .api import comments as comments_routes  # noqa: E402
 from .api import integrations as integrations_routes  # noqa: E402
 from .api import scheduler_routes  # noqa: E402
 from .api import users as users_routes  # noqa: E402
@@ -439,6 +439,7 @@ from .api import users as users_routes  # noqa: E402
 # Routers are mounted here rather than defined inline. Everything still shares
 # one app and one dependency set; only the definitions moved.
 app.include_router(auth_routes.router)
+app.include_router(comments_routes.router)
 app.include_router(integrations_routes.router)
 app.include_router(scheduler_routes.router)
 app.include_router(users_routes.router)
@@ -842,13 +843,6 @@ def get_ai_suggestions(baseline_name: str = Query(None), run_id: str = Query(Non
     suggestions = get_auto_ignore_suggestions(store, paths, baseline_name, run_id)
     return {"ok": True, "suggestions": suggestions}
 
-@app.get("/api/comments")
-def get_comments(run_id: str = Query(None), store=Depends(get_store_dep), user=Depends(require_auth)):
-    if not run_id:
-        raise HTTPException(status_code=400, detail="Missing run_id parameter")
-    comments = store.list_comments(run_id)
-    return {"ok": True, "comments": comments}
-
 @app.get("/api/runs/{run_id}/export")
 def get_run_export(run_id: str, paths=Depends(get_paths_dep), user=Depends(require_auth)):
     if not run_id or "/" in run_id or ".." in run_id:
@@ -1152,54 +1146,6 @@ def post_ignore_regions(payload: dict, paths=Depends(get_paths_dep), project_roo
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/comments/create")
-def post_comments_create(payload: dict, store=Depends(get_store_dep), user=Depends(get_current_user), authorized=Depends(require_authorized_client)):
-    run_id = str(payload.get("run_id", "")).strip()
-    x_pct = float(payload.get("x_pct", 0.0))
-    y_pct = float(payload.get("y_pct", 0.0))
-    content = str(payload.get("content", "")).strip()
-    if not run_id or not content:
-        raise HTTPException(status_code=400, detail="run_id and content are required")
-    author = user.email if user else ("automation-api" if authorized else "anonymous")
-    comment_id = f"comment-{uuid.uuid4()}"
-    store.add_comment(comment_id, run_id, x_pct, y_pct, author, content)
-    broadcast_event("comment_updated", {"run_id": run_id, "action": "create", "comment_id": comment_id})
-    return {"ok": True, "comment_id": comment_id}
-
-@app.post("/api/comments/delete")
-def post_comments_delete(payload: dict, store=Depends(get_store_dep), user=Depends(get_current_user), authorized=Depends(require_authorized_client)):
-    comment_id = str(payload.get("comment_id", "")).strip()
-    if not comment_id:
-        raise HTTPException(status_code=400, detail="comment_id is required")
-    author = None
-    if hasattr(store, "pool"):
-        rows = store._execute_query("SELECT author FROM comments WHERE id = %s;", (comment_id,), fetch=True)
-        if rows:
-            author = rows[0]["author"]
-    else:
-        with store._connect() as conn:
-            row = conn.execute("SELECT author FROM comments WHERE id = ?;", (comment_id,)).fetchone()
-            if row:
-                author = row["author"]
-    is_admin = user and user.role == "admin"
-    is_author = user and user.email == author
-    if not is_admin and not is_author and not authorized:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    run_id = None
-    if hasattr(store, "pool"):
-        rows = store._execute_query("SELECT run_id FROM comments WHERE id = %s;", (comment_id,), fetch=True)
-        if rows:
-            run_id = rows[0]["run_id"]
-    else:
-        with store._connect() as conn:
-            row = conn.execute("SELECT run_id FROM comments WHERE id = ?;", (comment_id,)).fetchone()
-            if row:
-                run_id = row["run_id"]
-    store.delete_comment(comment_id)
-    if run_id:
-        broadcast_event("comment_updated", {"run_id": run_id, "action": "delete", "comment_id": comment_id})
-    return {"ok": True}
 
 @app.post("/api/ignore-css-selectors")
 def post_ignore_css_selectors(payload: dict, user=Depends(require_dev_or_admin)):

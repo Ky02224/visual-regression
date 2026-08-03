@@ -703,5 +703,28 @@ class PostgresStore:
             for row in rows
         ]
 
+    def get_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
+        """Return one comment, or None. Mirrors SqliteStore.get_comment."""
+        rows = self._execute_query(
+            """
+            SELECT id, run_id, x_pct, y_pct, author, content, created_at
+            FROM comments WHERE id=%s;
+            """,
+            (comment_id,),
+            fetch=True,
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "id": str(row["id"]),
+            "run_id": str(row["run_id"]),
+            "x_pct": float(row["x_pct"]),
+            "y_pct": float(row["y_pct"]),
+            "author": str(row["author"]),
+            "content": str(row["content"]),
+            "created_at": int(row["created_at"]),
+        }
+
     def delete_comment(self, comment_id: str) -> None:
         self._execute_query("DELETE FROM comments WHERE id=%s;", (comment_id,), commit=True)

@@ -678,6 +678,33 @@ class SqliteStore:
             for row in rows
         ]
 
+    def get_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
+        """Return one comment, or None.
+
+        Exists so the HTTP layer can check a comment's author before deleting it
+        without writing SQL of its own — it previously issued two raw queries
+        against this table, with separate branches for sqlite and postgres.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, run_id, x_pct, y_pct, author, content, created_at
+                FROM comments WHERE id=?;
+                """,
+                (comment_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": str(row["id"]),
+            "run_id": str(row["run_id"]),
+            "x_pct": float(row["x_pct"]),
+            "y_pct": float(row["y_pct"]),
+            "author": str(row["author"]),
+            "content": str(row["content"]),
+            "created_at": int(row["created_at"]),
+        }
+
     def delete_comment(self, comment_id: str) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM comments WHERE id=?;", (comment_id,))
