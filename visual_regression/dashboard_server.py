@@ -20,7 +20,7 @@ import threading
 from collections import defaultdict, deque
 
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, Query, UploadFile
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -427,11 +427,12 @@ from .api.deps import (  # noqa: E402
     get_store_dep,
     require_admin,
     require_auth,
-    require_authorized_client,
     require_dev_or_admin,
 )
 from .api import auth as auth_routes  # noqa: E402
 from .api import comments as comments_routes  # noqa: E402
+from .api import files as files_routes  # noqa: E402
+from .api.files import safe_path as files_safe_path  # noqa: E402
 from .api import integrations as integrations_routes  # noqa: E402
 from .api import scheduler_routes  # noqa: E402
 from .api import users as users_routes  # noqa: E402
@@ -452,11 +453,9 @@ _get_github_repo_url_helper = get_github_repo_url
 
 
 def _safe_path_helper(base: Path, relative: str) -> str:
-    target = (base / relative).resolve()
-    base_resolved = base.resolve()
-    if base_resolved not in target.parents and target != base_resolved:
-        return str(base_resolved)
-    return str(target)
+    """Backwards-compatible wrapper around api.files.safe_path."""
+    return str(files_safe_path(base, relative))
+
 
 def _payload_to_args_helper(payload: Dict[str, Any], allowed: Dict[str, str]) -> list[str]:
     args: list[str] = []
@@ -1763,78 +1762,11 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
         "export_url": f"/api/runs/{run_name}/export"
     }
 
-# --- Static File Serving & Catch-All Frontend ---
-
-@app.get("/baseline/{baseline_name}/{version_or_file:path}")
-def get_baseline_file(baseline_name: str, version_or_file: str, paths=Depends(get_paths_dep), authorized=Depends(require_authorized_client)):
-    safe_rel = f"{baseline_name}/{version_or_file}"
-    safe_p = Path(_safe_path_helper(paths.baselines_dir, safe_rel))
-    if not safe_p.is_file() and safe_p.suffix == ".webp":
-        # Fall back to .png artifacts captured before the WebP migration.
-        legacy_p = safe_p.with_suffix(".png")
-        if legacy_p.is_file():
-            safe_p = legacy_p
-    if not safe_p.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(safe_p, headers={"Cache-Control": "public, max-age=3600"})
-
-@app.get("/artifacts/{run_id}/{file_path:path}")
-def get_artifact_file(run_id: str, file_path: str, paths=Depends(get_paths_dep), authorized=Depends(require_authorized_client)):
-    safe_rel = f"{run_id}/{file_path}"
-    safe_p = Path(_safe_path_helper(paths.runs_dir, safe_rel))
-    if not safe_p.is_file() and safe_p.suffix == ".webp":
-        # Fall back to .png artifacts captured before the WebP migration.
-        legacy_p = safe_p.with_suffix(".png")
-        if legacy_p.is_file():
-            safe_p = legacy_p
-    if not safe_p.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(safe_p, headers={"Cache-Control": "public, max-age=3600"})
-
-@app.get("/demo/styles.css")
-def get_demo_styles(project_root=Depends(get_project_root_dep)):
-    # Intentional demo/CI hook, not debug leftovers: setting LENS_DEMO_CSS_INJECT=true
-    # swaps the demo portal's brand color so a baseline captured beforehand shows a
-    # real visual regression, letting us demonstrate/test the tool (and the CI
-    # gatekeeper via `check-ci`) actually catching a color-regression defect.
-    # Scoped tightly to this one route/file and one known CSS property so it can
-    # never be used to inject arbitrary content into other served paths.
-    css_path = project_root / "demo_portal" / "styles.css"
-    if css_path.is_file():
-        if os.environ.get("LENS_DEMO_CSS_INJECT") == "true":
-            content = css_path.read_text(encoding="utf-8")
-            content = content.replace("--brand: #0f5f8f;", "--brand: #ef4444;")
-            return Response(content, media_type="text/css")
-        return FileResponse(css_path)
-    raise HTTPException(status_code=404, detail="File not found")
-
-@app.get("/demo/{file_path:path}")
-def get_demo_file(file_path: str, project_root=Depends(get_project_root_dep)):
-    safe_p = Path(_safe_path_helper(project_root / "demo_portal", file_path))
-    if not safe_p.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(safe_p)
-
-@app.get("/assets/{file_path:path}")
-def get_assets_file(file_path: str, project_root=Depends(get_project_root_dep)):
-    frontend_dir = project_root / "dashboard_frontend" / "dist"
-    safe_p = Path(_safe_path_helper(frontend_dir / "assets", file_path))
-    if not safe_p.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(safe_p)
-
-@app.get("/{path_name:path}")
-def get_frontend_fallback(path_name: str, project_root=Depends(get_project_root_dep)):
-    if path_name.startswith("api/"):
-        raise HTTPException(status_code=404, detail="API route not found")
-    frontend_dir = project_root / "dashboard_frontend" / "dist"
-    safe_p = Path(_safe_path_helper(frontend_dir, path_name))
-    if safe_p.is_file():
-        return FileResponse(safe_p)
-    fallback_index = frontend_dir / "index.html"
-    if fallback_index.is_file():
-        return FileResponse(fallback_index)
-    raise HTTPException(status_code=404, detail="Frontend build missing. Run npm run build.")
+# Static file serving lives in api/files.py. It is mounted HERE, at the end of
+# the module, and not with the other routers near the top: its last route is a
+# catch-all (/{path_name:path}) that would otherwise match every API path
+# defined below the include and shadow the entire API.
+app.include_router(files_routes.router)
 
 
 # --- ASGI to BaseHTTPRequestHandler Wrapper for backward compatibility in Unit Tests ---
