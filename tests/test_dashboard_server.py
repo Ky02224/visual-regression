@@ -396,7 +396,6 @@ def test_comments_api(test_server):
 def test_ai_suggestions_api(test_server):
     import json
     from visual_regression.database import get_store
-    from visual_regression.review_manager import ReviewManager
 
     port, paths = test_server
     store = get_store(paths.db_path)
@@ -419,8 +418,7 @@ def test_ai_suggestions_api(test_server):
     assert cookie_val != ""
 
     # Create 3 failed runs for a baseline in the database and disk
-    manager = ReviewManager(paths)
-    
+
     # Run 1
     dummy_run_1 = {
         "run": "run-f1",

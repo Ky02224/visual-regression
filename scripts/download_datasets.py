@@ -138,7 +138,6 @@ def download_websight(target: int, offset: int = 0) -> int:
 
     # 主要来源
     try:
-        from datasets import load_dataset  # type: ignore
         saved = _stream_dataset_with_timeout(
             "HuggingFaceM4/WebSight", "train", target, OUT_WEBUI, "websight", offset=offset
         )
@@ -165,7 +164,7 @@ def _download_websight_parquet(target: int, offset: int) -> int:
     parquet_path = Path("scratch/datasets/websight_tmp.parquet")
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        print(f"  Downloading parquet shard (~300MB)...")
+        print("  Downloading parquet shard (~300MB)...")
         urllib.request.urlretrieve(url, parquet_path)
         df = pd.read_parquet(parquet_path, columns=["image"])
         for _, row in df.iterrows():
@@ -252,7 +251,7 @@ def main() -> None:
     print("=" * 60)
     print(f"  Target: {WEBUI_TARGET} desktop  +  {RICO_TARGET} mobile ")
     print(f"  Total after download: ~{ WEBUI_TARGET + RICO_TARGET:,} images")
-    print(f"  Estimated download size: ~2.5 - 4 GB")
+    print("  Estimated download size: ~2.5 - 4 GB")
     print()
 
     _require("cv2", "opencv-python")
@@ -285,7 +284,7 @@ def main() -> None:
 
     if manifest:
        
-        print(f"\n  Next step — retrain the AI:")
+        print("\n  Next step — retrain the AI:")
         print(
              f"python -m visual_regression train-ai "
              f"--epochs 10 "

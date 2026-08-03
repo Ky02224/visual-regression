@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 
+import pytest
+
 from visual_regression.config import WorkspacePaths
 from visual_regression.review_manager import ReviewManager
 
@@ -71,19 +73,15 @@ def test_resolve_run_dir_rejects_paths_outside_runs_dir(tmp_path: Path):
     outside_dir.mkdir()
     (outside_dir / "result.json").write_text("{}", encoding="utf-8")
 
+    # `assert False` here would be compiled out under `python -O`, turning both
+    # of these traversal checks into silent no-ops.
     traversal_ref = str(Path("..") / "outside")
-    try:
-        resolved = manager.resolve_run_dir(traversal_ref)
-        assert False, f"expected FileNotFoundError, got {resolved}"
-    except FileNotFoundError:
-        pass
+    with pytest.raises(FileNotFoundError):
+        manager.resolve_run_dir(traversal_ref)
 
     # An absolute path to the same outside directory must also be rejected.
-    try:
-        resolved = manager.resolve_run_dir(str(outside_dir))
-        assert False, f"expected FileNotFoundError, got {resolved}"
-    except FileNotFoundError:
-        pass
+    with pytest.raises(FileNotFoundError):
+        manager.resolve_run_dir(str(outside_dir))
 
     # A legitimate bare run name under runs_dir still resolves normally.
     run_dir = paths.runs_dir / "demo-run"

@@ -262,7 +262,9 @@ async def infer_batch(payload: BatchInferencePayload, sem=Depends(get_semaphore)
             # We can use the batch inference functions if model path is set
             if not _MODEL_PATH:
                 default_path = Path(".visual-regression/models/visual_ai.pt")
-                if default_path.exists():
+                # A single local stat(), and only on the first request before a
+                # model is loaded — not worth an async filesystem dependency.
+                if default_path.exists():  # noqa: ASYNC240
                     load_model(default_path)
                 else:
                     raise HTTPException(status_code=500, detail="No model loaded")

@@ -139,10 +139,10 @@ def _load_public_dataset_images(manifest_path: Path | None, max_images: int | No
     if max_images is not None and by_source:
         num_sources = len(by_source)
         limit_per_source = max(1, max_images // num_sources)
-        for src, src_items in by_source.items():
+        for _src, src_items in by_source.items():
             items_to_load.extend(src_items[:limit_per_source])
     else:
-        for src, src_items in by_source.items():
+        for _src, src_items in by_source.items():
             items_to_load.extend(src_items)
 
     images: List[np.ndarray] = []

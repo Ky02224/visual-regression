@@ -323,7 +323,7 @@ def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, 
         pass
     baseline_arr = cv2.imdecode(np.frombuffer(baseline_png, np.uint8), cv2.IMREAD_COLOR)
     current_png = None
-    for attempt in range(4):
+    for _attempt in range(4):
         page.evaluate("() => document.documentElement.getBoundingClientRect()")
         for _ in range(4):
             page.evaluate("() => new Promise(r => requestAnimationFrame(r))")

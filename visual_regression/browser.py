@@ -866,19 +866,22 @@ def _close_instance(instance, method_name):
         return
     try:
         if inspect.iscoroutinefunction(method):
+            # asyncio.get_event_loop() was deprecated for this use: outside a
+            # running loop it warns today and raises from 3.14 on. Ask for the
+            # running loop explicitly and fall back to a fresh one, which is the
+            # same pair of paths the old code reached via its except branch.
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            try:
+                if loop is not None:
+                    # Another thread owns the loop; hand the close off to it.
                     asyncio.run_coroutine_threadsafe(method(), loop)
                 else:
-                    loop.run_until_complete(
-                        asyncio.wait_for(method(), _CLOSE_TIMEOUT_SECONDS)
-                    )
-            except Exception:
-                try:
                     asyncio.run(asyncio.wait_for(method(), _CLOSE_TIMEOUT_SECONDS))
-                except Exception:
-                    pass
+            except Exception:
+                pass
         else:
             method()
     except Exception:
@@ -1409,9 +1412,13 @@ def capture_websites_parallel(
                 import os
                 port = os.environ.get("VRT_DASHBOARD_PORT")
                 if port:
-                    try:
-                        import urllib.request
+                    # This progress ping is fire-and-forget, but urlopen is
+                    # blocking: called directly it stalls the whole event loop
+                    # for up to its timeout on every capture, serialising work
+                    # that is supposed to run concurrently. Hand it to a thread.
+                    def _emit_progress():
                         import json as _json
+                        import urllib.request
                         url = f"http://127.0.0.1:{port}/api/events/emit"
                         payload = {
                             "type": "capture_progress",
@@ -1428,6 +1435,9 @@ def capture_websites_parallel(
                         )
                         with urllib.request.urlopen(req, timeout=1.0):
                             pass
+
+                    try:
+                        await asyncio.to_thread(_emit_progress)
                     except Exception:
                         pass
                 return res

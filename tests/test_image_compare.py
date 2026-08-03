@@ -300,7 +300,10 @@ def test_rgba_input_raises_instead_of_silently_misbehaving():
     baseline_rgba = np.full((height, width, 4), 200, dtype=np.uint8)
     current_rgba = np.full((height, width, 4), 200, dtype=np.uint8)
 
-    with pytest.raises(Exception):
+    # Naming the type and message pins down WHICH failure this is: a bare
+    # `pytest.raises(Exception)` would also pass if the call started failing for
+    # an unrelated reason, e.g. a typo in the keyword arguments below.
+    with pytest.raises(ValueError, match="could not broadcast input array"):
         compare_arrays(
             baseline=baseline_rgba,
             current=current_rgba,

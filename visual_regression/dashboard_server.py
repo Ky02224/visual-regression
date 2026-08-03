@@ -268,7 +268,7 @@ def get_shared_browser(browser_name: str = "chromium"):
 
 def close_shared_browser():
     if hasattr(_THREAD_LOCAL, "browsers"):
-        for name, browser in list(_THREAD_LOCAL.browsers.items()):
+        for _name, browser in list(_THREAD_LOCAL.browsers.items()):
             if browser is not None:
                 try:
                     browser.close()
@@ -1269,7 +1269,8 @@ def post_bulk_review(payload: dict, paths=Depends(get_paths_dep), store=Depends(
     for run_ref in run_refs:
         try:
             run_dir = manager.resolve_run_dir(str(run_ref))
-            decision = manager.save_decision(
+            # Called for the write it performs; the payload is re-read below.
+            manager.save_decision(
                 run_dir=run_dir,
                 decision=decision_value,
                 decider=decider,
@@ -2180,7 +2181,8 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
         ignore_regions=ignore_regions,
     )
 
-    baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
+    # Called for the copy it performs; the returned path is not needed here.
+    _copy_baseline_into_run(baseline_image_path, run_dir)
     diff_overlay_path = run_dir / "diff_overlay.webp"
     binary_diff_path = run_dir / "binary_diff.webp"
     report_path = run_dir / "report.html"

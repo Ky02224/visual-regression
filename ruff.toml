@@ -1,0 +1,43 @@
+# Lint config for the Python side. Deliberately narrow: this codebase predates
+# any linter, so a broad rule set would bury real problems under thousands of
+# style findings. These are the rules that catch bugs rather than opinions.
+line-length = 140
+target-version = "py311"
+
+exclude = [
+    ".venv",
+    ".visual-regression",
+    "scratch",
+    "dashboard_frontend",
+    "sdk",
+]
+
+[lint]
+# `UP` is deliberately absent. It fired 400 of 443 findings on first run, almost
+# all of them typing.List -> list rewrites across every module. Real defects
+# would have been invisible in that noise, and a gate nobody can pass is a gate
+# nobody reads. Adopt UP later as its own mechanical commit if wanted.
+select = [
+    "F",     # pyflakes — undefined names, unused imports, f-strings with no placeholder
+    "E9",    # syntax / IO errors
+    "B",     # bugbear — mutable defaults, unused loop vars, except-in-finally
+    "ASYNC", # blocking calls inside async defs
+]
+
+ignore = [
+    "B008",  # FastAPI's Depends() in a default is the framework's own idiom
+    "B904",  # raise-from inside except: worth doing, but as its own pass
+    # B905 (zip without strict=) needs a judgement per call site: strict=True
+    # turns a silent truncation into a crash, which is right where the two
+    # sequences must be the same length and wrong where one is deliberately
+    # shorter. Blanket-adding strict=False would only paper over that question.
+    # Left out until someone audits the nine sites individually.
+    "B905",
+]
+
+[lint.per-file-ignores]
+# Tests reach into private helpers on purpose, and star-import fixtures.
+"tests/*" = ["F401", "F811"]
+
+[format]
+quote-style = "preserve"
