@@ -84,16 +84,21 @@ class Scheduler:
         return removed
 
     def enable_job(self, job_id: str, enabled: bool) -> bool:
+        # save_jobs() takes _lock itself, so calling it from inside this method's
+        # own `with self._lock` deadlocked the calling thread outright — and
+        # /api/scheduler/jobs/toggle calls straight into here, so toggling a job
+        # from the dashboard hung that request forever. add_job and remove_job
+        # already release the lock before saving; this now matches them.
         with self._lock:
-            if job_id in self.jobs:
-                self.jobs[job_id].enabled = enabled
-                if enabled:
-                    self.jobs[job_id].next_run = self._calculate_next_run(self.jobs[job_id].cron_expression, time.time())
-                else:
-                    self.jobs[job_id].next_run = None
-                self.save_jobs()
-                return True
-            return False
+            job = self.jobs.get(job_id)
+            if job is None:
+                return False
+            job.enabled = enabled
+            job.next_run = (
+                self._calculate_next_run(job.cron_expression, time.time()) if enabled else None
+            )
+        self.save_jobs()
+        return True
 
     def list_jobs(self) -> List[ScheduledJob]:
         with self._lock:

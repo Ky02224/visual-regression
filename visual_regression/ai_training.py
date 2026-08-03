@@ -1157,8 +1157,18 @@ def train_model(
                     if "class_names" in meta:
                         class_names = list(meta["class_names"])
                         break
-            except Exception:
-                pass
+            except Exception as exc:
+                # Falling through silently leaves class_names at the current
+                # CONSOLIDATED_CLASS_NAMES ordering. If the checkpoint was
+                # trained under a different ordering, every label index then
+                # means something else and the model trains against scrambled
+                # targets — the exact failure this file already warns about in
+                # _class_names_for_model.
+                logger.warning(
+                    "  Could not read class_names from %s (%s: %s). Falling back to "
+                    "CONSOLIDATED_CLASS_NAMES — verify this matches how the checkpoint was trained.",
+                    path.name, type(exc).__name__, exc,
+                )
 
     # --- Streaming datasets (samples generated on-the-fly, no OOM) ---
     train_dataset = StreamingSyntheticDataset(
@@ -1321,8 +1331,16 @@ def train_model(
             if not freeze_backbone and "backbone_state_dict" in ckpt:
                 try:
                     (backbone.module if isinstance(backbone, nn.DataParallel) else backbone).load_state_dict(ckpt["backbone_state_dict"])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Swallowing this silently meant a resume could quietly fall
+                    # back to ImageNet weights and retrain the backbone from
+                    # scratch, with nothing in the log to explain why the run
+                    # took longer and scored differently.
+                    logger.warning(
+                        "  Could not restore backbone weights from checkpoint (%s: %s). "
+                        "Continuing with the pretrained backbone instead — this run is NOT a true resume.",
+                        type(exc).__name__, exc,
+                    )
         else:
             if not freeze_backbone and "backbone_state_dict" in ckpt:
                 (backbone.module if isinstance(backbone, nn.DataParallel) else backbone).load_state_dict(ckpt["backbone_state_dict"])

@@ -100,8 +100,14 @@ class SqliteStore:
             conn.execute("PRAGMA busy_timeout=30000;")
             try:
                 conn.execute("PRAGMA journal_mode=WAL;")
-            except Exception:
-                pass
+            except Exception as exc:
+                # Without WAL, readers block writers and the dashboard's
+                # concurrent reads start hitting "database is locked" under
+                # load. It still works, just far worse — worth knowing about.
+                logger.warning(
+                    "Could not enable WAL journal mode (%s: %s); falling back to the default "
+                    "journal, which serialises readers against writers.", type(exc).__name__, exc,
+                )
         conn.execute("PRAGMA foreign_keys=ON;")
         return conn
 
@@ -117,8 +123,16 @@ class SqliteStore:
                         # but explicit commit is safe and matches PostgresStore signature.
                         try:
                             conn.commit()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # A swallowed commit failure is silent data loss: the
+                            # caller is told the write succeeded and nothing
+                            # reaches disk. The `with` block still commits on a
+                            # clean exit, so this is not re-raised, but it must
+                            # not pass unnoticed.
+                            logger.warning(
+                                "Explicit commit failed for query %.80s (%s: %s); relying on the "
+                                "context manager's commit.", query, type(exc).__name__, exc,
+                            )
                     if fetch:
                         rows = cursor.fetchall()
                         return [dict(row) for row in rows]
@@ -221,22 +235,23 @@ class SqliteStore:
                 );
                 """
             )
-            try:
-                conn.execute("ALTER TABLE runs_index ADD COLUMN decider TEXT;")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute("ALTER TABLE runs_index ADD COLUMN decision_comment TEXT;")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute("ALTER TABLE runs_index ADD COLUMN ai_score REAL;")
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute("ALTER TABLE runs_index ADD COLUMN build_id TEXT;")
-            except sqlite3.OperationalError:
-                pass
+            # Backfill columns added after the table first shipped. SQLite has
+            # no ADD COLUMN IF NOT EXISTS, so "already exists" has to be caught —
+            # but catching every OperationalError also swallowed a locked or
+            # corrupt database, leaving the table quietly missing columns that
+            # later queries reference. Check the existing schema instead, and
+            # let anything unexpected propagate.
+            existing_columns = {
+                str(row["name"]) for row in conn.execute("PRAGMA table_info(runs_index);").fetchall()
+            }
+            for column_name, column_type in (
+                ("decider", "TEXT"),
+                ("decision_comment", "TEXT"),
+                ("ai_score", "REAL"),
+                ("build_id", "TEXT"),
+            ):
+                if column_name not in existing_columns:
+                    conn.execute(f"ALTER TABLE runs_index ADD COLUMN {column_name} {column_type};")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_case ON runs_index(case_name);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_suite ON runs_index(suite_name);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs_index(status);")
@@ -609,8 +624,14 @@ class SqliteStore:
             detail = {}
             try:
                 detail = json.loads(row["detail_json"] or "{}")
-            except Exception:
-                pass
+            except Exception as exc:
+                # An audit row whose detail will not parse is presented as an
+                # empty detail — indistinguishable from an action that genuinely
+                # recorded none. For an audit trail that difference matters.
+                logger.warning(
+                    "Audit log row %s has unparseable detail_json (%s: %s); reporting it as empty.",
+                    row["id"], type(exc).__name__, exc,
+                )
             result.append({
                 "id": row["id"],
                 "timestamp": row["timestamp"],

@@ -345,8 +345,15 @@ def queue_ai_training_sample(paths: WorkspacePaths):
     if last_trained_file.exists():
         try:
             last_trained_count = int(last_trained_file.read_text(encoding="utf-8").strip())
-        except Exception:
-            pass
+        except Exception as exc:
+            # Falling back to 0 makes current_count look like a large backlog,
+            # so the >= 10 check below fires and kicks off a full retrain that
+            # nothing asked for.
+            logger.warning(
+                "[Active Learning] Could not read %s (%s: %s); treating the last-trained count as 0, "
+                "which may trigger an unnecessary retrain.",
+                last_trained_file.name, type(exc).__name__, exc,
+            )
     logger.info(f"[Active Learning] Review decision saved. Current reviews: {current_count}. Last trained: {last_trained_count}.")
     if current_count - last_trained_count >= 10:
         with _ai_review_queue_lock:
@@ -2172,8 +2179,18 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
                 ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
             elif isinstance(r, (list, tuple)) and len(r) == 4:
                 ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
-    except Exception:
-        pass
+    except Exception as exc:
+        # One malformed region aborted the loop and left `ignore_regions`
+        # holding whatever had been parsed so far — so the comparison quietly
+        # ran with some or none of the user's ignore regions applied, and
+        # reported a mismatch in an area they had explicitly excluded. Also
+        # covers a custom_threshold_pct that will not parse, which silently
+        # reverts the case to the default threshold.
+        logger.warning(
+            "Baseline %r has metadata that could not be fully parsed (%s: %s); comparing with "
+            "%d ignore region(s) and threshold %.3f%%.",
+            name, type(exc).__name__, exc, len(ignore_regions), threshold_pct,
+        )
 
     result, diff_overlay, binary_diff = compare_images(
         baseline_path=baseline_image_path, current_path=current_path,
@@ -2563,8 +2580,15 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
         with _API_KEY_LOCK:
             _API_KEY_CACHE["value"] = _seed_key
             _API_KEY_CACHE["expires_at"] = time.time() + _API_KEY_TTL
-    except Exception:
-        pass
+    except Exception as exc:
+        # The cache stays unseeded, so the first automation request has to read
+        # integrations.json itself. Not fatal, but if this is failing because
+        # the file is unreadable, every X-Access-Key check will fail too and the
+        # only symptom would be blanket 401s with nothing explaining them.
+        logger.warning(
+            "Could not pre-seed the automation API key cache (%s: %s); access-key auth will "
+            "fall back to reading integrations.json per request.", type(exc).__name__, exc,
+        )
 
     _display_host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
     _STARTUP_BASE_URL["value"] = f"http://{_display_host}:{port}"

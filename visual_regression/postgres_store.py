@@ -169,22 +169,22 @@ class PostgresStore:
             """,
             commit=True
         )
-        try:
-            self._execute_query("ALTER TABLE runs_index ADD COLUMN decider VARCHAR(255);", commit=True)
-        except Exception:
-            pass
-        try:
-            self._execute_query("ALTER TABLE runs_index ADD COLUMN decision_comment TEXT;", commit=True)
-        except Exception:
-            pass
-        try:
-            self._execute_query("ALTER TABLE runs_index ADD COLUMN ai_score REAL;", commit=True)
-        except Exception:
-            pass
-        try:
-            self._execute_query("ALTER TABLE runs_index ADD COLUMN build_id VARCHAR(255);", commit=True)
-        except Exception:
-            pass
+        # These four columns were added after the table shipped, so an existing
+        # database needs them backfilled. This used to be four ALTER statements
+        # each wrapped in `except Exception: pass` to absorb "column already
+        # exists" — which also absorbed a dropped connection or a permissions
+        # error, leaving the table silently missing columns that later queries
+        # then reference. Postgres has supported IF NOT EXISTS here since 9.6,
+        # so the intent is expressed directly and real failures now surface.
+        for column_ddl in (
+            "decider VARCHAR(255)",
+            "decision_comment TEXT",
+            "ai_score REAL",
+            "build_id VARCHAR(255)",
+        ):
+            self._execute_query(
+                f"ALTER TABLE runs_index ADD COLUMN IF NOT EXISTS {column_ddl};", commit=True
+            )
         self._execute_query("CREATE INDEX IF NOT EXISTS idx_runs_case ON runs_index(case_name);", commit=True)
         self._execute_query("CREATE INDEX IF NOT EXISTS idx_runs_suite ON runs_index(suite_name);", commit=True)
         self._execute_query("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs_index(status);", commit=True)
@@ -650,8 +650,13 @@ class PostgresStore:
             detail = {}
             try:
                 detail = json.loads(row["detail_json"] or "{}")
-            except Exception:
-                pass
+            except Exception as exc:
+                # See SqliteStore.get_audit_logs: an unparseable detail must not
+                # be silently indistinguishable from an empty one.
+                logger.warning(
+                    "Audit log row %s has unparseable detail_json (%s: %s); reporting it as empty.",
+                    row["id"], type(exc).__name__, exc,
+                )
             result.append({
                 "id": row["id"],
                 "timestamp": row["timestamp"],
