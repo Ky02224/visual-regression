@@ -65,21 +65,75 @@ class TestLegacyPngFallback:
         assert _resolve_with_legacy_png(tmp_path, "../../x.webp") == tmp_path.resolve()
 
 
+def _route_paths():
+    """Registered route paths, in order, across FastAPI versions.
+
+    Older versions flattened included routers straight into ``app.routes``.
+    Newer ones (starlette 1.x) keep an ``_IncludedRouter`` wrapper with no
+    ``.path``, so reading ``r.path`` off every entry raises AttributeError —
+    which is exactly how this suite broke against the pinned versions while
+    passing locally on older ones. Expand the wrappers instead of assuming
+    either shape.
+    """
+    import visual_regression.dashboard_server as server
+
+    def expand(routes):
+        out = []
+        for route in routes:
+            if hasattr(route, "path"):
+                out.append(route.path)
+            elif hasattr(route, "original_router"):
+                out.extend(expand(route.original_router.routes))
+        return out
+
+    return expand(server.app.routes)
+
+
+class TestCatchAllDoesNotShadowTheApi:
+    """The behaviour the ordering exists to produce.
+
+    Asserted through the app rather than by introspecting the route table:
+    that is what actually matters, and it does not depend on how a given
+    FastAPI version happens to represent an included router.
+    """
+
+    @staticmethod
+    def _client():
+        from fastapi.testclient import TestClient
+
+        import visual_regression.dashboard_server as server
+        return TestClient(server.app, raise_server_exceptions=False)
+
+    def test_an_api_route_is_not_served_the_spa_fallback(self):
+        response = self._client().get("/api/health")
+        assert response.status_code == 200
+        assert "text/html" not in response.headers.get("content-type", "")
+        assert response.json()
+
+    def test_an_unknown_api_path_404s_instead_of_returning_html(self):
+        """Falling through to index.html would surface as a JSON parse error in
+        the browser, nowhere near the cause."""
+        response = self._client().get("/api/definitely-not-a-route")
+        assert response.status_code == 404
+        assert "text/html" not in response.headers.get("content-type", "")
+
+    def test_a_gated_api_route_still_rejects_rather_than_falling_through(self):
+        """401/403 proves the route matched and its dependency ran; 200 with
+        HTML would mean the catch-all answered instead."""
+        response = self._client().get("/api/users")
+        assert response.status_code in (401, 403)
+
+
 class TestRouteOrdering:
     """Guards the reason api/files is mounted last rather than with the others."""
 
-    @staticmethod
-    def _paths():
-        import visual_regression.dashboard_server as server
-        return [r.path for r in server.app.routes]
-
     def test_the_catch_all_is_the_last_route(self):
-        assert self._paths()[-1] == "/{path_name:path}"
+        assert _route_paths()[-1] == "/{path_name:path}"
 
     def test_no_api_route_is_registered_after_the_catch_all(self):
         """Any API route below the catch-all would be unreachable — the request
         would match /{path_name:path} first and be served index.html."""
-        paths = self._paths()
+        paths = _route_paths()
         after = [p for p in paths[paths.index("/{path_name:path}") + 1:] if p.startswith("/api")]
         assert after == []
 
@@ -88,10 +142,10 @@ class TestRouteOrdering:
         "/api/scheduler/jobs", "/api/integrations", "/api/comments",
     ])
     def test_extracted_routers_are_still_mounted(self, route):
-        assert route in self._paths()
+        assert route in _route_paths()
 
     def test_the_static_routes_come_before_the_catch_all(self):
-        paths = self._paths()
+        paths = _route_paths()
         catch_all = paths.index("/{path_name:path}")
         for route in ("/demo/styles.css", "/assets/{file_path:path}"):
             assert paths.index(route) < catch_all
@@ -99,5 +153,5 @@ class TestRouteOrdering:
     def test_the_specific_demo_css_route_precedes_the_demo_wildcard(self):
         """/demo/styles.css carries the CI colour-injection hook; the wildcard
         would serve the file unmodified and the demo defect would vanish."""
-        paths = self._paths()
+        paths = _route_paths()
         assert paths.index("/demo/styles.css") < paths.index("/demo/{file_path:path}")
