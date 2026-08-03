@@ -41,6 +41,13 @@ RUN playwright install chromium && playwright install-deps chromium
 COPY visual_regression/ ./visual_regression/
 COPY suite.demo.yaml suite.ci-smoke.yaml ./
 
+# suites/ holds suite.benchmark.yaml and the cross-browser/defect suites, and
+# scripts/ holds the generator and scorer for the detection benchmark. Without
+# these the image can serve the dashboard but cannot run the benchmark that
+# demonstrates the tool detects anything.
+COPY suites/ ./suites/
+COPY scripts/ ./scripts/
+
 # The demo portal is the target of every URL in suite.demo.yaml
 # (http://127.0.0.1:8130/demo/...) and is served by dashboard_server's
 # /demo/{file_path} route straight off the filesystem. Without it in the image

@@ -9,14 +9,28 @@
 .visual-regression/*
 !.visual-regression/baselines/
 .visual-regression/baselines/**/versions/
+# The benchmark suite is the one case that must NOT have committed baselines.
+# ci.yml recaptures them from the clean demo pages with --overwrite on every
+# run, immediately before comparing against the ?defect= variants, so a
+# committed copy would be overwritten and never read. Leaving them out also
+# keeps ~270 dev-machine PNGs (Windows-rendered, useless to a Linux runner) from
+# being swept into the repo by `git add .visual-regression/`.
+.visual-regression/baselines/bmk-*/
+# CI writes junit/coverage/benchmark JSON here and uploads it as an artifact.
+reports/
 __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.coverage
+coverage.xml
+.ruff_cache/
 .tmp_ai_studio_review/
 .tmp_figma_review/
 .vscode/
 scratch/
+sdk/node_modules/
+sdk/dist/
 dashboard_frontend/node_modules/
 dashboard_frontend/dist/
 dashboard_frontend/test-results/

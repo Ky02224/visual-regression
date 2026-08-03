@@ -121,17 +121,64 @@ python -m visual_regression.cli evaluate-ai
 The training metadata is written to `.visual-regression\models\visual_ai.json`.
 Evaluation summaries are written to `.visual-regression\reports\ai-eval-*.json` and `.visual-regression\reports\ai-run-eval-*.json`.
 
+## Playwright SDK
+
+`sdk/` is a TypeScript package that lets an existing Playwright suite send
+screenshots to this server, as a drop-in alternative to Percy:
+
+```typescript
+import { visualSnapshot } from '../vr-sdk/dist/index';
+
+test('homepage looks correct', async ({ page }) => {
+  await page.goto('https://example.com');
+  await visualSnapshot(page, 'homepage');
+});
+```
+
+Build it with `cd sdk && npm install && npm run build`. Authentication uses the
+automation access key from the Integrations page (`VR_API_KEY`). See
+[sdk/README.md](sdk/README.md) for the full API.
+
 ## Files
 
 - dashboard UI: `dashboard_frontend/`
 - demo site: `demo_portal/`
 - core backend: `visual_regression/`
+- Playwright SDK: `sdk/`
+- benchmark tooling: `scripts/generate_benchmark_suite.py`, `scripts/benchmark_report.py`
 - runtime artifacts: `.visual-regression/`
+
+## Detection Benchmark
+
+Passing tests show the tool does not raise false alarms. They do not show it
+catches anything. The benchmark is the positive test: it captures baselines from
+the **clean** demo pages, then compares each page loaded with `?defect=<mode>`
+against them. A case that passes is a missed defect.
+
+```powershell
+python scripts\generate_benchmark_suite.py
+python -m visual_regression.cli create-suite-baselines --suite suites\suite.benchmark.yaml --overwrite
+python -m visual_regression.cli run-suite --suite suites\suite.benchmark.yaml --no-junit
+python scripts\benchmark_report.py --json-out reports\benchmark-summary.json
+```
+
+The report gives, per injected defect type:
+
+- **detection rate** — share of defective cases flagged (recall on known-bad input)
+- **false alarms** — control cases (clean vs clean) flagged anyway
+- **AI label accuracy** — of the defects caught, how often the AI named the right
+  change type, scored only on caught cases
+
+Ground truth comes from the injected mode encoded in each case name, not from the
+model's own output, so this is an external benchmark. `benchmark_report.py` exits
+non-zero on any miss, any control-group false alarm, or a partial run, which is
+what lets CI gate on it.
 
 ## Tests
 
 ```powershell
 python -m pytest -q
+python -m ruff check .
 ```
 
 ## CI, Security and Deployment Notes
