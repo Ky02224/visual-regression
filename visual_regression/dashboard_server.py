@@ -138,29 +138,9 @@ _ai_review_queue_count = 0
 _ai_training_in_progress = False
 _last_ai_train_time = 0.0
 
-_SSE_SUBSCRIBERS: list[queue.Queue] = []
-_SSE_SUBSCRIBERS_LOCK = threading.Lock()
-
-def broadcast_event(event_type: str, data: dict):
-    msg = {
-        "type": event_type,
-        "data": data,
-        "timestamp": time.time(),
-    }
-    with _SSE_SUBSCRIBERS_LOCK:
-        dead_queues = []
-        for q in _SSE_SUBSCRIBERS:
-            try:
-                q.put_nowait(msg)
-            except queue.Full:
-                dead_queues.append(q)
-            except Exception:
-                dead_queues.append(q)
-        for dq in dead_queues:
-            try:
-                _SSE_SUBSCRIBERS.remove(dq)
-            except ValueError:
-                pass
+# SSE subscriber registry and broadcast helper moved to api/events.py so the
+# extracted routers can publish events without importing this module back.
+from .api.events import broadcast_event, subscribe, unsubscribe  # noqa: E402
 
 class MetricsCollector:
     def __init__(self):
@@ -996,16 +976,7 @@ def get_run_export(run_id: str, paths=Depends(get_paths_dep), user=Depends(requi
 
 @app.get("/api/events/stream")
 def get_events_stream(_user=Depends(require_auth)):
-    q = queue.Queue(maxsize=100)
-    with _SSE_SUBSCRIBERS_LOCK:
-        if len(_SSE_SUBSCRIBERS) < 50:
-            _SSE_SUBSCRIBERS.append(q)
-        else:
-            try:
-                _SSE_SUBSCRIBERS.pop(0)
-            except IndexError:
-                pass
-            _SSE_SUBSCRIBERS.append(q)
+    q = subscribe()
 
     async def event_generator():
         try:
@@ -1025,10 +996,8 @@ def get_events_stream(_user=Depends(require_auth)):
         except asyncio.CancelledError:
             pass
         finally:
-            with _SSE_SUBSCRIBERS_LOCK:
-                if q in _SSE_SUBSCRIBERS:
-                    _SSE_SUBSCRIBERS.remove(q)
-                    
+            unsubscribe(q)
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/scheduler/jobs")
