@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from visual_regression.api.urls import set_startup_base_url
 from visual_regression.dashboard_server import (
     MetricsCollector,
     _get_base_url_helper,
@@ -209,17 +210,31 @@ class TestMetricsCollector:
 # ---------------------------------------------------------------------------
 
 class TestBaseUrl:
+    """The cache lives in api.urls and has exactly one writer.
+
+    It used to exist in two modules at once — startup wrote one copy while the
+    integrations router read the other — so every link the dashboard built fell
+    back to loopback regardless of where it was actually reachable. Patching
+    api.urls here rather than dashboard_server is what keeps that honest: if the
+    duplicate ever comes back, dashboard_server's re-export stops tracking this
+    and both tests fail.
+    """
+
     def test_falls_back_to_loopback_with_the_given_port(self, monkeypatch):
-        monkeypatch.setattr(
-            "visual_regression.dashboard_server._STARTUP_BASE_URL", {"value": None}
-        )
+        monkeypatch.setattr("visual_regression.api.urls._STARTUP_BASE_URL", {"value": None})
         assert _get_base_url_helper(8130) == "http://127.0.0.1:8130"
 
     def test_prefers_the_url_recorded_at_startup(self, monkeypatch):
         """Behind a reverse proxy the loopback URL is wrong in every link the
         dashboard emits, including the ones sent to Slack and GitHub."""
         monkeypatch.setattr(
-            "visual_regression.dashboard_server._STARTUP_BASE_URL",
+            "visual_regression.api.urls._STARTUP_BASE_URL",
             {"value": "https://lens.example.com"},
         )
         assert _get_base_url_helper(8130) == "https://lens.example.com"
+
+    def test_set_startup_base_url_is_what_startup_calls(self, monkeypatch):
+        """Pins the writer to the same dict the reader uses."""
+        monkeypatch.setattr("visual_regression.api.urls._STARTUP_BASE_URL", {})
+        set_startup_base_url("https://proxy.example.com")
+        assert _get_base_url_helper(9999) == "https://proxy.example.com"
