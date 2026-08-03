@@ -204,8 +204,12 @@ export async function visualSnapshot(
 export function createVisualFixtures(defaults: VisualSnapshotOptions = {}) {
   // Lazy import to avoid pulling in @playwright/test at module-load time
   // so the file can also be used in non-test contexts.
+  // The `as typeof import(...)` is what makes this compile: a bare require()
+  // returns `any`, and TypeScript rejects type arguments on an untyped call, so
+  // `base.extend<{ snapshot: ... }>` below failed with TS2347. The cast is
+  // erased at compile time, so the import stays lazy.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { test: base } = require('@playwright/test');
+  const { test: base } = require('@playwright/test') as typeof import('@playwright/test');
 
   return base.extend<{ snapshot: (name: string, opts?: VisualSnapshotOptions) => Promise<SnapshotResult> }>({
     snapshot: async ({ page }: { page: Page }, use: (fn: (name: string, opts?: VisualSnapshotOptions) => Promise<SnapshotResult>) => Promise<void>) => {

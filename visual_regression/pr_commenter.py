@@ -124,8 +124,12 @@ def post_to_github(markdown_body: str, is_fail: bool, failed_count: int, total_c
                     print(f"Error posting GitHub PR comment: {e}. Retrying in {delay}s (Attempt {attempt}/{max_retries})...")
                     time.sleep(delay)
 
-def main() -> None:
-    paths = WorkspacePaths(root=Path(__file__).parent.parent.resolve() / ".visual-regression")
+def main(paths: WorkspacePaths | None = None) -> None:
+    # `paths` is injectable so this can be exercised against a temp workspace.
+    # Resolving it from __file__ unconditionally made the whole function
+    # untestable: it always pointed at the developer's real .visual-regression.
+    if paths is None:
+        paths = WorkspacePaths(root=Path(__file__).parent.parent.resolve() / ".visual-regression")
     runs_dir = paths.runs_dir
     
     if not runs_dir.exists():
