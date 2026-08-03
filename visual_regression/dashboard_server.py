@@ -29,9 +29,13 @@ from starlette.concurrency import run_in_threadpool
 import uvicorn
 import asyncio
 
-# Setup Logger
+# Setup Logger. configure_logging replaces basicConfig so the output format is
+# selectable: LENS_LOG_FORMAT=json emits one JSON object per line for a log
+# aggregator, and the default stays human-readable text.
+from .logging_setup import configure_logging  # noqa: E402
+
 logger = logging.getLogger("visual_regression.dashboard_server")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+configure_logging()
 
 
 class _ThreadLocalStreamProxy:
@@ -141,6 +145,7 @@ _last_ai_train_time = 0.0
 # SSE subscriber registry and broadcast helper moved to api/events.py so the
 # extracted routers can publish events without importing this module back.
 from .api.events import broadcast_event, subscribe, unsubscribe  # noqa: E402
+from .api.middleware import RequestIdMiddleware  # noqa: E402
 from .api.urls import get_base_url, get_github_repo_url, set_startup_base_url  # noqa: E402
 
 class MetricsCollector:
@@ -375,6 +380,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Outermost of the two so the request id is set before anything else runs and
+# is still set while the response is being assembled.
+app.add_middleware(RequestIdMiddleware)
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
