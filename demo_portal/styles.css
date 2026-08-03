@@ -393,6 +393,32 @@ body {
   justify-content: center;
 }
 
+/* Z-index issue: an element that should sit behind its neighbours stacks on top
+   of them instead, overlapping content. This mode previously had no rules at all,
+   so ?defect=z-index-issue rendered identically to the clean page — every
+   benchmark case for it was undetectable by construction, not by detector failure. */
+.z-index-issue .sidebar {
+  position: relative;
+  z-index: 9000;
+  transform: translateX(90px);
+  box-shadow: 12px 0 24px rgba(0, 0, 0, 0.28);
+}
+
+.z-index-issue .topbar {
+  position: relative;
+  z-index: 1;
+}
+
+/* login.html has no .sidebar — float the locale badge over the form card instead */
+.z-index-issue .locale-badge {
+  position: absolute;
+  z-index: 9000;
+  top: 140px;
+  left: 50%;
+  transform: translateX(-40px) scale(1.6);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;

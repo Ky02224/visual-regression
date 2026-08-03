@@ -11,6 +11,14 @@ import yaml
 class SuiteCase:
     name: str
     url: str
+    # Where the baseline is captured from, when that differs from `url`.
+    # Without this a defect-injection case is self-comparing: create-suite-baselines
+    # captures the baseline from the very URL the run then compares against, so the
+    # two images are pixel-identical and the case can never fail no matter how bad
+    # the injected defect is. Point `baseline_url` at the clean page and `url` at
+    # the defective one to get a case that SHOULD fail — the only kind that proves
+    # the tool detects anything.
+    baseline_url: str | None = None
     browser: str = "chromium"
     device: str | None = None
     viewport: Tuple[int, int] = (1440, 900)
@@ -78,9 +86,11 @@ def load_suite(path: Path) -> List[SuiteCase]:
     for raw in tests:
         if not isinstance(raw, dict):
             raise ValueError(f"Invalid test entry: {raw}")
+        raw_baseline_url = raw.get("baseline_url", defaults.get("baseline_url"))
         case = SuiteCase(
             name=str(raw["name"]),
             url=str(raw["url"]),
+            baseline_url=str(raw_baseline_url) if raw_baseline_url else None,
             browser=str(raw.get("browser", defaults.get("browser", "chromium"))),
             device=raw.get("device", defaults.get("device")),
             viewport=_parse_viewport(raw.get("viewport", defaults.get("viewport", "1440x900"))),

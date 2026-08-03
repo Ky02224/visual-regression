@@ -691,7 +691,7 @@ def cmd_create_multiple_baselines(args, manager: BaselineManager, paths: Workspa
     parallel_results = capture_websites_parallel(configs_and_paths, max_concurrency=concurrency)
 
     # 3. Save baselines
-    for (url, baseline_name, temp_path, item_cfg), (out_path, regions, error) in zip(tasks_to_run, parallel_results):
+    for (url, baseline_name, temp_path, item_cfg), (_out_path, regions, error) in zip(tasks_to_run, parallel_results):
         if error is not None:
             failed += 1
             print(f"[ERROR] {baseline_name}: {error}")
@@ -856,10 +856,17 @@ def cmd_compare_matrix(args, manager: BaselineManager, paths: WorkspacePaths) ->
     return 0 if fail_count == 0 and error_count == 0 else 2
 
 
-def _capture_config_from_case(case: Any, args) -> CaptureConfig:
+def _capture_config_from_case(case: Any, args, for_baseline: bool = False) -> CaptureConfig:
+    # A case may declare a separate `baseline_url` so the baseline comes from the
+    # clean page while the run compares the defective one. Everything else about
+    # the capture (viewport, locale, timezone, waits) stays identical, so the only
+    # difference between the two images is the injected defect.
+    url = case.url
+    if for_baseline and getattr(case, "baseline_url", None):
+        url = case.baseline_url
     return CaptureConfig(
         name=case.name,
-        url=case.url,
+        url=url,
         browser=case.browser,
         device=case.device,
         viewport=case.viewport,
@@ -930,7 +937,7 @@ def cmd_create_suite_baselines(args, manager: BaselineManager, paths: WorkspaceP
                 skipped += 1
                 continue
 
-            capture_cfg = _capture_config_from_case(case, args)
+            capture_cfg = _capture_config_from_case(case, args, for_baseline=True)
             _capture_and_save_baseline(
                 manager=manager,
                 paths=paths,
