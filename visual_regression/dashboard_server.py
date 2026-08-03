@@ -179,15 +179,52 @@ class MetricsCollector:
             self.ai_inferences_total += 1
             self.ai_durations.append(duration)
 
+    # Buckets in seconds, chosen around what these operations actually cost: a
+    # page capture is usually 1-5s, a comparison well under a second, an AI
+    # inference in between. Prometheus histogram buckets are cumulative
+    # ("le" = less than or equal), which is what makes quantiles computable.
+    _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+
+    @classmethod
+    def _histogram(cls, name: str, help_text: str, samples) -> str:
+        """Render one cumulative histogram.
+
+        An average hides the tail. Nine captures at 200ms and one at 40s report
+        a 4s mean and look unremarkable; the histogram shows that as a p99,
+        which is the number worth alerting on.
+        """
+        values = list(samples)
+        lines = [f"# HELP {name} {help_text}", f"# TYPE {name} histogram"]
+        for bound in cls._DURATION_BUCKETS:
+            count = sum(1 for value in values if value <= bound)
+            lines.append(f'{name}_bucket{{le="{bound}"}} {count}')
+        lines.append(f'{name}_bucket{{le="+Inf"}} {len(values)}')
+        lines.append(f"{name}_sum {sum(values):.4f}")
+        lines.append(f"{name}_count {len(values)}")
+        return "\n".join(lines)
+
     def generate_prometheus_text(self, store: Any) -> str:
         try:
             baselines_count = len(store.list_baselines())
         except Exception:
             baselines_count = 0
 
-        avg_capture = sum(self.capture_durations) / len(self.capture_durations) if self.capture_durations else 0.0
-        avg_compare = sum(self.compare_durations) / len(self.compare_durations) if self.compare_durations else 0.0
-        avg_ai = sum(self.ai_durations) / len(self.ai_durations) if self.ai_durations else 0.0
+        # Snapshot under the lock: these deques are appended to from capture and
+        # comparison worker threads while this is rendering.
+        with self._lock:
+            captures = list(self.capture_durations)
+            compares = list(self.compare_durations)
+            ai_runs = list(self.ai_durations)
+
+        avg_capture = sum(captures) / len(captures) if captures else 0.0
+        avg_compare = sum(compares) / len(compares) if compares else 0.0
+        avg_ai = sum(ai_runs) / len(ai_runs) if ai_runs else 0.0
+
+        histograms = "\n\n".join([
+            self._histogram("vrt_capture_duration_seconds", "Screenshot capture duration", captures),
+            self._histogram("vrt_compare_duration_seconds", "Image comparison duration", compares),
+            self._histogram("vrt_ai_inference_duration_seconds", "AI inference duration", ai_runs),
+        ])
 
         return f"""# HELP vrt_baselines_total Total number of baselines
 # TYPE vrt_baselines_total gauge
@@ -224,6 +261,8 @@ vrt_avg_compare_duration_seconds {avg_compare:.4f}
 # HELP vrt_avg_ai_inference_duration_seconds Average AI inference duration
 # TYPE vrt_avg_ai_inference_duration_seconds gauge
 vrt_avg_ai_inference_duration_seconds {avg_ai:.4f}
+
+{histograms}
 """
 
 _metrics = MetricsCollector()

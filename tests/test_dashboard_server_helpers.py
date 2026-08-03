@@ -205,6 +205,78 @@ class TestMetricsCollector:
         assert "vrt_baselines_total 0" in text
 
 
+class _Store:
+    def list_baselines(self):
+        return [1, 2, 3]
+
+
+def _histogram_lines(text: str, metric: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(metric)]
+
+
+class TestPrometheusHistograms:
+    """An average hides the tail: nine captures at 200ms and one at 40s report a
+    4s mean and look fine. These pin the histogram that makes the p99 visible.
+    """
+
+    @staticmethod
+    def _with_samples(*durations):
+        metrics = MetricsCollector()
+        for duration in durations:
+            metrics.record_capture(duration, True)
+        return metrics.generate_prometheus_text(_Store())
+
+    def test_declares_itself_as_a_histogram(self):
+        text = self._with_samples(0.3)
+        assert "# TYPE vrt_capture_duration_seconds histogram" in text
+
+    def test_buckets_are_cumulative(self):
+        """Prometheus requires le-buckets to be non-decreasing; a non-cumulative
+        histogram silently produces nonsense quantiles rather than an error."""
+        text = self._with_samples(0.05, 0.3, 0.8, 3.0, 12.0)
+        counts = [
+            int(line.split()[-1])
+            for line in _histogram_lines(text, "vrt_capture_duration_seconds_bucket")
+        ]
+        assert counts == sorted(counts)
+
+    def test_the_inf_bucket_holds_every_sample(self):
+        text = self._with_samples(0.05, 0.3, 900.0)
+        inf_line = next(
+            line for line in _histogram_lines(text, "vrt_capture_duration_seconds_bucket")
+            if '+Inf' in line
+        )
+        assert inf_line.split()[-1] == "3"
+
+    def test_sum_and_count_match_the_samples(self):
+        text = self._with_samples(1.0, 2.0, 3.0)
+        assert "vrt_capture_duration_seconds_count 3" in text
+        assert "vrt_capture_duration_seconds_sum 6.0000" in text
+
+    def test_a_sample_beyond_the_last_bucket_still_counts(self):
+        """A 900s capture must not vanish from the total just because it exceeds
+        every finite bucket — that is exactly the outlier worth seeing."""
+        text = self._with_samples(900.0)
+        assert "vrt_capture_duration_seconds_count 1" in text
+        assert "vrt_capture_duration_seconds_sum 900.0000" in text
+
+    def test_all_three_histograms_are_emitted(self):
+        text = MetricsCollector().generate_prometheus_text(_Store())
+        for metric in ("vrt_capture_duration_seconds", "vrt_compare_duration_seconds",
+                       "vrt_ai_inference_duration_seconds"):
+            assert f"# TYPE {metric} histogram" in text
+
+    def test_an_empty_histogram_is_still_valid(self):
+        text = MetricsCollector().generate_prometheus_text(_Store())
+        assert "vrt_capture_duration_seconds_count 0" in text
+        assert "vrt_capture_duration_seconds_sum 0.0000" in text
+
+    def test_the_averages_are_still_reported(self):
+        """Kept alongside the histograms so existing dashboards do not break."""
+        text = self._with_samples(2.0, 4.0)
+        assert "vrt_avg_capture_duration_seconds 3.0000" in text
+
+
 # ---------------------------------------------------------------------------
 # Base URL
 # ---------------------------------------------------------------------------
