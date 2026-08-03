@@ -1,15 +1,15 @@
 {
-  "name": "demo-dashboard-zh",
-  "created_at": "2026-07-22T02:28:01.519590+00:00",
-  "updated_at": "2026-08-03T15:41:12.819172+00:00",
+  "name": "demo-home-mobile-zh",
+  "created_at": "2026-07-22T02:28:20.341483+00:00",
+  "updated_at": "2026-08-03T15:41:41.816605+00:00",
   "capture": {
-    "name": "demo-dashboard-zh",
-    "url": "http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN",
+    "name": "demo-home-mobile-zh",
+    "url": "http://127.0.0.1:8130/demo/index.html?lang=zh-CN",
     "browser": "chromium",
-    "device": null,
+    "device": "iPhone 13",
     "viewport": [
-      1440,
-      900
+      390,
+      844
     ],
     "wait_ms": 400,
     "wait_until": "networkidle",
@@ -34,28 +34,22 @@
   },
   "history": [
     {
-      "timestamp": "2026-07-22T02:28:01.519590+00:00",
+      "timestamp": "2026-07-22T02:28:20.341483+00:00",
       "actor": "system",
       "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN"
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=zh-CN"
     },
     {
-      "timestamp": "2026-07-27T09:17:15.027297+00:00",
-      "actor": "system",
-      "source": "website-capture",
-      "url": "http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN"
-    },
-    {
-      "timestamp": "2026-08-03T13:17:46.341887+00:00",
+      "timestamp": "2026-07-22T02:28:28.594289+00:00",
       "actor": "system",
       "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN"
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=zh-CN"
     },
     {
-      "timestamp": "2026-08-03T15:41:12.819172+00:00",
+      "timestamp": "2026-08-03T15:41:41.816605+00:00",
       "actor": "system",
       "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/dashboard.html?lang=zh-CN"
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=zh-CN"
     }
   ],
   "ignore_regions": []

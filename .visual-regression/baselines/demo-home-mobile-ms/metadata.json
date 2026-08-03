@@ -1,10 +1,10 @@
 {
-  "name": "demo-home-mobile",
-  "created_at": "2026-07-22T02:27:50.200518+00:00",
-  "updated_at": "2026-08-03T15:41:17.626640+00:00",
+  "name": "demo-home-mobile-ms",
+  "created_at": "2026-07-22T02:28:15.990007+00:00",
+  "updated_at": "2026-08-03T15:41:37.160667+00:00",
   "capture": {
-    "name": "demo-home-mobile",
-    "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US",
+    "name": "demo-home-mobile-ms",
+    "url": "http://127.0.0.1:8130/demo/index.html?lang=ms-MY",
     "browser": "chromium",
     "device": "iPhone 13",
     "viewport": [
@@ -16,7 +16,7 @@
     "navigation_timeout_ms": 45000,
     "full_page": true,
     "disable_animations": true,
-    "locale": "en-US",
+    "locale": "ms-MY",
     "timezone_id": "Asia/Kuala_Lumpur",
     "color_scheme": "light",
     "extra_headers": {},
@@ -34,28 +34,22 @@
   },
   "history": [
     {
-      "timestamp": "2026-07-22T02:27:50.200518+00:00",
+      "timestamp": "2026-07-22T02:28:15.990007+00:00",
       "actor": "system",
       "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=ms-MY"
     },
     {
-      "timestamp": "2026-07-22T02:28:05.993536+00:00",
+      "timestamp": "2026-07-22T02:28:26.001053+00:00",
       "actor": "system",
       "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=ms-MY"
     },
     {
-      "timestamp": "2026-08-03T13:17:43.522608+00:00",
+      "timestamp": "2026-08-03T15:41:37.160667+00:00",
       "actor": "system",
       "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
-    },
-    {
-      "timestamp": "2026-08-03T15:41:17.626640+00:00",
-      "actor": "system",
-      "source": "suite-bootstrap",
-      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=ms-MY"
     }
   ],
   "ignore_regions": []
