@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -172,6 +173,29 @@ def _consolidate_label(label_name: str) -> str:
         return "font-change"
     return label_name
 
+def _is_known_defect_label(label_name: str) -> bool:
+    """True when `label_name` names a real defect in EITHER taxonomy.
+
+    Run records carry labels from two different spaces. `ai_assessment.label` is
+    the model's own output, so it uses CONSOLIDATED_CLASS_NAMES ("layout-issue",
+    "text-issue"); heuristics and synthetic data use the raw DEFECT_LABELS modes
+    ("layout-shift", "text-truncation"). Testing membership in
+    DEFECT_LABEL_TO_INDEX alone silently discarded every consolidated-only label
+    — measured on this workspace that was 52 of 138 failing runs (38%), and the
+    two labels it dropped, layout-issue and text-issue, are precisely the classes
+    that then scored 0.00 for want of data.
+
+    A benign label is not a defect, so it returns False: a FAIL run the model
+    called "insignificant-change" carries no usable defect ground truth.
+    """
+    if not label_name:
+        return False
+    if label_name in DEFECT_LABEL_TO_INDEX:
+        return True
+    consolidated = _consolidate_label(label_name)
+    return consolidated in CONSOLIDATED_CLASS_NAMES and consolidated != "insignificant-change"
+
+
 def _build_pair_sample(
     baseline: np.ndarray,
     current: np.ndarray,
@@ -210,15 +234,43 @@ def _build_pair_sample(
     )
 
 
+RUN_PAIR_EVAL_FRACTION = 0.2
+
+
+def _run_pair_split(run_dir_name: str) -> str:
+    """Assign a run to "train" or "eval", deterministically and by name.
+
+    Hashing the directory name (rather than shuffling) keeps a given run in the
+    same split across processes and across re-runs, so a model is never
+    evaluated on a pair it was trained on — even when new runs land in between.
+    md5 is used purely as a stable hash here, not for security.
+    """
+    digest = hashlib.md5(run_dir_name.encode("utf-8")).hexdigest()
+    bucket = int(digest[:8], 16) / 0xFFFFFFFF
+    return "eval" if bucket < RUN_PAIR_EVAL_FRACTION else "train"
+
+
 def _load_run_pair_samples(
     paths: WorkspacePaths,
     pixel_threshold: int,
     min_region_area: int,
     class_names: List[str] | None = None,
+    split: str = "all",
 ) -> List[PairSample]:
+    """Load (baseline, current) pairs from stored runs.
+
+    `split` selects "train", "eval" or "all". It exists because this one loader
+    feeds BOTH training (where the pairs are oversampled 15x) and
+    evaluate_model_on_runs; with a single pool the reported run accuracy was a
+    training-set score and carried no information about generalisation.
+    """
+    if split not in {"all", "train", "eval"}:
+        raise ValueError(f"split must be one of 'all', 'train', 'eval' — got {split!r}")
     samples: List[PairSample] = []
     for run_dir in sorted(paths.runs_dir.iterdir(), reverse=True):
         if not run_dir.is_dir():
+            continue
+        if split != "all" and _run_pair_split(run_dir.name) != split:
             continue
         result_file = run_dir / "result.json"
         baseline_path = resolve_image_path(run_dir, "baseline")
@@ -245,7 +297,7 @@ def _load_run_pair_samples(
             label_name = BENIGN_LABEL_NAME
         elif decision_status == "rejected":
             label_name = str(payload.get("ai_assessment", {}).get("label") or "")
-            if label_name not in DEFECT_LABEL_TO_INDEX:
+            if not _is_known_defect_label(label_name):
                 try:
                     from .models import CompareResult
                     res_dict = payload.get("result", {})
@@ -266,7 +318,7 @@ def _load_run_pair_samples(
                 label_name = BENIGN_LABEL_NAME
             else:
                 label_name = str(payload.get("ai_assessment", {}).get("label") or "")
-                if label_name not in DEFECT_LABEL_TO_INDEX:
+                if not _is_known_defect_label(label_name):
                     continue
 
         pair = _build_pair_sample(
@@ -470,7 +522,9 @@ def build_synthetic_dataset(
         logger.info(f"  [{batch_start + len(batch_imgs)}/{total}] {len(samples)} samples so far")
 
     if images is None:
-        samples.extend(_load_run_pair_samples(paths, pixel_threshold=pixel_threshold, min_region_area=min_region_area))
+        samples.extend(_load_run_pair_samples(
+            paths, pixel_threshold=pixel_threshold, min_region_area=min_region_area, split="train"
+        ))
 
     if not samples:
         raise ValueError("No training samples could be created")
@@ -1116,7 +1170,15 @@ def train_model(
         class_names=class_names,
     )
     if include_run_pairs:
-        run_smp = _load_run_pair_samples(paths, pixel_threshold=pixel_threshold, min_region_area=min_region_area, class_names=class_names)
+        # split="train" holds the eval fifth of the runs back so
+        # evaluate_model_on_runs scores generalisation rather than memorisation.
+        run_smp = _load_run_pair_samples(
+            paths,
+            pixel_threshold=pixel_threshold,
+            min_region_area=min_region_area,
+            class_names=class_names,
+            split="train",
+        )
         if run_smp:
             # Oversample real human reviews to balance the dataset against synthetic variants
             oversampled_run_smp = run_smp * run_pair_oversample
@@ -2985,17 +3047,56 @@ def _assess_results_batch_fallback(
     return out
 
 
+def _class_names_for_model(model_path: Path) -> List[str]:
+    """Return the class ordering the model was actually trained with.
+
+    A checkpoint stores its own `class_names`, and resume-training preserves
+    whatever ordering the model was FIRST trained under — which drifts from the
+    current CONSOLIDATED_CLASS_NAMES constant whenever that list is reordered.
+    Inference already reads the stored ordering, so reporting against the
+    constant instead produced two eval reports whose confusion-matrix rows meant
+    different things and could not be compared. Take the ordering from the model.
+    """
+    for candidate in (model_path.with_suffix(".json"), model_path):
+        if not candidate.exists():
+            continue
+        try:
+            if candidate.suffix == ".json":
+                saved = json.loads(candidate.read_text(encoding="utf-8"))
+            else:
+                saved = torch.load(candidate, map_location="cpu", weights_only=False)
+            names = list(saved.get("class_names") or [])
+            if names:
+                if names != CONSOLIDATED_CLASS_NAMES:
+                    logger.warning(
+                        "[evaluate_model_on_runs] %s was trained with a different class ordering "
+                        "than CONSOLIDATED_CLASS_NAMES. Using the model's own ordering: %s",
+                        candidate.name,
+                        names,
+                    )
+                return names
+        except Exception as exc:
+            logger.warning("[evaluate_model_on_runs] Could not read class_names from %s: %s", candidate.name, exc)
+    return list(CONSOLIDATED_CLASS_NAMES)
+
+
 def evaluate_model_on_runs(paths: WorkspacePaths, model_path: Path) -> Dict[str, object]:
-    samples = _load_run_pair_samples(paths, pixel_threshold=20, min_region_area=120)
+    # Ground truth, predictions and the reported matrix must all be indexed in
+    # the SAME space, and that space has to be the model's own — see
+    # _class_names_for_model.
+    class_names = _class_names_for_model(model_path)
+    samples = _load_run_pair_samples(
+        paths, pixel_threshold=20, min_region_area=120, class_names=class_names, split="eval"
+    )
     if not samples:
         return {
             "model_path": str(model_path),
             "samples": 0,
-            "class_names": CONSOLIDATED_CLASS_NAMES,
+            "class_names": class_names,
             "evaluation": _compute_multiclass_metrics(
                 y_true=np.asarray([0], dtype=np.int64),
                 y_pred=np.asarray([0], dtype=np.int64),
-                class_names=CONSOLIDATED_CLASS_NAMES,
+                class_names=class_names,
             ),
         }
 
@@ -3021,15 +3122,15 @@ def evaluate_model_on_runs(paths: WorkspacePaths, model_path: Path) -> Dict[str,
         )
         if sample.label_index < 0:
             continue
-        # assessment.label is the model's own consolidated-space output (the
-        # space it was trained on) — index it against CONSOLIDATED_CLASS_NAMES,
-        # the same space sample.label_index (the ground truth) already uses.
-        # Indexing into DEFECT_LABEL_TO_INDEX here would score predictions
-        # against an unrelated 10-class raw-defect-mode ordering instead.
+        # assessment.label is the model's own output, so index it against the
+        # model's own class ordering — the same space sample.label_index (the
+        # ground truth) was built in above. Indexing into DEFECT_LABEL_TO_INDEX
+        # here would score predictions against an unrelated 10-class
+        # raw-defect-mode ordering instead.
         consolidated_pred = _consolidate_label(assessment.label)
         pred_index = (
-            CONSOLIDATED_CLASS_NAMES.index(consolidated_pred)
-            if consolidated_pred in CONSOLIDATED_CLASS_NAMES
+            class_names.index(consolidated_pred)
+            if consolidated_pred in class_names
             else 0
         )
         predictions.append(pred_index)
@@ -3040,12 +3141,13 @@ def evaluate_model_on_runs(paths: WorkspacePaths, model_path: Path) -> Dict[str,
     metrics = _compute_multiclass_metrics(
         y_true=np.asarray(labels, dtype=np.int64),
         y_pred=np.asarray(predictions, dtype=np.int64),
-        class_names=CONSOLIDATED_CLASS_NAMES,
+        class_names=class_names,
     )
     payload = {
         "model_path": str(model_path),
         "samples": len(samples),
-        "class_names": CONSOLIDATED_CLASS_NAMES,
+        "scored_samples": len(labels),
+        "class_names": class_names,
         "evaluation": metrics,
     }
     output_path = paths.reports_dir / f"ai-run-eval-{model_path.stem}.json"
