@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import socket
 import json
 import queue
@@ -133,9 +132,6 @@ _LOGIN_LIMITER: Dict[str, list[float]] = defaultdict(list)
 _LOGIN_LIMITER_LOCK = threading.Lock()
 _MAX_LOGIN_ATTEMPTS_PER_MINUTE = 10
 
-_API_KEY_CACHE: Dict[str, Any] = {}
-_API_KEY_TTL = 60.0
-_API_KEY_LOCK = threading.Lock()
 
 _ai_review_queue_lock = threading.Lock()
 _ai_review_queue_count = 0
@@ -444,26 +440,32 @@ async def file_not_found_exception_handler(request: Request, exc: FileNotFoundEr
         content={"ok": False, "error": str(exc)},
     )
 
-# FastAPI State Dependencies
-def get_paths_dep(request: Request):
-    if hasattr(request.state, "paths"):
-        return request.state.paths
-    return getattr(app.state, "paths", None)
+# FastAPI state dependencies and the authorisation gates now live in
+# visual_regression.api.deps so routers can import them without importing this
+# module back. Re-exported here because tests and helpers below still refer to
+# them by their original names.
+from .api.deps import (  # noqa: E402
+    _API_KEY_CACHE,
+    _API_KEY_LOCK,
+    _API_KEY_TTL,
+    get_current_user,
+    get_paths_dep,
+    get_port_dep,
+    get_project_root_dep,
+    get_store_dep,
+    require_admin,
+    require_auth,
+    require_authorized_client,
+    require_dev_or_admin,
+)
+from .api import auth as auth_routes  # noqa: E402
+from .api import users as users_routes  # noqa: E402
 
-def get_store_dep(request: Request):
-    if hasattr(request.state, "store"):
-        return request.state.store
-    return getattr(app.state, "store", None)
+# Routers are mounted here rather than defined inline. Everything still shares
+# one app and one dependency set; only the definitions moved.
+app.include_router(auth_routes.router)
+app.include_router(users_routes.router)
 
-def get_project_root_dep(request: Request):
-    if hasattr(request.state, "project_root"):
-        return request.state.project_root
-    return getattr(app.state, "project_root", None)
-
-def get_port_dep(request: Request):
-    if hasattr(request.state, "port"):
-        return request.state.port
-    return getattr(app.state, "port", None)
 
 def _get_base_url_helper(port: int) -> str:
     fixed = _STARTUP_BASE_URL.get("value")
@@ -783,65 +785,6 @@ def _run_cli_action_async_helper(paths, project_root, port, args: list[str], use
     return task_id
 
 # Auth dependency helpers
-def get_current_user(request: Request, store=Depends(get_store_dep)):
-    token = request.cookies.get("lens_session")
-    if not token:
-        return None
-    return store.user_for_session(token)
-
-def require_auth(user=Depends(get_current_user)):
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return user
-
-def require_admin(user=Depends(require_auth)):
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return user
-
-def require_dev_or_admin(request: Request, user=Depends(get_current_user), paths=Depends(get_paths_dep)):
-    incoming = request.headers.get("X-Access-Key") or ""
-    if incoming:
-        now = time.time()
-        with _API_KEY_LOCK:
-            cached = _API_KEY_CACHE
-            if cached.get("expires_at", 0) > now:
-                secure_key = cached["value"]
-            else:
-                manager = IntegrationsManager(paths.root)
-                secure_key = manager.get_config().get("api_key", "")
-                cached["value"] = secure_key
-                cached["expires_at"] = now + _API_KEY_TTL
-        if secure_key and hmac.compare_digest(incoming, secure_key):
-            return True
-    if user and user.role in ("admin", "developer"):
-        return user
-    raise HTTPException(status_code=403, detail="Forbidden")
-
-def check_authorization(request: Request, user=Depends(get_current_user), paths=Depends(get_paths_dep)):
-    # Any authenticated session user (admin/developer/viewer) can view images —
-    # they can already see the run/baseline metadata that links to them via
-    # require_auth, which doesn't gate by role either.
-    if user:
-        return True
-    now = time.time()
-    with _API_KEY_LOCK:
-        cached = _API_KEY_CACHE
-        if cached.get("expires_at", 0) > now:
-            secure_key = cached["value"]
-        else:
-            manager = IntegrationsManager(paths.root)
-            secure_key = manager.get_config().get("api_key", "")
-            cached["value"] = secure_key
-            cached["expires_at"] = now + _API_KEY_TTL
-    incoming = request.headers.get("X-Access-Key") or ""
-    return bool(secure_key) and hmac.compare_digest(incoming, secure_key)
-
-def require_authorized_client(request: Request, is_auth=Depends(check_authorization)):
-    if not is_auth:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return True
-
 # --- API Endpoints ---
 
 @app.get("/api/health")
@@ -870,16 +813,6 @@ def get_actions_task_status(id: str = Query(None), _user=Depends(require_auth)):
     if not status:
         raise HTTPException(status_code=404, detail="Task not found")
     return status
-
-@app.get("/api/auth/me")
-def get_auth_me(user=Depends(get_current_user)):
-    if not user:
-        return {"ok": True, "authenticated": False, "user": None}
-    return {
-        "ok": True,
-        "authenticated": True,
-        "user": {"email": user.email, "role": user.role, "name": user.display_name}
-    }
 
 @app.get("/api/integrations/github/status")
 def get_github_status(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep)):
@@ -1044,11 +977,6 @@ def get_integrations_activity(paths=Depends(get_paths_dep), user=Depends(require
     config = manager.get_config()
     return {"activity": config.get("activity", [])}
 
-@app.get("/api/users")
-def get_users(store=Depends(get_store_dep), user=Depends(require_admin)):
-    users = store.list_users()
-    return {"ok": True, "users": users}
-
 @app.get("/api/runs/{run_id}/export")
 def get_run_export(run_id: str, paths=Depends(get_paths_dep), user=Depends(require_auth)):
     if not run_id or "/" in run_id or ".." in run_id:
@@ -1204,60 +1132,6 @@ async def post_runs_upload(request: Request, paths=Depends(get_paths_dep), proje
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-
-@app.post("/api/auth/login")
-def post_auth_login(payload: dict, request: Request, response: Response, store=Depends(get_store_dep)):
-    email = str(payload.get("email", "")).strip()
-    password = str(payload.get("password", ""))
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password are required")
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    now_ts = time.time()
-    window_start_ts = now_ts - 60.0
-    with _LOGIN_LIMITER_LOCK:
-        recent = [t for t in _LOGIN_LIMITER[client_ip] if t > window_start_ts]
-        if len(recent) >= _MAX_LOGIN_ATTEMPTS_PER_MINUTE:
-            raise HTTPException(status_code=429, detail="Too many login attempts. Please wait a minute before trying again.")
-        recent.append(now_ts)
-        _LOGIN_LIMITER[client_ip] = recent
-    user = store.authenticate(email, password)
-    if not user:
-        store.audit(None, None, "auth.login_failed", {"email": email})
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    with _LOGIN_LIMITER_LOCK:
-        _LOGIN_LIMITER.pop(client_ip, None)
-    old_token = request.cookies.get("lens_session")
-    if old_token:
-        store.delete_session(old_token)
-    token = store.create_session(user.email, ttl_seconds=60 * 60 * 12)
-    response.set_cookie(
-        key="lens_session",
-        value=token,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        max_age=60 * 60 * 12,
-        secure=os.environ.get("LENS_SECURE_COOKIES") == "true",
-    )
-    store.audit(user.email, user.role, "auth.login", {"email": user.email})
-    return {"ok": True, "user": {"email": user.email, "role": user.role}}
-
-@app.post("/api/auth/logout")
-def post_auth_logout(request: Request, response: Response, store=Depends(get_store_dep)):
-    token = request.cookies.get("lens_session")
-    if token:
-        user = store.user_for_session(token)
-        if user:
-            store.audit(user.email, user.role, "auth.logout", {"email": user.email})
-        store.delete_session(token)
-    response.delete_cookie(
-        key="lens_session",
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=os.environ.get("LENS_SECURE_COOKIES") == "true",
-    )
-    return {"ok": True}
 
 @app.post("/api/bulk-review")
 def post_bulk_review(payload: dict, paths=Depends(get_paths_dep), store=Depends(get_store_dep), user=Depends(require_admin)):
@@ -1997,79 +1871,6 @@ def post_integrations_github_connect(paths=Depends(get_paths_dep), port=Depends(
 def post_integrations_github_disconnect(paths=Depends(get_paths_dep), user=Depends(require_admin)):
     manager = IntegrationsManager(paths.root)
     manager.disconnect_github()
-    return {"ok": True}
-
-@app.post("/api/users")
-def post_users(payload: dict, store=Depends(get_store_dep), user=Depends(require_admin)):
-    email = str(payload.get("email", "")).strip()
-    password = str(payload.get("password", ""))
-    role = str(payload.get("role", "viewer")).strip()
-    name = str(payload.get("name", "")).strip()
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password are required")
-    try:
-        store.create_user(email, password, role=role, display_name=name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception:
-        raise HTTPException(status_code=409, detail="User already exists")
-    store.audit(user.email, user.role, "users.create", {"email": email, "role": role})
-    return {"ok": True}
-
-@app.post("/api/users/delete")
-def post_users_delete(payload: dict, store=Depends(get_store_dep), user=Depends(require_admin)):
-    email = str(payload.get("email", "")).strip()
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    if user.email == email.lower():
-        raise HTTPException(status_code=400, detail="Cannot delete your own account")
-    all_users = store.list_users()
-    target = next((u for u in all_users if u.get("email", "").lower() == email.lower()), None)
-    if target and target.get("role") == "admin":
-        admin_count = sum(1 for u in all_users if u.get("role") == "admin")
-        if admin_count <= 1:
-            raise HTTPException(status_code=400, detail="Cannot delete the last admin account")
-    store.delete_user(email)
-    store.audit(user.email, user.role, "users.delete", {"email": email})
-    return {"ok": True}
-
-@app.post("/api/users/update")
-def post_users_update(payload: dict, store=Depends(get_store_dep), user=Depends(require_admin)):
-    email = str(payload.get("email", "")).strip()
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    role = payload.get("role")
-    disabled = payload.get("disabled")
-    password = payload.get("password")
-    display_name = payload.get("display_name")
-    if role is not None:
-        role = str(role).strip()
-    if password is not None:
-        password = str(password) or None
-    if display_name is not None:
-        display_name = str(display_name).strip()
-
-    # Demoting or disabling the last admin is just as much a lockout as
-    # deleting them (require_admin gates every user-management endpoint,
-    # so there would be no way back in) — guard it the same way delete does.
-    would_lose_admin = (role and role != "admin") or disabled is True
-    if would_lose_admin:
-        all_users = store.list_users()
-        target = next((u for u in all_users if u.get("email", "").lower() == email.lower()), None)
-        if target and target.get("role") == "admin":
-            admin_count = sum(1 for u in all_users if u.get("role") == "admin")
-            if admin_count <= 1:
-                raise HTTPException(status_code=400, detail="Cannot demote or disable the last admin account")
-
-    try:
-        store.update_user(
-            email, role=role if role else None,
-            disabled=bool(disabled) if disabled is not None else None,
-            password=password, display_name=display_name,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    store.audit(user.email, user.role, "users.update", {"email": email})
     return {"ok": True}
 
 @app.post("/api/sdk/snapshot")
