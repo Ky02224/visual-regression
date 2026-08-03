@@ -40,9 +40,25 @@ def parse_viewports(viewports_str_or_list: str | list[str] | None) -> list[tuple
             try:
                 w, h = token.split("x", 1)
                 result.append((token, (int(w), int(h))))
-            except Exception:
-                pass
-    return result or [("desktop", VIEWPORT_PRESETS["desktop"])]
+            except Exception as exc:
+                # Dropping this silently meant a typo in --viewport captured at
+                # the desktop default instead, so the run compared against a
+                # baseline taken at a different size and the mismatch looked
+                # like a regression.
+                logger.warning(
+                    "Ignoring unparseable viewport %r (%s: %s). Expected WIDTHxHEIGHT, "
+                    "for example 1440x900.", token, type(exc).__name__, exc,
+                )
+        else:
+            logger.warning(
+                "Ignoring unknown viewport %r. Expected WIDTHxHEIGHT or one of: %s.",
+                token, ", ".join(sorted(VIEWPORT_PRESETS)),
+            )
+
+    if not result:
+        logger.warning("No usable viewport in %r; falling back to the desktop preset.", tokens)
+        return [("desktop", VIEWPORT_PRESETS["desktop"])]
+    return result
 
 
 def validate_url_ssrf(url: str, allow_local: bool = True) -> str:
@@ -1026,6 +1042,9 @@ def _capture_page(page: Any, cfg: CaptureConfig, output_path: Path) -> List[Dict
                             print(f"[AUTO-LOGIN] Auto-detected username selector: {sel}", flush=True)
                             break
                     except Exception:
+                        # Probing a candidate selector: most of them are expected
+                        # not to match, so a failure here is the normal case and
+                        # logging each one would bury the real output.
                         pass
                 if not username_sel:
                     username_sel = 'input[type="text"]'
@@ -1048,6 +1067,9 @@ def _capture_page(page: Any, cfg: CaptureConfig, output_path: Path) -> List[Dict
                             print(f"[AUTO-LOGIN] Auto-detected submit selector: {sel}", flush=True)
                             break
                     except Exception:
+                        # Probing a candidate selector: most of them are expected
+                        # not to match, so a failure here is the normal case and
+                        # logging each one would bury the real output.
                         pass
                 if not submit_sel:
                     submit_sel = 'button'
@@ -1439,6 +1461,9 @@ def capture_websites_parallel(
                     try:
                         await asyncio.to_thread(_emit_progress)
                     except Exception:
+                        # Probing a candidate selector: most of them are expected
+                        # not to match, so a failure here is the normal case and
+                        # logging each one would bury the real output.
                         pass
                 return res
         
