@@ -439,11 +439,13 @@ from .api.deps import (  # noqa: E402
     require_dev_or_admin,
 )
 from .api import auth as auth_routes  # noqa: E402
+from .api import scheduler_routes  # noqa: E402
 from .api import users as users_routes  # noqa: E402
 
 # Routers are mounted here rather than defined inline. Everything still shares
 # one app and one dependency set; only the definitions moved.
 app.include_router(auth_routes.router)
+app.include_router(scheduler_routes.router)
 app.include_router(users_routes.router)
 
 
@@ -999,61 +1001,6 @@ def get_events_stream(_user=Depends(require_auth)):
             unsubscribe(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-@app.get("/api/scheduler/jobs")
-def get_scheduler_jobs(user=Depends(require_auth)):
-    if not _GLOBAL_SCHEDULER:
-        return {"ok": False, "jobs": []}
-    jobs = _GLOBAL_SCHEDULER.list_jobs()
-    from dataclasses import asdict
-    return {"ok": True, "jobs": [asdict(j) for j in jobs]}
-
-@app.post("/api/scheduler/jobs")
-def post_scheduler_jobs(payload: dict, project_root=Depends(get_project_root_dep), user=Depends(require_dev_or_admin)):
-    name = payload.get("name")
-    cron_expression = payload.get("cron_expression")
-    suite_path = payload.get("suite_path")
-    if not name or not cron_expression or not suite_path:
-        raise HTTPException(status_code=400, detail="Missing required fields")
-    if not _GLOBAL_SCHEDULER:
-        raise HTTPException(status_code=500, detail="Scheduler not initialized")
-
-    suite_path = str(suite_path).strip()
-    if not suite_path.lower().endswith((".yaml", ".yml")):
-        raise HTTPException(status_code=400, detail="suite_path must be a .yaml/.yml file")
-    resolved_suite_path = Path(_safe_path_helper(project_root, suite_path))
-    if not resolved_suite_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Suite file not found: {suite_path}")
-    # Store as a path relative to project_root, matching what the scheduler's
-    # subprocess (run with project_root as its cwd) will resolve.
-    safe_suite_path = str(resolved_suite_path.relative_to(project_root.resolve()))
-
-    job_id = _GLOBAL_SCHEDULER.add_job(name, cron_expression, safe_suite_path)
-    broadcast_event("scheduler_updated", {"action": "add", "job_id": job_id})
-    return {"ok": True, "job_id": job_id}
-
-@app.post("/api/scheduler/jobs/delete")
-def post_scheduler_jobs_delete(payload: dict, user=Depends(require_dev_or_admin)):
-    job_id = payload.get("job_id")
-    if not job_id:
-        raise HTTPException(status_code=400, detail="Missing job_id")
-    if not _GLOBAL_SCHEDULER:
-        raise HTTPException(status_code=500, detail="Scheduler not initialized")
-    success = _GLOBAL_SCHEDULER.remove_job(job_id)
-    broadcast_event("scheduler_updated", {"action": "delete", "job_id": job_id})
-    return {"ok": success}
-
-@app.post("/api/scheduler/jobs/toggle")
-def post_scheduler_jobs_toggle(payload: dict, user=Depends(require_dev_or_admin)):
-    job_id = payload.get("job_id")
-    enabled = bool(payload.get("enabled", True))
-    if not job_id:
-        raise HTTPException(status_code=400, detail="Missing job_id")
-    if not _GLOBAL_SCHEDULER:
-        raise HTTPException(status_code=500, detail="Scheduler not initialized")
-    success = _GLOBAL_SCHEDULER.enable_job(job_id, enabled)
-    broadcast_event("scheduler_updated", {"action": "toggle", "job_id": job_id, "enabled": enabled})
-    return {"ok": success}
 
 @app.post("/api/events/emit")
 def post_events_emit(payload: dict, user=Depends(require_dev_or_admin)):
@@ -2239,6 +2186,10 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
     from .scheduler import Scheduler
     _GLOBAL_SCHEDULER = Scheduler(store, paths)
     _GLOBAL_SCHEDULER.start()
+    # Also published on app.state: api/scheduler_routes reads it from there,
+    # because importing the module global would bind it at import time while it
+    # is still None.
+    app.state.scheduler = _GLOBAL_SCHEDULER
     
     app.state.paths = paths
     app.state.project_root = project_root
