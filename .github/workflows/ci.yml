@@ -49,6 +49,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Without this the quantised model checks out as a text pointer file
+          # rather than the ONNX itself, and the AI smoke step below would fail
+          # on a file that looks present but is 130 bytes of metadata.
+          lfs: true
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -183,16 +188,67 @@ jobs:
           python -m visual_regression.cli create-suite-baselines \
             --suite suites/suite.benchmark.yaml --overwrite
 
+      # --no-ai on purpose. Detection is pixel arithmetic and must gate the
+      # build whether or not a model is available, so this step never depends on
+      # LFS having restored one. See ADR 0004: with the model absent the
+      # benchmark still detects 81/81 with 0/9 false alarms, because the
+      # smallest injected defect is eleven times the threshold.
       - name: Run injected-defect benchmark
         timeout-minutes: 20
         run: |
           python -m visual_regression.cli run-suite \
-            --suite suites/suite.benchmark.yaml --no-junit || true
+            --suite suites/suite.benchmark.yaml --no-junit --no-ai || true
 
       - name: Score detection rate
         timeout-minutes: 5
         run: |
           python scripts/benchmark_report.py --json-out reports/benchmark-summary.json
+
+      # Separate from the gate above, and deliberately so: this proves the AI
+      # inference path executes in CI, which is a different claim from "the tool
+      # detects regressions". It cannot measure accuracy — that needs the
+      # labelled evaluation in reports/live-eval-summary.json — so all it
+      # asserts is that a real model was loaded and used.
+      #
+      # decision_source is the evidence. With no model, decision.py records
+      # "pixel-fallback-no-model"; the assertion below is what stops that
+      # fallback from passing silently as if the AI had run.
+      - name: Smoke-test the AI inference path
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          MODEL=.visual-regression/models/visual_ai.quant.onnx
+          if [ ! -s "$MODEL" ] || head -c 40 "$MODEL" | grep -q "git-lfs"; then
+            echo "::error title=Model not restored::$MODEL is missing or is still an LFS pointer. \
+          Check that actions/checkout ran with lfs: true and that the file was pushed with git lfs push."
+            exit 1
+          fi
+
+          python -m visual_regression.cli run-suite \
+            --suite suites/suite.benchmark.yaml --no-junit \
+            --ai-model "$MODEL" || true
+
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          sources = set()
+          for result in Path(".visual-regression/runs").glob("*_bmk-*/result.json"):
+              payload = json.loads(result.read_text(encoding="utf-8"))
+              source = (payload.get("comparison_decision") or {}).get("decision_source", "")
+              if source:
+                  sources.add(source)
+
+          print(f"decision sources: {sorted(sources) or 'none'}")
+          if not sources:
+              sys.exit("No benchmark runs recorded a decision_source.")
+          if any("no-model" in s for s in sources):
+              sys.exit(
+                  "The AI did not run: at least one case fell back to pixel comparison "
+                  "despite a model being present."
+              )
+          print("AI inference path executed for every benchmark case.")
+          PY
 
       # `path: .` uploaded the entire workspace — .git, node_modules, the
       # Playwright browser cache and storage.db included. Upload only the
