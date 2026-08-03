@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import logging
 import os
-import secrets
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,48 +15,26 @@ logger = logging.getLogger(__name__)
 _thread_local = threading.local()
 
 
-def _utc_epoch() -> int:
-    return int(time.time())
+# Password hashing, the epoch helper and AuthUser moved to _base_store so both
+# backends share one definition. postgres_store already imported them from here,
+# so they are re-exported to keep that and any external import working.
+# Re-exported deliberately. These moved to _base_store so both backends share
+# one definition, but postgres_store and several tests already import them from
+# here. The `X as X` form is the conventional way to mark a re-export so a
+# linter does not read it as an unused import and delete it.
+from ._base_store import (  # noqa: E402
+    _PBKDF2_ITERATIONS as _PBKDF2_ITERATIONS,
+    _PBKDF2_LEGACY_ITERATIONS as _PBKDF2_LEGACY_ITERATIONS,
+    AuthUser as AuthUser,
+    BaseStore as BaseStore,
+    _pbkdf2_hash as _pbkdf2_hash,
+    _utc_epoch as _utc_epoch,
+    hash_password as hash_password,
+    verify_password as verify_password,
+)
 
 
-# PBKDF2 iteration counts — OWASP 2023 recommends ≥ 600,000 for SHA-256.
-_PBKDF2_ITERATIONS = 600_000         # Used for all newly created passwords
-_PBKDF2_LEGACY_ITERATIONS = 210_000  # Retained for backward-compat verification
-
-
-def _pbkdf2_hash(password: str, salt: bytes, iterations: int = _PBKDF2_ITERATIONS) -> bytes:
-    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-
-
-def hash_password(password: str) -> Tuple[str, str]:
-    salt = secrets.token_bytes(16)
-    digest = _pbkdf2_hash(password, salt)
-    return salt.hex(), digest.hex()
-
-
-def verify_password(password: str, salt_hex: str, digest_hex: str) -> bool:
-    try:
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(digest_hex)
-    except Exception:
-        return False
-    # Try the current (stronger) iteration count first; fall back to the legacy
-    # count for users whose passwords were hashed before the upgrade.
-    actual = _pbkdf2_hash(password, salt, _PBKDF2_ITERATIONS)
-    if hmac.compare_digest(actual, expected):
-        return True
-    legacy = _pbkdf2_hash(password, salt, _PBKDF2_LEGACY_ITERATIONS)
-    return hmac.compare_digest(legacy, expected)
-
-
-@dataclass(frozen=True)
-class AuthUser:
-    email: str
-    role: str
-    display_name: str = ""
-
-
-class SqliteStore:
+class SqliteStore(BaseStore):
     def __init__(self, db_path: Path):
         import threading
         self.db_path = Path(db_path)
@@ -70,6 +43,11 @@ class SqliteStore:
         self._session_cache = {}  # {token: (expiry_time, AuthUser)}
         self._session_cache_lock = threading.Lock()
         threading.Thread(target=self._cleanup_expired_loop, daemon=True).start()
+
+    def _now(self) -> int:
+        """Read the clock through this module's _utc_epoch so tests that patch it
+        continue to control timestamps written by the shared BaseStore methods."""
+        return _utc_epoch()
 
     def _cleanup_expired_loop(self) -> None:
         import time
@@ -447,125 +425,12 @@ class SqliteStore:
                 )
         self.audit(None, None, "bootstrap.users", {"admin": admin_email, "user": dev_email})
 
-    def create_user(self, email: str, password: str, role: str, display_name: str = "") -> None:
-        email = email.strip().lower()
-        if role not in {"admin", "developer", "viewer"}:
-            raise ValueError("Invalid role")
-        salt_hex, digest_hex = hash_password(password)
-        now = _utc_epoch()
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO users(email, role, password_salt, password_hash, disabled, created_at, display_name) VALUES(?,?,?,?,0,?,?);",
-                (email, role, salt_hex, digest_hex, now, display_name.strip()),
-            )
 
-    def authenticate(self, email: str, password: str) -> Optional[AuthUser]:
-        email = email.strip().lower()
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT email, role, password_salt, password_hash, disabled, display_name FROM users WHERE email=?;",
-                (email,),
-            ).fetchone()
-        if not row:
-            return None
-        if int(row["disabled"] or 0) == 1:
-            return None
-        if not verify_password(password, str(row["password_salt"]), str(row["password_hash"])):
-            return None
-        return AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
 
-    def create_session(self, email: str, ttl_seconds: int = 60 * 60 * 12) -> str:
-        email = email.strip().lower()
-        token = secrets.token_urlsafe(32)
-        now = _utc_epoch()
-        expires_at = now + int(ttl_seconds)
-        with self._connect() as conn:
-            row = conn.execute("SELECT id FROM users WHERE email=?;", (email,)).fetchone()
-            if not row:
-                raise FileNotFoundError("user not found")
-            user_id = int(row["id"])
-            
-            # SS-03: Limit to max 5 concurrent sessions per user (LRU eviction)
-            sessions = conn.execute("SELECT token FROM sessions WHERE user_id=? ORDER BY created_at ASC;", (user_id,)).fetchall()
-            if len(sessions) >= 5:
-                oldest_token = sessions[0]["token"]
-                conn.execute("DELETE FROM sessions WHERE token=?;", (oldest_token,))
-                with self._session_cache_lock:
-                    if oldest_token in self._session_cache:
-                        del self._session_cache[oldest_token]
 
-            conn.execute(
-                "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?);",
-                (token, user_id, now, expires_at),
-            )
-        return token
 
-    def delete_session(self, token: str) -> None:
-        token = (token or "").strip()
-        if not token:
-            return
-        with self._session_cache_lock:
-            if token in self._session_cache:
-                del self._session_cache[token]
-        with self._connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE token=?;", (token,))
 
-    def user_for_session(self, token: str) -> Optional[AuthUser]:
-        token = (token or "").strip()
-        if not token:
-            return None
-        import time
-        now_time = time.time()
-        with self._session_cache_lock:
-            if token in self._session_cache:
-                expiry, user = self._session_cache[token]
-                if now_time < expiry:
-                    return user
-                else:
-                    del self._session_cache[token]
 
-        now = _utc_epoch()
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT u.email AS email, u.role AS role, u.display_name AS display_name, s.expires_at AS expires_at
-                FROM sessions s
-                JOIN users u ON u.id = s.user_id
-                WHERE s.token = ?;
-                """,
-                (token,),
-            ).fetchone()
-            if not row:
-                return None
-            if int(row["expires_at"]) < now:
-                conn.execute("DELETE FROM sessions WHERE token=?;", (token,))
-                return None
-            user = AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
-            with self._session_cache_lock:
-                self._session_cache[token] = (now_time + 5.0, user)
-            return user
-
-    def list_users(self) -> list:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, email, role, disabled, created_at, display_name FROM users ORDER BY created_at ASC;"
-            ).fetchall()
-        return [
-            {
-                "id": int(row["id"]),
-                "email": str(row["email"]),
-                "role": str(row["role"]),
-                "disabled": bool(int(row["disabled"] or 0)),
-                "created_at": int(row["created_at"]),
-                "display_name": str(row["display_name"] or ""),
-            }
-            for row in rows
-        ]
-
-    def delete_user(self, email: str) -> None:
-        email = email.strip().lower()
-        with self._connect() as conn:
-            conn.execute("DELETE FROM users WHERE email=?;", (email,))
 
     def update_user(
         self,
@@ -605,109 +470,11 @@ class SqliteStore:
                 params,
             )
 
-    def audit(self, actor_email: Optional[str], actor_role: Optional[str], action: str, detail: Dict[str, Any]) -> None:
-        payload = json.dumps(detail or {}, ensure_ascii=False)
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO audit_logs(timestamp, actor_email, actor_role, action, detail_json) VALUES(?,?,?,?,?);",
-                (_utc_epoch(), actor_email, actor_role, action, payload),
-            )
 
-    def get_audit_logs(self, limit: int = 200) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, timestamp, actor_email, actor_role, action, detail_json FROM audit_logs ORDER BY timestamp DESC LIMIT ?;",
-                (limit,),
-            ).fetchall()
-        result = []
-        for row in rows:
-            detail = {}
-            try:
-                detail = json.loads(row["detail_json"] or "{}")
-            except Exception as exc:
-                # An audit row whose detail will not parse is presented as an
-                # empty detail — indistinguishable from an action that genuinely
-                # recorded none. For an audit trail that difference matters.
-                logger.warning(
-                    "Audit log row %s has unparseable detail_json (%s: %s); reporting it as empty.",
-                    row["id"], type(exc).__name__, exc,
-                )
-            result.append({
-                "id": row["id"],
-                "timestamp": row["timestamp"],
-                "actor_email": row["actor_email"],
-                "actor_role": row["actor_role"],
-                "action": row["action"],
-                "detail": detail,
-            })
-        return result
 
-    def add_comment(self, comment_id: str, run_id: str, x_pct: float, y_pct: float, author: str, content: str) -> None:
-        content = content[:5000]
-        now = _utc_epoch()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO comments(id, run_id, x_pct, y_pct, author, content, created_at)
-                VALUES(?,?,?,?,?,?,?);
-                """,
-                (comment_id, run_id, x_pct, y_pct, author.strip(), content.strip(), now),
-            )
 
-    def list_comments(self, run_id: str) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, run_id, x_pct, y_pct, author, content, created_at
-                FROM comments
-                WHERE run_id=?
-                ORDER BY created_at ASC;
-                """,
-                (run_id,),
-            ).fetchall()
-        return [
-            {
-                "id": str(row["id"]),
-                "run_id": str(row["run_id"]),
-                "x_pct": float(row["x_pct"]),
-                "y_pct": float(row["y_pct"]),
-                "author": str(row["author"]),
-                "content": str(row["content"]),
-                "created_at": int(row["created_at"]),
-            }
-            for row in rows
-        ]
 
-    def get_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
-        """Return one comment, or None.
 
-        Exists so the HTTP layer can check a comment's author before deleting it
-        without writing SQL of its own — it previously issued two raw queries
-        against this table, with separate branches for sqlite and postgres.
-        """
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT id, run_id, x_pct, y_pct, author, content, created_at
-                FROM comments WHERE id=?;
-                """,
-                (comment_id,),
-            ).fetchone()
-        if not row:
-            return None
-        return {
-            "id": str(row["id"]),
-            "run_id": str(row["run_id"]),
-            "x_pct": float(row["x_pct"]),
-            "y_pct": float(row["y_pct"]),
-            "author": str(row["author"]),
-            "content": str(row["content"]),
-            "created_at": int(row["created_at"]),
-        }
-
-    def delete_comment(self, comment_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM comments WHERE id=?;", (comment_id,))
 
     # ── Bulk operations ───────────────────────────────────────────────────────
 

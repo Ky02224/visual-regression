@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
-import secrets
 import time
 from typing import Any, Dict, List, Optional
 
 # Import helper functions from sqlite_store to avoid duplication
-from .sqlite_store import hash_password, verify_password, AuthUser, _utc_epoch
+from ._base_store import BaseStore, _utc_epoch, hash_password
 
 logger = logging.getLogger(__name__)
 
-class PostgresStore:
+class PostgresStore(BaseStore):
+    # psycopg2 uses %s for every parameter regardless of type.
+    _PLACEHOLDER = "%s"
+
+    def _now(self) -> int:
+        """See BaseStore._now — routed through this module so tests can patch it."""
+        return _utc_epoch()
+
     def __init__(self, db_url: str):
         self.db_url = db_url
         # Lazy load psycopg2 so SQLite users do not need it installed
@@ -473,125 +478,12 @@ class PostgresStore:
             )
         self.audit(None, None, "bootstrap.users", {"admin": admin_email, "user": dev_email})
 
-    def create_user(self, email: str, password: str, role: str, display_name: str = "") -> None:
-        email = email.strip().lower()
-        if role not in {"admin", "developer", "viewer"}:
-            raise ValueError("Invalid role")
-        salt_hex, digest_hex = hash_password(password)
-        now = _utc_epoch()
-        self._execute_query(
-            "INSERT INTO users(email, role, password_salt, password_hash, disabled, created_at, display_name) VALUES(%s,%s,%s,%s,0,%s,%s);",
-            (email, role, salt_hex, digest_hex, now, display_name.strip()),
-            commit=True
-        )
 
-    def authenticate(self, email: str, password: str) -> Optional[AuthUser]:
-        email = email.strip().lower()
-        rows = self._execute_query(
-            "SELECT email, role, password_salt, password_hash, disabled, display_name FROM users WHERE email=%s;",
-            (email,),
-            fetch=True
-        )
-        if not rows:
-            return None
-        row = rows[0]
-        if int(row["disabled"] or 0) == 1:
-            return None
-        if not verify_password(password, str(row["password_salt"]), str(row["password_hash"])):
-            return None
-        return AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
 
-    def create_session(self, email: str, ttl_seconds: int = 60 * 60 * 12) -> str:
-        email = email.strip().lower()
-        token = secrets.token_urlsafe(32)
-        now = _utc_epoch()
-        expires_at = now + int(ttl_seconds)
-        
-        rows = self._execute_query("SELECT id FROM users WHERE email=%s;", (email,), fetch=True)
-        if not rows:
-            raise FileNotFoundError("user not found")
-        user_id = int(rows[0]["id"])
-        
-        # Limit to max 5 concurrent sessions per user (LRU eviction)
-        sessions = self._execute_query("SELECT token FROM sessions WHERE user_id=%s ORDER BY created_at ASC;", (user_id,), fetch=True)
-        if len(sessions) >= 5:
-            oldest_token = sessions[0]["token"]
-            self._execute_query("DELETE FROM sessions WHERE token=%s;", (oldest_token,), commit=True)
-            with self._session_cache_lock:
-                if oldest_token in self._session_cache:
-                    del self._session_cache[oldest_token]
 
-        self._execute_query(
-            "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(%s,%s,%s,%s);",
-            (token, user_id, now, expires_at),
-            commit=True
-        )
-        return token
 
-    def delete_session(self, token: str) -> None:
-        token = (token or "").strip()
-        if not token:
-            return
-        with self._session_cache_lock:
-            if token in self._session_cache:
-                del self._session_cache[token]
-        self._execute_query("DELETE FROM sessions WHERE token=%s;", (token,), commit=True)
 
-    def user_for_session(self, token: str) -> Optional[AuthUser]:
-        token = (token or "").strip()
-        if not token:
-            return None
-        now_time = time.time()
-        with self._session_cache_lock:
-            if token in self._session_cache:
-                expiry, user = self._session_cache[token]
-                if now_time < expiry:
-                    return user
-                else:
-                    del self._session_cache[token]
 
-        now = _utc_epoch()
-        rows = self._execute_query(
-            """
-            SELECT u.email AS email, u.role AS role, u.display_name AS display_name, s.expires_at AS expires_at
-            FROM sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.token = %s;
-            """,
-            (token,),
-            fetch=True
-        )
-        if not rows:
-            return None
-        row = rows[0]
-        if int(row["expires_at"]) < now:
-            self._execute_query("DELETE FROM sessions WHERE token=%s;", (token,), commit=True)
-            return None
-        user = AuthUser(email=str(row["email"]), role=str(row["role"]), display_name=str(row["display_name"] or ""))
-        with self._session_cache_lock:
-            self._session_cache[token] = (now_time + 5.0, user)
-        return user
-
-    def list_users(self) -> list:
-        rows = self._execute_query(
-            "SELECT id, email, role, disabled, created_at, display_name FROM users ORDER BY created_at ASC;",
-            fetch=True
-        )
-        return [
-            {
-                "id": int(row["id"]),
-                "email": str(row["email"]),
-                "role": str(row["role"]),
-                "disabled": bool(int(row["disabled"] or 0)),
-                "created_at": int(row["created_at"]),
-                "display_name": str(row["display_name"] or ""),
-            }
-            for row in rows
-        ]
-
-    def delete_user(self, email: str) -> None:
-        email = email.strip().lower()
-        self._execute_query("DELETE FROM users WHERE email=%s;", (email,), commit=True)
 
     def update_user(
         self,
@@ -631,100 +523,8 @@ class PostgresStore:
             commit=True
         )
 
-    def audit(self, actor_email: Optional[str], actor_role: Optional[str], action: str, detail: Dict[str, Any]) -> None:
-        payload = json.dumps(detail or {}, ensure_ascii=False)
-        self._execute_query(
-            "INSERT INTO audit_logs(timestamp, actor_email, actor_role, action, detail_json) VALUES(%s,%s,%s,%s,%s);",
-            (_utc_epoch(), actor_email, actor_role, action, payload),
-            commit=True
-        )
 
-    def get_audit_logs(self, limit: int = 200) -> List[Dict[str, Any]]:
-        rows = self._execute_query(
-            "SELECT id, timestamp, actor_email, actor_role, action, detail_json FROM audit_logs ORDER BY timestamp DESC LIMIT %s;",
-            (limit,),
-            fetch=True
-        )
-        result = []
-        for row in rows:
-            detail = {}
-            try:
-                detail = json.loads(row["detail_json"] or "{}")
-            except Exception as exc:
-                # See SqliteStore.get_audit_logs: an unparseable detail must not
-                # be silently indistinguishable from an empty one.
-                logger.warning(
-                    "Audit log row %s has unparseable detail_json (%s: %s); reporting it as empty.",
-                    row["id"], type(exc).__name__, exc,
-                )
-            result.append({
-                "id": row["id"],
-                "timestamp": row["timestamp"],
-                "actor_email": row["actor_email"],
-                "actor_role": row["actor_role"],
-                "action": row["action"],
-                "detail": detail,
-            })
-        return result
 
-    def add_comment(self, comment_id: str, run_id: str, x_pct: float, y_pct: float, author: str, content: str) -> None:
-        content = content[:5000]
-        now = _utc_epoch()
-        self._execute_query(
-            """
-            INSERT INTO comments(id, run_id, x_pct, y_pct, author, content, created_at)
-            VALUES(%s,%s,%s,%s,%s,%s,%s);
-            """,
-            (comment_id, run_id, x_pct, y_pct, author.strip(), content.strip(), now),
-            commit=True
-        )
 
-    def list_comments(self, run_id: str) -> List[Dict[str, Any]]:
-        rows = self._execute_query(
-            """
-            SELECT id, run_id, x_pct, y_pct, author, content, created_at
-            FROM comments
-            WHERE run_id=%s
-            ORDER BY created_at ASC;
-            """,
-            (run_id,),
-            fetch=True
-        )
-        return [
-            {
-                "id": str(row["id"]),
-                "run_id": str(row["run_id"]),
-                "x_pct": float(row["x_pct"]),
-                "y_pct": float(row["y_pct"]),
-                "author": str(row["author"]),
-                "content": str(row["content"]),
-                "created_at": int(row["created_at"]),
-            }
-            for row in rows
-        ]
 
-    def get_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
-        """Return one comment, or None. Mirrors SqliteStore.get_comment."""
-        rows = self._execute_query(
-            """
-            SELECT id, run_id, x_pct, y_pct, author, content, created_at
-            FROM comments WHERE id=%s;
-            """,
-            (comment_id,),
-            fetch=True,
-        )
-        if not rows:
-            return None
-        row = rows[0]
-        return {
-            "id": str(row["id"]),
-            "run_id": str(row["run_id"]),
-            "x_pct": float(row["x_pct"]),
-            "y_pct": float(row["y_pct"]),
-            "author": str(row["author"]),
-            "content": str(row["content"]),
-            "created_at": int(row["created_at"]),
-        }
 
-    def delete_comment(self, comment_id: str) -> None:
-        self._execute_query("DELETE FROM comments WHERE id=%s;", (comment_id,), commit=True)
