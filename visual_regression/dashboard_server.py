@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import threading
 from collections import defaultdict, deque
@@ -141,6 +141,7 @@ _last_ai_train_time = 0.0
 # SSE subscriber registry and broadcast helper moved to api/events.py so the
 # extracted routers can publish events without importing this module back.
 from .api.events import broadcast_event, subscribe, unsubscribe  # noqa: E402
+from .api.urls import get_base_url, get_github_repo_url, set_startup_base_url  # noqa: E402
 
 class MetricsCollector:
     def __init__(self):
@@ -222,8 +223,6 @@ vrt_avg_ai_inference_duration_seconds {avg_ai:.4f}
 
 _metrics = MetricsCollector()
 _GLOBAL_SCHEDULER = None
-_GITHUB_REPO_URL_CACHE: Dict[str, Any] = {}
-_STARTUP_BASE_URL: Dict[str, Any] = {}
 _THREAD_LOCAL = threading.local()
 
 def get_shared_browser(browser_name: str = "chromium"):
@@ -355,12 +354,6 @@ from .dashboard_data import build_dashboard_snapshot, _DashboardCache
 from .review_manager import ReviewManager
 from .integrations_manager import IntegrationsManager
 from .database import get_store
-from .github_oauth import (
-    build_authorize_url,
-    exchange_code_for_token,
-    fetch_github_user,
-    oauth_settings,
-)
 
 # FastAPI App Setup
 app = FastAPI(title="The Lens Dashboard API")
@@ -439,38 +432,23 @@ from .api.deps import (  # noqa: E402
     require_dev_or_admin,
 )
 from .api import auth as auth_routes  # noqa: E402
+from .api import integrations as integrations_routes  # noqa: E402
 from .api import scheduler_routes  # noqa: E402
 from .api import users as users_routes  # noqa: E402
 
 # Routers are mounted here rather than defined inline. Everything still shares
 # one app and one dependency set; only the definitions moved.
 app.include_router(auth_routes.router)
+app.include_router(integrations_routes.router)
 app.include_router(scheduler_routes.router)
 app.include_router(users_routes.router)
 
 
-def _get_base_url_helper(port: int) -> str:
-    fixed = _STARTUP_BASE_URL.get("value")
-    if fixed:
-        return fixed
-    return f"http://127.0.0.1:{port}"
+# Base-URL and git-remote resolution moved to api/urls.py so the integrations
+# router can use them without importing this module.
+_get_base_url_helper = get_base_url
+_get_github_repo_url_helper = get_github_repo_url
 
-def _get_github_repo_url_helper(project_root: Path) -> str:
-    cached = _GITHUB_REPO_URL_CACHE.get("value")
-    if cached is not None:
-        return cached
-    try:
-        process = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-        )
-        result = process.stdout.strip() if process.returncode == 0 else ""
-        _GITHUB_REPO_URL_CACHE["value"] = result
-        return result
-    except Exception:
-        return ""
 
 def _safe_path_helper(base: Path, relative: str) -> str:
     target = (base / relative).resolve()
@@ -796,61 +774,6 @@ def get_actions_task_status(id: str = Query(None), _user=Depends(require_auth)):
         raise HTTPException(status_code=404, detail="Task not found")
     return status
 
-@app.get("/api/integrations/github/status")
-def get_github_status(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep)):
-    manager = IntegrationsManager(paths.root)
-    base_url = _get_base_url_helper(port)
-    settings = oauth_settings(f"{base_url}/api/integrations/github/callback")
-    return {
-        "configured": settings["configured"],
-        "redirect_uri": settings["redirect_uri"],
-        "repo_url": _get_github_repo_url_helper(project_root),
-        **manager.github_status(),
-    }
-
-@app.get("/api/integrations/github/callback")
-def get_github_callback(code: str = None, state: str = None, error: str = None, error_description: str = None, paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep)):
-    from fastapi.responses import RedirectResponse
-    manager = IntegrationsManager(paths.root)
-    if error:
-        err_val = error_description or error or "Authorization failed"
-        manager.log_activity(
-            message=f"GitHub OAuth failed: {err_val}",
-            branch="integrations",
-            status="failed",
-        )
-        return RedirectResponse(f"/integrations?github_error={quote_plus(err_val)}")
-    if not code or not state:
-        return RedirectResponse("/integrations?github_error=Missing+code+or+state")
-    if not manager.validate_github_state(state):
-        manager.log_activity(message="GitHub OAuth failed: invalid state", branch="integrations", status="failed")
-        return RedirectResponse("/integrations?github_error=Invalid+or+expired+state")
-    base_url = _get_base_url_helper(port)
-    settings = oauth_settings(f"{base_url}/api/integrations/github/callback")
-    if not settings["configured"]:
-        return RedirectResponse("/integrations?github_error=GitHub+OAuth+is+not+configured")
-    token_payload = exchange_code_for_token(
-        client_id=settings["client_id"],
-        client_secret=settings["client_secret"],
-        code=code,
-        redirect_uri=settings["redirect_uri"],
-    )
-    if "error" in token_payload:
-        err_val = token_payload.get("error_description") or token_payload.get("error") or "Unable to exchange OAuth code"
-        manager.log_activity(
-            message=f"GitHub OAuth failed: {err_val}",
-            branch="integrations",
-            status="failed",
-        )
-        return RedirectResponse(f"/integrations?github_error={quote_plus(err_val)}")
-    access_token = token_payload.get("access_token", "")
-    scopes = [scope for scope in str(token_payload.get("scope", "")).split(",") if scope]
-    if not access_token:
-        return RedirectResponse("/integrations?github_error=Missing+access+token")
-    user = fetch_github_user(access_token)
-    manager.complete_github_oauth(access_token=access_token, user=user, scopes=scopes)
-    return RedirectResponse("/integrations?github=connected")
-
 @app.get("/api/dashboard")
 def get_dashboard(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), user=Depends(require_auth)):
     snapshot = build_dashboard_snapshot(project_root, paths)
@@ -926,39 +849,6 @@ def get_comments(run_id: str = Query(None), store=Depends(get_store_dep), user=D
     comments = store.list_comments(run_id)
     return {"ok": True, "comments": comments}
 
-@app.get("/api/integrations")
-def get_integrations(paths=Depends(get_paths_dep), port=Depends(get_port_dep), user=Depends(require_auth)):
-    manager = IntegrationsManager(paths.root)
-    config = manager.get_config()
-    token = config.get("api_key", "")
-    masked_token = (token[:7] + "*" * 20) if len(token) > 10 else "********"
-    webhook_url = config.get("webhook_url", "")
-    base_url = _get_base_url_helper(port)
-    settings = oauth_settings(f"{base_url}/api/integrations/github/callback")
-    return {
-        # A Slack/Discord/Teams webhook URL *is* its own bearer credential —
-        # anyone holding it can post as the integration — so it gets the same
-        # admin-only treatment as the API key, not returned to viewer/developer.
-        "webhook_url": webhook_url if user.role == "admin" else "",
-        "webhook_threshold": config.get("webhook_threshold", 1.0),
-        "api_key": masked_token,
-        "webhook_connected": bool(webhook_url),
-        "activity_count": len(config.get("activity", [])),
-        "github_configured": settings["configured"],
-    }
-
-@app.get("/api/audit")
-def get_audit(limit: int = Query(200), store=Depends(get_store_dep), user=Depends(require_admin)):
-    limit = max(1, min(limit, 1000))
-    logs = store.get_audit_logs(limit=limit)
-    return {"logs": logs}
-
-@app.get("/api/integrations/activity")
-def get_integrations_activity(paths=Depends(get_paths_dep), user=Depends(require_auth)):
-    manager = IntegrationsManager(paths.root)
-    config = manager.get_config()
-    return {"activity": config.get("activity", [])}
-
 @app.get("/api/runs/{run_id}/export")
 def get_run_export(run_id: str, paths=Depends(get_paths_dep), user=Depends(require_auth)):
     if not run_id or "/" in run_id or ".." in run_id:
@@ -1001,6 +891,12 @@ def get_events_stream(_user=Depends(require_auth)):
             unsubscribe(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/api/audit")
+def get_audit(limit: int = Query(200), store=Depends(get_store_dep), user=Depends(require_admin)):
+    limit = max(1, min(limit, 1000))
+    logs = store.get_audit_logs(limit=limit)
+    return {"logs": logs}
 
 @app.post("/api/events/emit")
 def post_events_emit(payload: dict, user=Depends(require_dev_or_admin)):
@@ -1728,67 +1624,6 @@ def post_actions_compare_multiple(payload: dict, paths=Depends(get_paths_dep), p
     task_id = _run_cli_action_async_helper(paths, project_root, port, args)
     return {"ok": True, "task_id": task_id, "count": len(tests), "skipped": skipped}
 
-@app.post("/api/integrations/webhooks")
-def post_integrations_webhooks(payload: dict, paths=Depends(get_paths_dep), user=Depends(require_admin)):
-    url = str(payload.get("url", "")).strip()
-    threshold = float(payload.get("threshold", 1.0))
-    manager = IntegrationsManager(paths.root)
-    manager.update_webhook(url, threshold)
-    _DashboardCache.invalidate(paths)
-    return {"ok": True}
-
-@app.post("/api/integrations/rotate-key")
-def post_integrations_rotate_key(paths=Depends(get_paths_dep), user=Depends(require_admin)):
-    manager = IntegrationsManager(paths.root)
-    new_key = manager.rotate_api_key()
-    with _API_KEY_LOCK:
-        _API_KEY_CACHE.clear()
-    return {"ok": True, "api_key": new_key}
-
-@app.post("/api/integrations/reveal-key")
-def post_integrations_reveal_key(paths=Depends(get_paths_dep), user=Depends(require_admin)):
-    manager = IntegrationsManager(paths.root)
-    return {"ok": True, "api_key": manager.reveal_api_key()}
-
-@app.post("/api/integrations/test-webhook")
-def post_integrations_test_webhook(payload: dict, paths=Depends(get_paths_dep), user=Depends(require_admin)):
-    url = str(payload.get("url", "")).strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="Webhook URL is required")
-    from .notifier import trigger_webhook_detailed
-    result = trigger_webhook_detailed(url, {"event": "test_ping", "message": "The Lens Integration Test"})
-    manager = IntegrationsManager(paths.root)
-    manager.log_activity(
-        message="Webhook test succeeded" if result.get("ok") else "Webhook test failed",
-        branch="integrations", status="success" if result.get("ok") else "failed",
-    )
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail="Webhook test failed")
-    return result
-
-@app.post("/api/integrations/github/connect")
-def post_integrations_github_connect(paths=Depends(get_paths_dep), port=Depends(get_port_dep), user=Depends(require_admin)):
-    manager = IntegrationsManager(paths.root)
-    base_url = _get_base_url_helper(port)
-    settings = oauth_settings(f"{base_url}/api/integrations/github/callback")
-    if not settings["configured"]:
-        raise HTTPException(
-            status_code=400,
-            detail="GitHub OAuth is not configured. Set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET on the dashboard server."
-        )
-    state = manager.begin_github_oauth()
-    authorize_url = build_authorize_url(
-        client_id=settings["client_id"], redirect_uri=settings["redirect_uri"],
-        state=state, scope=settings["scope"],
-    )
-    return {"ok": True, "authorize_url": authorize_url}
-
-@app.post("/api/integrations/github/disconnect")
-def post_integrations_github_disconnect(paths=Depends(get_paths_dep), user=Depends(require_admin)):
-    manager = IntegrationsManager(paths.root)
-    manager.disconnect_github()
-    return {"ok": True}
-
 @app.post("/api/sdk/snapshot")
 def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_dep), store=Depends(get_store_dep), authorized=Depends(require_dev_or_admin)):
     auth_hdr = request.headers.get("Authorization") or ""
@@ -2287,14 +2122,9 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
 
     threading.Thread(target=warmup, daemon=True).start()
 
-    try:
-        _git_proc = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=str(project_root), capture_output=True, text=True,
-        )
-        _GITHUB_REPO_URL_CACHE["value"] = _git_proc.stdout.strip() if _git_proc.returncode == 0 else ""
-    except Exception:
-        _GITHUB_REPO_URL_CACHE["value"] = ""
+    # Warm the git-remote cache so the first request that wants a repo link
+    # does not pay for a subprocess.
+    get_github_repo_url(project_root)
 
     try:
         _seed_key = IntegrationsManager(paths.root).get_config().get("api_key", "")
@@ -2312,7 +2142,7 @@ def serve_dashboard(project_root: Path, paths: WorkspacePaths, host: str, port: 
         )
 
     _display_host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
-    _STARTUP_BASE_URL["value"] = f"http://{_display_host}:{port}"
+    set_startup_base_url(f"http://{_display_host}:{port}")
 
     logger.info(f"Starting FastAPI production server at http://{host}:{port}/")
     try:

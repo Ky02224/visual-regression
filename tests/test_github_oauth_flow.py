@@ -144,10 +144,10 @@ def test_full_connect_callback_flow_connects_account(test_server):
     # Only the outbound calls to github.com are mocked; everything else
     # (state validation, session/cookie handling, config persistence) is real.
     with patch(
-        "visual_regression.dashboard_server.exchange_code_for_token",
+        "visual_regression.api.integrations.exchange_code_for_token",
         return_value={"access_token": "gho_fake_token_123", "scope": "read:user", "token_type": "bearer"},
     ) as mock_exchange, patch(
-        "visual_regression.dashboard_server.fetch_github_user",
+        "visual_regression.api.integrations.fetch_github_user",
         return_value={
             "login": "kiayen",
             "avatar_url": "https://avatars.githubusercontent.com/u/1",
@@ -224,7 +224,7 @@ def test_callback_handles_token_exchange_error(test_server):
     state = urllib.parse.parse_qs(urllib.parse.urlparse(data["authorize_url"]).query)["state"][0]
 
     with patch(
-        "visual_regression.dashboard_server.exchange_code_for_token",
+        "visual_regression.api.integrations.exchange_code_for_token",
         return_value={"error": "bad_verification_code", "error_description": "The code passed is incorrect or expired."},
     ):
         callback_url = (
