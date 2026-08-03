@@ -139,11 +139,47 @@ Build it with `cd sdk && npm install && npm run build`. Authentication uses the
 automation access key from the Integrations page (`VR_API_KEY`). See
 [sdk/README.md](sdk/README.md) for the full API.
 
+## Measured Results
+
+Detection and classification are reported separately because they fail for
+different reasons — see [ADR 0001](docs/adr/0001-detection-and-classification-are-separate-metrics.md).
+
+| Capability | Result | Evaluation set |
+|---|---|---|
+| **Defect detection** | **81/81 detected, 0/9 false alarms** | Injected defects on the demo portal, ground truth from the injected mode |
+| **Change classification** | **94.20%**, 95% CI [92.15%, 96.25%], across-seed σ 2.39% | Real third-party pages with injected DOM mutations, n=500 over 10 seeds |
+| Classification (synthetic) | 87.6% — a *validation* score, calibration fitted on the same set | 12,000 synthetic mutations |
+
+Reproduce the second row with:
+
+```bash
+python scripts/live_eval_multiseed.py --seeds 10 --trials 50
+```
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — how the pieces fit and why
+- [Decision records](docs/adr/) — the choices that would otherwise look arbitrary
+- `/docs` on a running server — generated OpenAPI reference
+
+## Observability
+
+```bash
+LENS_LOG_FORMAT=json python -m visual_regression.cli serve-dashboard
+```
+
+One JSON object per line, with `extra=` fields as top-level keys. Every response
+carries `X-Request-ID` and `X-Response-Time-Ms`; the id appears on every log line
+emitted while handling that request, so one can be pasted from a browser's
+network tab straight into a log search. `/metrics` exposes Prometheus counters
+and latency histograms.
+
 ## Files
 
 - dashboard UI: `dashboard_frontend/`
 - demo site: `demo_portal/`
 - core backend: `visual_regression/`
+- HTTP layer: `visual_regression/api/`
 - Playwright SDK: `sdk/`
 - benchmark tooling: `scripts/generate_benchmark_suite.py`, `scripts/benchmark_report.py`
 - runtime artifacts: `.visual-regression/`
