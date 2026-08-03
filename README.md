@@ -2,6 +2,28 @@
 
 Website-first visual regression platform for QA, frontend engineers and release owners.
 
+## How This Is Verified
+
+Every claim below is enforced by CI on each push, not measured once by hand.
+
+| Claim | How it is checked |
+|---|---|
+| Detects 81/81 injected defects, 0/9 false alarms | `Score detection rate` — fails the build on any miss or false alarm |
+| The AI inference path actually executes | `Smoke-test the AI inference path` — asserts `decision_source` is not `pixel-fallback-no-model` |
+| Classification is 94.20% (n=500) | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
+| Both database backends work | `Verify the Postgres parity tests are not skipping` — fails if those tests silently skip |
+| 954 Python + 90 frontend tests pass | `Run Python tests`, `Run frontend unit tests` |
+
+The detection gate runs with `--no-ai` deliberately, so it can never be blocked
+by model distribution — see
+[ADR 0004](docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md).
+
+Baselines are captured inside this project's Docker image
+(`scripts/generate_linux_baselines.sh`) rather than on a developer machine.
+Chromium renders text differently across platforms and font sets, so a baseline
+from anywhere else fails for reasons unrelated to the page — and a check that
+captures its own reference from the commit under test cannot fail at all.
+
 ## What It Includes
 
 - Website dashboard for runs, reports, approvals and operator actions
