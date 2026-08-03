@@ -17,6 +17,7 @@ import pytest
 
 from visual_regression.cli import (
     _baseline_name_from_capture,
+    ai_model_is_available,
     _initial_decision_status,
     _slug_part,
     build_ai_explanation,
@@ -254,6 +255,56 @@ class TestDecisionStatus:
         status = _initial_decision_status(False)
         assert status["status"] == "pending"
         assert "timestamp" not in status
+
+
+class TestAiModelIsAvailable:
+    """A model counts as available in any format the loader can actually read.
+
+    This asked `model_path.exists()` before, which is the wrong question. The
+    path is a BASE name — visual_ai.pt — from which the loader derives the
+    sidecars it really opens (.torchscript.pt, .quant.onnx + .json, then the
+    checkpoint). A deployment carrying only the ONNX export and its metadata,
+    which is exactly what CI restores because the 124MB checkpoint is too large
+    to version, was reported as having no model at all. Every comparison then
+    degraded to pixel-only and recorded decision_source
+    "pixel-fallback-no-model" — a silent downgrade, not an error.
+    """
+
+    def test_no_path_is_not_available(self):
+        assert ai_model_is_available(None) is False
+
+    def test_an_empty_directory_is_not_available(self, tmp_path):
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is False
+
+    def test_a_checkpoint_alone_is_available(self, tmp_path):
+        (tmp_path / "visual_ai.pt").write_bytes(b"weights")
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is True
+
+    def test_a_torchscript_export_alone_is_available(self, tmp_path):
+        (tmp_path / "visual_ai.torchscript.pt").write_bytes(b"ts")
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is True
+
+    def test_a_quantised_onnx_with_metadata_is_available(self, tmp_path):
+        """The CI case: 32MB ONNX plus a 3KB sidecar, no checkpoint."""
+        (tmp_path / "visual_ai.quant.onnx").write_bytes(b"onnx")
+        (tmp_path / "visual_ai.json").write_text("{}", encoding="utf-8")
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is True
+
+    def test_a_standard_onnx_with_metadata_is_available(self, tmp_path):
+        (tmp_path / "visual_ai.onnx").write_bytes(b"onnx")
+        (tmp_path / "visual_ai.json").write_text("{}", encoding="utf-8")
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is True
+
+    def test_an_onnx_without_metadata_is_not_available(self, tmp_path):
+        """class_names, threshold and image_size all come from the sidecar, so
+        the ONNX alone cannot be loaded — claiming otherwise would swap a clean
+        fallback for an inference-time crash."""
+        (tmp_path / "visual_ai.quant.onnx").write_bytes(b"onnx")
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is False
+
+    def test_metadata_without_any_weights_is_not_available(self, tmp_path):
+        (tmp_path / "visual_ai.json").write_text("{}", encoding="utf-8")
+        assert ai_model_is_available(tmp_path / "visual_ai.pt") is False
 
 
 class TestResolveAiModelPath:

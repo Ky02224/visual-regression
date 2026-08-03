@@ -24,6 +24,10 @@
 !.visual-regression/models/
 .visual-regression/models/*
 !.visual-regression/models/visual_ai.quant.onnx
+# The sidecar metadata is required alongside it: _load_legacy_or_hybrid_model
+# reads class_names, threshold and image_size from this file, and without it
+# falls through to torch.load on a file that is not a pickle. 3KB.
+!.visual-regression/models/visual_ai.json
 # CI writes junit/coverage/benchmark JSON here and uploads it as an artifact.
 # live-eval-summary.json is the exception: it is the published classification
 # result (n=500), versioned rather than regenerated per run.

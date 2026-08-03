@@ -1686,7 +1686,7 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
             "message": f"Baseline '{name}' created successfully from SDK upload."
         }
 
-    from .cli import _copy_baseline_into_run, now_stamp_precise, summarize_severity, build_ai_explanation, resolve_ai_model_path, build_capture_metadata, _initial_decision_status
+    from .cli import _copy_baseline_into_run, now_stamp_precise, summarize_severity, build_ai_explanation, ai_model_is_available, resolve_ai_model_path, build_capture_metadata, _initial_decision_status
     from .image_compare import compare_images
     from .decision import decide_pass_fail
     from .reporter import generate_html_report, save_image, write_json
@@ -1755,7 +1755,7 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
     ai_model_path = resolve_ai_model_path(paths, None, no_ai)
     ai_assessment = {}
     ai_error = False
-    ai_model_available = bool(ai_model_path and ai_model_path.exists())
+    ai_model_available = ai_model_is_available(ai_model_path)
     if ai_model_available:
         try:
             ai_assessment = assess_result(

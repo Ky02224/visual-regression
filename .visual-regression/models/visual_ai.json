@@ -1,0 +1,146 @@
+{
+  "model_path": "C:\\Users\\HP\\Desktop\\FYP(VISUAL)\\.visual-regression\\models\\visual_ai.pt",
+  "model_type": "resnet50-siamese-rule-fusion-multiclass",
+  "architecture": "RESNET50 Siamese + OpenCV/SSIM Fusion",
+  "weights_source": "imagenet-default",
+  "freeze_backbone": false,
+  "class_names": [
+    "insignificant-change",
+    "missing-element",
+    "layout-issue",
+    "text-issue",
+    "broken-image",
+    "color-regression",
+    "font-change"
+  ],
+  "feature_names": [
+    "mismatch_pct",
+    "ssim_score",
+    "region_count",
+    "largest_region_ratio",
+    "mean_region_ratio",
+    "mean_delta",
+    "max_delta",
+    "width_ratio",
+    "height_ratio"
+  ],
+  "accuracy": 0.8763333333333333,
+  "samples": 12000,
+  "epochs": 6,
+  "image_size": 224,
+  "backbone": "resnet50",
+  "dataset_manifest": "C:\\Users\\HP\\Desktop\\FYP(VISUAL)\\.visual-regression\\datasets\\public-ui-manifest.json",
+  "public_images_used": 300,
+  "evaluation": {
+    "accuracy": 0.876333,
+    "confusion_matrix": [
+      [
+        355,
+        1,
+        0,
+        0,
+        0,
+        0,
+        4
+      ],
+      [
+        2,
+        205,
+        0,
+        2,
+        0,
+        0,
+        31
+      ],
+      [
+        56,
+        54,
+        759,
+        22,
+        5,
+        12,
+        52
+      ],
+      [
+        3,
+        45,
+        4,
+        508,
+        0,
+        0,
+        40
+      ],
+      [
+        0,
+        1,
+        0,
+        0,
+        239,
+        0,
+        0
+      ],
+      [
+        0,
+        11,
+        0,
+        0,
+        0,
+        349,
+        0
+      ],
+      [
+        8,
+        18,
+        0,
+        0,
+        0,
+        0,
+        214
+      ]
+    ],
+    "per_class": [
+      {
+        "label": "insignificant-change",
+        "precision": 0.837264,
+        "recall": 0.986111,
+        "support": 360
+      },
+      {
+        "label": "missing-element",
+        "precision": 0.61194,
+        "recall": 0.854167,
+        "support": 240
+      },
+      {
+        "label": "layout-issue",
+        "precision": 0.994758,
+        "recall": 0.790625,
+        "support": 960
+      },
+      {
+        "label": "text-issue",
+        "precision": 0.954887,
+        "recall": 0.846667,
+        "support": 600
+      },
+      {
+        "label": "broken-image",
+        "precision": 0.979508,
+        "recall": 0.995833,
+        "support": 240
+      },
+      {
+        "label": "color-regression",
+        "precision": 0.966759,
+        "recall": 0.969444,
+        "support": 360
+      },
+      {
+        "label": "font-change",
+        "precision": 0.627566,
+        "recall": 0.891667,
+        "support": 240
+      }
+    ]
+  }
+}

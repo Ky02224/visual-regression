@@ -37,6 +37,7 @@ def handle_run_upload(
         now_stamp_precise,
         summarize_severity,
         build_ai_explanation,
+        ai_model_is_available,
         resolve_ai_model_path,
         build_capture_metadata,
         _initial_decision_status,
@@ -114,7 +115,7 @@ def handle_run_upload(
     ai_model_path = resolve_ai_model_path(paths, None, no_ai)
     ai_assessment = {}
     ai_error = False
-    ai_model_available = bool(ai_model_path and ai_model_path.exists())
+    ai_model_available = ai_model_is_available(ai_model_path)
     if ai_model_available:
         try:
             ai_assessment = assess_result(
@@ -267,7 +268,7 @@ def handle_ignore_regions_update(
             from .reporter import save_image, write_json, generate_html_report
             from .decision import decide_pass_fail
             from .ai_training import assess_result
-            from .cli import resolve_ai_model_path, _initial_decision_status, summarize_severity, build_ai_explanation
+            from .cli import ai_model_is_available, resolve_ai_model_path, _initial_decision_status, summarize_severity, build_ai_explanation
             import json as _json
 
             result_file = run_dir / "result.json"
@@ -302,7 +303,7 @@ def handle_ignore_regions_update(
                     ai_model_path = resolve_ai_model_path(paths, None, no_ai)
                     ai_assessment = {}
                     ai_error = False
-                    ai_model_available = bool(ai_model_path and ai_model_path.exists())
+                    ai_model_available = ai_model_is_available(ai_model_path)
                     if ai_model_available:
                         try:
                             ai_assessment = assess_result(

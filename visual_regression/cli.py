@@ -149,13 +149,44 @@ def build_ai_explanation(result, ai_assessment: Dict[str, Any]) -> str:
     return sentence or "No strong defect indicators were detected in this run."
 
 
+def ai_model_is_available(model_path: Path | None) -> bool:
+    """True when a usable model exists at `model_path` in ANY supported format.
+
+    `model_path` is a BASE path — conventionally visual_ai.pt — from which
+    _load_legacy_or_hybrid_model derives the sidecars it actually loads:
+    .torchscript.pt, then .quant.onnx / .onnx paired with .json, and only then
+    the checkpoint itself.
+
+    Testing `model_path.exists()` therefore asked the wrong question. A
+    deployment carrying only the ONNX export plus its metadata — which is
+    exactly what a CI runner restores, since the 124MB checkpoint is too large
+    to version — was reported as having no model at all, and every comparison
+    silently degraded to pixel-only with decision_source
+    "pixel-fallback-no-model".
+    """
+    if not model_path:
+        return False
+    model_path = Path(model_path)
+    if model_path.exists():
+        return True
+    if model_path.with_suffix(".torchscript.pt").exists():
+        return True
+    # An ONNX export is only usable with its metadata sidecar: class_names,
+    # threshold and image_size all come from there.
+    if not model_path.with_suffix(".json").exists():
+        return False
+    return model_path.with_suffix(".quant.onnx").exists() or model_path.with_suffix(".onnx").exists()
+
+
 def resolve_ai_model_path(paths: WorkspacePaths, explicit: str | None, no_ai: bool) -> Path | None:
     if no_ai:
         return None
     if explicit:
         return Path(explicit)
     default_path = paths.models_dir / "visual_ai.pt"
-    if default_path.exists():
+    # Availability rather than existence: a workspace holding only the ONNX
+    # export still has a usable model.
+    if ai_model_is_available(default_path):
         return default_path
     return None
 
@@ -362,7 +393,7 @@ def _run_compare(
 
     ai_assessment: Dict[str, Any] = {}
     ai_error = False
-    ai_model_available = bool(ai_model_path and ai_model_path.exists())
+    ai_model_available = ai_model_is_available(ai_model_path)
     if ai_model_available:
         from .ai_training import assess_result
         try:
@@ -1353,7 +1384,7 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
 
                         ai_assessment: Dict[str, Any] = {}
                         ai_error = False
-                        ai_model_available = bool(ai_model_path and ai_model_path.exists())
+                        ai_model_available = ai_model_is_available(ai_model_path)
                         if ai_model_available:
                             try:
                                 ai_assessment = assess_result(
