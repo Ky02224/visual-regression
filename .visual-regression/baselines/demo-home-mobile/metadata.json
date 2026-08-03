@@ -1,0 +1,56 @@
+{
+  "name": "demo-home-mobile",
+  "created_at": "2026-07-22T02:27:50.200518+00:00",
+  "updated_at": "2026-08-03T13:17:43.522608+00:00",
+  "capture": {
+    "name": "demo-home-mobile",
+    "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US",
+    "browser": "chromium",
+    "device": "iPhone 13",
+    "viewport": [
+      390,
+      844
+    ],
+    "wait_ms": 400,
+    "wait_until": "networkidle",
+    "navigation_timeout_ms": 45000,
+    "full_page": true,
+    "disable_animations": true,
+    "locale": "en-US",
+    "timezone_id": "Asia/Kuala_Lumpur",
+    "color_scheme": "light",
+    "extra_headers": {},
+    "hide_selectors": [],
+    "wait_for_selector": null,
+    "mock_routes": {},
+    "login_url": null,
+    "login_username": null,
+    "login_password": null,
+    "username_selector": null,
+    "password_selector": null,
+    "submit_selector": null,
+    "updated_by": "system",
+    "source": "suite-bootstrap"
+  },
+  "history": [
+    {
+      "timestamp": "2026-07-22T02:27:50.200518+00:00",
+      "actor": "system",
+      "source": "suite-bootstrap",
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
+    },
+    {
+      "timestamp": "2026-07-22T02:28:05.993536+00:00",
+      "actor": "system",
+      "source": "suite-bootstrap",
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
+    },
+    {
+      "timestamp": "2026-08-03T13:17:43.522608+00:00",
+      "actor": "system",
+      "source": "suite-bootstrap",
+      "url": "http://127.0.0.1:8130/demo/index.html?lang=en-US"
+    }
+  ],
+  "ignore_regions": []
+}

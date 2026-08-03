@@ -138,14 +138,31 @@ jobs:
               raise SystemExit("Dashboard demo did not become ready in time.")
           PY
 
+      # Only fills in baselines that are genuinely absent. Committed baselines
+      # are left alone — overwriting them would recreate the self-comparison
+      # this check exists to avoid, since the new baseline would come from the
+      # very commit under test.
+      #
+      # The committed ones were captured inside this project's Docker image (see
+      # scripts/generate_linux_baselines.sh). That matters: Chromium renders
+      # text differently across platforms and font sets, so a baseline captured
+      # anywhere else fails here for reasons unrelated to the page. Any case
+      # bootstrapped below is self-comparing and cannot detect a regression —
+      # the provenance check earlier in this job says so on the run summary.
       - name: Bootstrap Missing Baselines
         timeout-minutes: 8
         env:
           PYTHONUNBUFFERED: "1"
         run: |
+          before=$(find .visual-regression/baselines -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
           python -u -m visual_regression.cli create-suite-baselines --suite suite.ci-smoke.yaml
-          echo "--- baseline tree after bootstrap ---"
-          find .visual-regression -type f | head -50
+          after=$(find .visual-regression/baselines -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+          echo "Committed baselines: $before, after bootstrap: $after"
+          if [ "$after" -gt "$before" ]; then
+            echo "::warning title=Some cases are self-comparing::$((after - before)) baseline(s) \
+          were captured from this commit because none was committed for them. Those cases cannot \
+          detect a regression. Run scripts/generate_linux_baselines.sh and commit the result."
+          fi
           echo "--- file count: $(find .visual-regression -type f | wc -l) ---"
 
       - name: Run Test Suite
