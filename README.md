@@ -193,6 +193,15 @@ Reproduce the second row with:
 python scripts/live_eval_multiseed.py --seeds 10 --trials 50
 ```
 
+21 of the 29 residual classification errors fall between three pairs of labels
+that describe one event from two angles: a removal reflows what sits below it, a
+text overflow is a layout change, a vanished image is both missing and broken.
+Treating those pairs as interchangeable scores 98.40% on the same run. The
+strict number stays the headline —
+[ADR 0006](docs/adr/0006-classification-is-scored-strictly-despite-overlapping-labels.md)
+covers why, and why the eight errors outside those pairs are where the remaining
+work is.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) — how the pieces fit and why
