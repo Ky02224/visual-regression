@@ -139,6 +139,14 @@ def _recent_suite_summaries(paths: WorkspacePaths, runs: List[Dict[str, Any]], l
             payload["failed"] = failed_count
             payload["status"] = "passed" if failed_count == 0 else "failed"
             payload["file"] = path.name
+            # The per-case rows were needed for the counts above and nothing
+            # else here. Six suites of a hundred-odd cases came to 221KB — a
+            # quarter of /api/dashboard — to populate a list that shows only
+            # pass/fail totals. A viewer who opens one suite fetches its cases
+            # from /api/suite-summary; `case_count` keeps the size visible
+            # without carrying the rows.
+            payload["case_count"] = len(cases)
+            payload.pop("cases", None)
             items.append(payload)
         except Exception:
             logger.debug("Skipping unreadable suite summary %s", path, exc_info=True)

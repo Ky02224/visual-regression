@@ -90,6 +90,17 @@ export function SuiteResults() {
           return;
         }
 
+        // /api/dashboard lists summaries without their per-case rows — carrying
+        // every suite's cases there cost a quarter of that response to render a
+        // list of pass/fail totals. Only the opened suite needs them.
+        return fetch(`/api/suite-summary?file=${encodeURIComponent(selectedSummary.file)}`)
+          .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`Request failed (${res.status})`))))
+          .then((full: SuiteSummaryWire) => ({ data, selectedSummary: { ...selectedSummary, ...full } }));
+      })
+      .then((ctx) => {
+        if (cancelled || !ctx) return;
+        const { data, selectedSummary } = ctx;
+
         const allRuns = data.runs || [];
         const mappedCases: MappedCaseRow[] = (selectedSummary.cases || []).map((c) => {
           const runId = extractRunId(c.report);

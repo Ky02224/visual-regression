@@ -826,6 +826,30 @@ def get_dashboard(paths=Depends(get_paths_dep), project_root=Depends(get_project
     snapshot = build_dashboard_snapshot(project_root, paths)
     return snapshot
 
+@app.get("/api/suite-summary")
+def get_suite_summary(file: str = Query(None), paths=Depends(get_paths_dep), user=Depends(require_auth)):
+    """One suite summary, including its per-case rows.
+
+    /api/dashboard lists recent summaries without their `cases` arrays: six
+    suites of a hundred-odd cases each came to 221KB, a quarter of that
+    response, and only the one summary a viewer has actually opened needs them.
+    This serves that one on demand.
+    """
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing summary file")
+    # `file` reaches the filesystem, so confine it to a bare name inside
+    # reports_dir rather than trusting the caller not to send "../".
+    if Path(file).name != file or not file.startswith("suite-summary-") or not file.endswith(".json"):
+        raise HTTPException(status_code=400, detail="Invalid summary file")
+    summary_path = paths.reports_dir / file
+    if not summary_path.is_file():
+        raise HTTPException(status_code=404, detail="Summary not found")
+    from ._json_cache import JsonCache
+    payload = JsonCache.read(summary_path)
+    payload["file"] = file
+    return payload
+
+
 @app.get("/api/run")
 def get_run(id: str = Query(None), paths=Depends(get_paths_dep), user=Depends(require_auth)):
     if not id:
