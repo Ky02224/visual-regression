@@ -1017,7 +1017,11 @@ def train_model(
         if path.exists():
             try:
                 saved = torch.load(path, map_location="cpu", weights_only=False)
-                if "class_names" in saved:
+                # Truthiness, not `in`: checkpoints written before class order
+                # was recorded can carry the key with a None value, and taking
+                # that as the answer is the same silent scramble as having no
+                # answer at all.
+                if saved.get("class_names"):
                     class_names = list(saved["class_names"])
                     break
                 meta_file = path.with_suffix(".json")
@@ -1381,6 +1385,14 @@ def train_model(
                     "train_loss_history": train_loss_history,
                     "val_loss_history": val_loss_history,
                     "lr_history": lr_history,
+                    # Without this the resume path above cannot tell which label
+                    # each output neuron stands for and falls back to
+                    # CONSOLIDATED_CLASS_NAMES, whose order differs from the
+                    # shipped model's by three positions — training the head's
+                    # missing-element output against layout-issue targets, with
+                    # no error raised. Writing it here makes a checkpoint
+                    # self-describing.
+                    "class_names": class_names,
                 }, ckpt_path)
                 break
 
@@ -1400,6 +1412,9 @@ def train_model(
             "train_loss_history": train_loss_history,
             "val_loss_history": val_loss_history,
             "lr_history": lr_history,
+            # See the early-stopping save above: a checkpoint without its class
+            # order silently resumes against a different one.
+            "class_names": class_names,
         }, ckpt_path)
         logger.info(f"  [ckpt] Saved -> {ckpt_path.name}")
         kaggle_out = Path("/kaggle/working/visual_ai.ckpt.pt")
