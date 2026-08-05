@@ -32,7 +32,12 @@ class SuiteCase:
     color_scheme: str = "light"
     extra_headers: Dict[str, str] = field(default_factory=dict)
     wait_for_selector: str | None = None
-    comparison_mode: str = "ai"
+    # "hybrid", matching every other entry point (CLI, dashboard, and the YAML
+    # parser's own default below). A SuiteCase built directly in code without
+    # this field used to default to "ai", where decide_pass_fail discards the
+    # pixel signal entirely — a conservative model then silently passes the
+    # case with no second line of defence.
+    comparison_mode: str = "hybrid"
     hide_selectors: List[str] = field(default_factory=list)
 
 
