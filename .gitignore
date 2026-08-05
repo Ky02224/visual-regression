@@ -38,6 +38,10 @@
 # that way above.
 reports/*
 !reports/live-eval-summary.json
+# finetune_on_live_pairs.py trains inside its own workspace root so it can never
+# write over the deployed model. Those roots hold materialised run dirs and
+# multi-hundred-MB checkpoints — generated output, same as .visual-regression/*.
+.visual-regression-*/
 __pycache__/
 *.pyc
 .venv/
