@@ -50,8 +50,40 @@ DOM_FEATURE_NAMES = [
     "dom_nav_diff", "dom_form_diff", "dom_h1_diff",
 ]
 
+# Element-level structural features. DOM_FEATURE_NAMES above are page-level
+# aggregates — how many divs, how much the element count moved — and on a page
+# with two thousand elements, one of them disappearing shifts the total by
+# 0.05%, which is indistinguishable from noise. That is the measured gap: with
+# these aggregates the model scores 22.2% on real pages while
+# diagnose_from_dom_diff, which matches individual elements between the two
+# snapshots, scores 94.2% on the same inputs. The difference is not reasoning
+# ability but evidence precision, so these features hand the model the same
+# element-level comparison the rule engine performs.
+STRUCT_FEATURE_NAMES = [
+    "struct_matched_ratio",
+    "struct_unmatched_ratio",
+    "struct_unmatched_strong_ratio",   # vanished WITH an id or distinctive text
+    "struct_unmatched_media_ratio",
+    "struct_unmatched_text_ratio",
+    "struct_unmatched_max_area",       # largest vanished element, as page fraction
+    "struct_unmatched_total_area",
+    "struct_added_ratio",              # present now, absent from the baseline
+    "struct_moved_ratio",
+    "struct_moved_max_disp",           # normalised by page height
+    "struct_moved_mean_disp",
+    "struct_resized_ratio",
+    "struct_font_changed_ratio",
+    "struct_color_changed_ratio",
+]
+
 # FEATURE_NAMES now includes both rule and DOM features for the extended model
-FULL_FEATURE_NAMES = RULE_FEATURE_NAMES + DOM_FEATURE_NAMES
+FULL_FEATURE_NAMES = RULE_FEATURE_NAMES + DOM_FEATURE_NAMES + STRUCT_FEATURE_NAMES
+
+# Matching is quadratic in element count, and training runs it over thousands of
+# pairs. Ranking by area first keeps the cost bounded and drops what a screenshot
+# comparison would not have shown anyway — a 4px spacer vanishing is not the
+# defect anyone is looking for.
+_STRUCT_MAX_ELEMENTS = 300
 
 
 def _dom_snapshot_to_raw(snapshot: dict) -> dict:
@@ -254,6 +286,138 @@ def _match_element(el: dict, candidates: list, max_dist: float = 100.0, claimed:
         return match
     match, _dist = _match_by_geometry(el, candidates, max_dist)
     return match
+
+
+def _has_struct_identity(el: dict) -> bool:
+    """Whether a vanished element can be trusted as genuinely gone.
+
+    An id, or text long enough to be specific, makes "not found anywhere in the
+    current page" an exact global check. Without either, absence is a proximity
+    guess that reflow alone can fake — the same distinction diagnose_from_dom_diff
+    draws between its strong and weak missing buckets.
+    """
+    if el.get("eid"):
+        return True
+    return len(str(el.get("txt") or "").strip()) >= 12
+
+
+def struct_feature_vector(baseline_elements: list | None,
+                          current_elements: list | None) -> np.ndarray:
+    """Element-level comparison of two DOM snapshots, as a fixed-size vector.
+
+    Answers, per element rather than per page: did this one vanish, did it move,
+    did its font or colour change. Aggregate counts cannot express that — one
+    element leaving a 2000-element page moves every aggregate by 0.05% — which is
+    why the model scores 22.2% on evidence the rule engine turns into 94.2%.
+
+    Zero vector when either snapshot is missing, so callers without DOM sidecars
+    (the SDK upload path) degrade to the previous behaviour instead of failing.
+    """
+    names = STRUCT_FEATURE_NAMES
+    if not baseline_elements or not current_elements:
+        return np.zeros(len(names), dtype=np.float32)
+
+    def _area(e: dict) -> float:
+        return float(e.get("w", 0) or 0) * float(e.get("h", 0) or 0)
+
+    baseline = sorted(baseline_elements, key=_area, reverse=True)[:_STRUCT_MAX_ELEMENTS]
+    current = sorted(current_elements, key=_area, reverse=True)[:_STRUCT_MAX_ELEMENTS]
+    if not baseline:
+        return np.zeros(len(names), dtype=np.float32)
+
+    page_w = max((float(e.get("x", 0)) + float(e.get("w", 0)) for e in baseline), default=1.0) or 1.0
+    page_h = max((float(e.get("y", 0)) + float(e.get("h", 0)) for e in baseline), default=1.0) or 1.0
+    page_area = max(page_w * page_h, 1.0)
+
+    # Identity first, then geometry in ascending distance — the same two-phase
+    # resolution diagnose_from_dom_diff uses, so a confident pairing cannot be
+    # scooped by a same-tag sibling that merely came first in document order.
+    claimed: set = set()
+    resolved: dict[int, dict | None] = {}
+    pending: list[dict] = []
+    for el in baseline:
+        available = [c for c in current if id(c) not in claimed]
+        status, match = _match_by_identity(el, available)
+        if status == "found":
+            resolved[id(el)] = match
+            claimed.add(id(match))
+        elif status == "absent":
+            resolved[id(el)] = None
+        else:
+            pending.append(el)
+
+    scored = []
+    for el in pending:
+        available = [c for c in current if id(c) not in claimed]
+        match, dist = _match_by_geometry(el, available, max_dist=100.0)
+        scored.append((dist if match is not None else float("inf"), el, match))
+    scored.sort(key=lambda t: t[0])
+    for _dist, el, match in scored:
+        if match is not None and id(match) in claimed:
+            match = None
+        resolved[id(el)] = match
+        if match is not None:
+            claimed.add(id(match))
+
+    total = float(len(baseline))
+    matched = unmatched = unmatched_strong = unmatched_media = unmatched_text = 0
+    unmatched_max_area = unmatched_total_area = 0.0
+    moved = resized = font_changed = color_changed = 0
+    displacements: list[float] = []
+
+    for el in baseline:
+        match = resolved.get(id(el))
+        if match is None:
+            unmatched += 1
+            tag = str(el.get("tag") or "")
+            if _has_struct_identity(el):
+                unmatched_strong += 1
+            if tag in _MEDIA_TAGS:
+                unmatched_media += 1
+            if tag in _TEXT_TAGS:
+                unmatched_text += 1
+            area = _area(el)
+            unmatched_total_area += area
+            unmatched_max_area = max(unmatched_max_area, area)
+            continue
+
+        matched += 1
+        dx = abs(float(match.get("x", 0)) - float(el.get("x", 0)))
+        dy = abs(float(match.get("y", 0)) - float(el.get("y", 0)))
+        disp = (dx * dx + dy * dy) ** 0.5
+        if dx > 30 or dy > 30:
+            moved += 1
+            displacements.append(disp)
+        bw = max(float(el.get("w", 0) or 0), 1.0)
+        bh = max(float(el.get("h", 0) or 0), 1.0)
+        if (abs(float(match.get("w", 0)) - float(el.get("w", 0))) / bw > 0.25
+                or abs(float(match.get("h", 0)) - float(el.get("h", 0))) / bh > 0.25):
+            resized += 1
+        if el.get("font") and match.get("font") and el["font"] != match["font"]:
+            font_changed += 1
+        if el.get("color") and match.get("color") and el["color"] != match["color"]:
+            color_changed += 1
+
+    added = sum(1 for c in current if id(c) not in claimed)
+
+    feats = [
+        matched / total,
+        unmatched / total,
+        unmatched_strong / total,
+        unmatched_media / total,
+        unmatched_text / total,
+        min(unmatched_max_area / page_area, 1.0),
+        min(unmatched_total_area / page_area, 1.0),
+        added / max(float(len(current)), 1.0),
+        moved / total,
+        min(max(displacements, default=0.0) / page_h, 1.0),
+        min((sum(displacements) / len(displacements) if displacements else 0.0) / page_h, 1.0),
+        resized / total,
+        font_changed / total,
+        color_changed / total,
+    ]
+    assert len(feats) == len(names), "struct feature count drifted from its names"
+    return np.array(feats, dtype=np.float32)
 
 
 def _match_by_identity(el: dict, candidates: list) -> tuple[str, dict | None]:
@@ -595,6 +759,58 @@ def diagnose_from_dom_diff(
         if dw > 0.25 or dh > 0.25 or dx > 30 or dy > 30:
             moved.append((el, match))
             continue
+
+    # Media-first priority names the right element when an image itself was
+    # removed, and the wrong one when the image only vanished because an
+    # ancestor did: removing a <div>/<a> wrapper takes its descendants with it,
+    # so the image lands in the missing bucket too and gets reported as the root
+    # cause. Geometry cannot separate the two — an image removal collapses its
+    # container's box, leaving the container equally unmatchable — but parentage
+    # can. A removed container loses *every* tracked descendant; a removed image
+    # leaves its siblings (caption, link) still matched. Reattribution therefore
+    # requires the ancestor to have at least two evaluated descendants with none
+    # of them still present, which leaves a plain image removal (its container
+    # keeps other children, or has no other tracked child to judge by) reported
+    # as broken-image exactly as before.
+    def _reattributed_root(media_el: dict) -> dict | None:
+        if not isinstance(media_el.get("p"), int):
+            return None  # snapshot predates parent capture; keep old behaviour
+        children: dict[int, list[int]] = {}
+        for i, el in enumerate(baseline_elements):
+            parent = el.get("p")
+            if isinstance(parent, int):
+                children.setdefault(parent, []).append(i)
+
+        def descendants(root: int) -> list[int]:
+            out, stack = [], list(children.get(root, ()))
+            while stack:
+                node = stack.pop()
+                out.append(node)
+                stack.extend(children.get(node, ()))
+            return out
+
+        best = None
+        index = media_el.get("p")
+        while isinstance(index, int) and 0 <= index < len(baseline_elements):
+            ancestor = baseline_elements[index]
+            if resolved.get(id(ancestor), "unseen") is None:  # evaluated, absent
+                seen = [d for d in descendants(index)
+                        if id(baseline_elements[d]) in resolved]
+                if len(seen) >= 2 and all(
+                    resolved[id(baseline_elements[d])] is None for d in seen
+                ):
+                    best = ancestor  # keep climbing: report the outermost root
+            index = ancestor.get("p")
+        return best
+
+    for media_el in missing_media_strong:
+        root = _reattributed_root(media_el)
+        if root is not None:
+            tag = root.get("tag", "")
+            return "missing-element", (
+                f"DOM diff: a <{tag}> element present in the baseline page is missing "
+                f"from the current page, along with all of its contents."
+            )
 
     if missing_media_strong:
         tag = missing_media_strong[0].get("tag", "")

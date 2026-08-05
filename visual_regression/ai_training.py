@@ -25,6 +25,7 @@ from .ai_features import (
     normalize_batch_uint8,
     stack_feature_rows,
     dom_feature_vector_from_snapshots,
+    struct_feature_vector,
     load_dom_snapshot,
     diagnose_from_dom_diff,
 )
@@ -230,6 +231,29 @@ def _build_pair_sample(
     )
 
 
+def _fit_rule_vector(parts: "list", expected_dim: int) -> np.ndarray:
+    """Fit the rule/DOM/structural feature vector to what a model was built for.
+
+    Feature blocks have been appended over time — 9 pixel features, then 38 DOM
+    aggregates, then 14 element-level structural ones — and models trained
+    before a block exists have no input for it. The previous all-or-nothing
+    check ("does the model take the full width? otherwise send the base 9")
+    silently discarded every DOM feature the moment a new block was added, and
+    fed the full width to inference paths that never consulted it, which
+    surfaces as a matmul shape error mid-comparison.
+
+    Feature order is stable and append-only, so truncating to the model's width
+    keeps every block it was trained on aligned, and zero-padding a longer input
+    matches how the partial checkpoint load initialises unseen columns.
+    """
+    full = np.concatenate(parts) if len(parts) > 1 else np.asarray(parts[0])
+    if expected_dim <= 0 or expected_dim == full.shape[0]:
+        return full
+    if expected_dim < full.shape[0]:
+        return full[:expected_dim]
+    return np.pad(full, (0, expected_dim - full.shape[0]), mode="constant")
+
+
 RUN_PAIR_EVAL_FRACTION = 0.2
 
 
@@ -330,7 +354,9 @@ def _load_run_pair_samples(
         current_dom = load_dom_snapshot(current_path)
         dom_feats = dom_feature_vector_from_snapshots(baseline_dom, current_dom)
         # Concatenate rule + DOM features into a single feature vector
-        full_features = np.concatenate([pair.rule_features, dom_feats])
+        struct_feats = struct_feature_vector(
+            (baseline_dom or {}).get("elements"), (current_dom or {}).get("elements"))
+        full_features = np.concatenate([pair.rule_features, dom_feats, struct_feats])
         pair.rule_features = full_features
         pair.dom_features = dom_feats
         samples.append(pair)
@@ -2088,11 +2114,9 @@ def assess_result(
         baseline_dom = load_dom_snapshot(baseline_image_path)
         current_dom = load_dom_snapshot(current_image_path)
         dom_vec = dom_feature_vector_from_snapshots(baseline_dom, current_dom)
+        struct_vec = struct_feature_vector(baseline_dom_elements, current_dom_elements)
         rule_dim = int(loaded.get("rule_dim", len(RULE_FEATURE_NAMES)))
-        if rule_dim >= len(FULL_FEATURE_NAMES):
-            full_rule = np.concatenate([rule_vector_base, dom_vec])
-        else:
-            full_rule = rule_vector_base
+        full_rule = _fit_rule_vector([rule_vector_base, dom_vec, struct_vec], rule_dim)
         rule_t = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0)
 
         left_t = torch.tensor(normalize_batch_uint8(ensure_rgb_batch(all_left_imgs, image_size=img_size)), dtype=torch.float32)
@@ -2130,13 +2154,16 @@ def assess_result(
         baseline_dom = load_dom_snapshot(baseline_image_path)
         current_dom = load_dom_snapshot(current_image_path)
         dom_vec = dom_feature_vector_from_snapshots(baseline_dom, current_dom)
+        struct_vec = struct_feature_vector(baseline_dom_elements, current_dom_elements)
         try:
             rule_input_shape = loaded["session"].get_inputs()[2].shape
             expected_rule_dim = rule_input_shape[1] if len(rule_input_shape) > 1 else len(RULE_FEATURE_NAMES)
         except Exception:
             expected_rule_dim = len(RULE_FEATURE_NAMES)
         if expected_rule_dim == len(FULL_FEATURE_NAMES):
-            rule_vector = np.concatenate([rule_vector_base, dom_vec]).reshape(1, -1).astype(np.float32)
+            rule_vector = _fit_rule_vector(
+                [rule_vector_base, dom_vec, struct_vec], expected_rule_dim
+            ).reshape(1, -1).astype(np.float32)
         else:
             rule_vector = rule_vector_base.reshape(1, -1).astype(np.float32)
 
@@ -2203,6 +2230,7 @@ def assess_result(
     baseline_dom = load_dom_snapshot(baseline_image_path)
     current_dom = load_dom_snapshot(current_image_path)
     dom_vec = dom_feature_vector_from_snapshots(baseline_dom, current_dom)
+    struct_vec = struct_feature_vector(baseline_dom_elements, current_dom_elements)
 
     # Dynamic device selection
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -2217,13 +2245,17 @@ def assess_result(
     try:
         head_first_layer_in = next(loaded["head"].parameters()).shape[1]
         _emb_dim = dummy_emb.shape[1]
-        expected_rule_dim = head_first_layer_in - (_emb_dim * 3)
+        # Subtract however many embedding streams this head was actually built
+        # for. The stream count is decided further down by the same
+        # `>= _emb_dim * 4` test; assuming three here made the remainder a whole
+        # embedding too large (2096 rather than 48 on the shipped model), which
+        # stayed invisible only while the caller used this value as a yes/no
+        # "is the full feature width supported" flag rather than a width.
+        streams = 4 if head_first_layer_in >= (_emb_dim * 4) else 3
+        expected_rule_dim = head_first_layer_in - (_emb_dim * streams)
     except Exception:
         expected_rule_dim = len(RULE_FEATURE_NAMES)
-    if expected_rule_dim >= len(FULL_FEATURE_NAMES):
-        full_rule = np.concatenate([rule_vector_base, dom_vec])
-    else:
-        full_rule = rule_vector_base
+    full_rule = _fit_rule_vector([rule_vector_base, dom_vec, struct_vec], expected_rule_dim)
     rule_vector = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0).to(device)
 
     all_probs = []

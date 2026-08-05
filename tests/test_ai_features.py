@@ -74,6 +74,55 @@ def test_dom_diff_detects_broken_image_for_media_tags():
     assert label == "broken-image"
 
 
+def test_dom_diff_blames_the_removed_container_not_its_orphaned_image():
+    # The wrapper went, taking both children with it. Reporting the <img> names
+    # a symptom; the root cause is the container, and every one of its tracked
+    # descendants being gone is what identifies it as removed rather than merely
+    # collapsed.
+    baseline = [
+        {"tag": "div", "x": 100, "y": 100, "w": 220, "h": 140, "eid": "promo-card"},
+        {"tag": "img", "x": 110, "y": 110, "w": 100, "h": 60, "p": 0},
+        {"tag": "span", "x": 110, "y": 180, "w": 180, "h": 20, "p": 0,
+         "txt": "Quarterly results are published"},
+    ]
+    label, evidence = diagnose_from_dom_diff(baseline, [], _region())
+    assert label == "missing-element"
+    assert "div" in evidence
+
+
+def test_dom_diff_keeps_broken_image_when_a_sibling_survives():
+    # Only the image was removed. Its container's box collapses around the hole,
+    # so the container fails to match and looks "missing" too — the exact shape
+    # that geometric containment misread. The surviving caption is the tell: a
+    # genuinely removed container would have taken it as well.
+    baseline = [
+        {"tag": "div", "x": 100, "y": 100, "w": 220, "h": 140, "eid": "thumb-box"},
+        {"tag": "img", "x": 110, "y": 110, "w": 100, "h": 60, "p": 0},
+        {"tag": "span", "x": 110, "y": 180, "w": 180, "h": 20, "p": 0,
+         "txt": "Quarterly results are published"},
+    ]
+    current = [
+        {"tag": "span", "x": 110, "y": 120, "w": 180, "h": 20,
+         "txt": "Quarterly results are published"},
+    ]
+    label, evidence = diagnose_from_dom_diff(baseline, current, _region())
+    assert label == "broken-image"
+    assert "img" in evidence
+
+
+def test_dom_diff_reattribution_is_skipped_for_snapshots_without_parents():
+    # Baselines captured before parent indices were recorded have no "p" field.
+    # They must keep the previous behaviour rather than silently changing verdict.
+    baseline = [
+        {"tag": "div", "x": 100, "y": 100, "w": 220, "h": 140, "eid": "promo-card"},
+        {"tag": "img", "x": 110, "y": 110, "w": 100, "h": 60},
+        {"tag": "span", "x": 110, "y": 180, "w": 180, "h": 20,
+         "txt": "Quarterly results are published"},
+    ]
+    label, _ = diagnose_from_dom_diff(baseline, [], _region())
+    assert label == "broken-image"
+
+
 def test_dom_diff_matches_by_id_despite_ambiguous_geometry():
     # Two same-tag, similar-size elements near each other post-reflow — pure
     # geometry matching could pair either one, but a shared id disambiguates.
