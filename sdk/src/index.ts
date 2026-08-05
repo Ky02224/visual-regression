@@ -38,9 +38,19 @@ export interface VisualSnapshotOptions {
   minRegionArea?: number;
 
   /**
-   * 'ai' | 'strict' | 'threshold'. Defaults to 'ai'.
+   * How pass/fail is decided. Defaults to 'hybrid'.
+   *
+   * - 'hybrid'  — a change must clear the pixel threshold *and* be judged
+   *               meaningful. The default everywhere else in the system.
+   * - 'pixel'   — threshold only; deterministic, and the choice when a run
+   *               has to be reproducible or the model is not trusted yet.
+   * - 'ai'      — the model alone decides and the pixel signal is discarded.
+   *
+   * The previous union advertised 'strict' and 'threshold', which the server
+   * has never accepted: decision.py takes pixel/ai/hybrid and raises on
+   * anything else, so either value failed the request outright.
    */
-  comparisonMode?: 'ai' | 'strict' | 'threshold';
+  comparisonMode?: 'pixel' | 'ai' | 'hybrid';
 
   /**
    * Capture full-page screenshot. Defaults to true.
@@ -109,6 +119,71 @@ function postJson(serverUrl: string, path: string, apiKey: string | undefined, b
 }
 
 // ---------------------------------------------------------------------------
+// DOM capture
+// ---------------------------------------------------------------------------
+
+/**
+ * The capture script is fetched from the server rather than duplicated here.
+ *
+ * Structural comparison is what separates this server from a pixel differ, and
+ * it needs element data from both sides. Uploading only a screenshot leaves the
+ * DOM diff nothing to compare and the model's structural features all zero.
+ * Since the SDK already holds a Playwright Page, the DOM is one evaluate() away.
+ *
+ * Keeping the script server-side means a field added to the capture reaches
+ * clients without an SDK release, and the two can never disagree about the
+ * shape of a snapshot.
+ */
+let domCaptureScript: string | null | undefined;
+
+function getJson(serverUrl: string, path: string, apiKey: string | undefined): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(path, serverUrl);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const req = lib.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: { ...(apiKey ? { 'X-Access-Key': apiKey } : {}) },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data) as Record<string, unknown>);
+          } catch {
+            reject(new Error(`Invalid JSON from server: ${data}`));
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function captureDom(
+  page: Page, serverUrl: string, apiKey: string | undefined,
+): Promise<unknown | undefined> {
+  // A server too old to serve the script, or a page that refuses to evaluate
+  // it, must not fail the snapshot: structural analysis is an enhancement, and
+  // the screenshot comparison still stands without it.
+  try {
+    if (domCaptureScript === undefined) {
+      const payload = await getJson(serverUrl, '/api/sdk/dom-capture-js', apiKey);
+      domCaptureScript = typeof payload['js'] === 'string' ? (payload['js'] as string) : null;
+    }
+    if (!domCaptureScript) return undefined;
+    return await page.evaluate(domCaptureScript);
+  } catch {
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main export: visualSnapshot()
 // ---------------------------------------------------------------------------
 
@@ -147,6 +222,7 @@ export async function visualSnapshot(
   const imageBase64 = screenshotBuffer.toString('base64');
   const viewportSize = page.viewportSize();
   const currentUrl = page.url();
+  const dom = await captureDom(page, serverUrl, apiKey);
 
   const payload: Record<string, unknown> = {
     name,
@@ -158,9 +234,14 @@ export async function visualSnapshot(
     threshold_pct: options.thresholdPct ?? 0.5,
     pixel_threshold: options.pixelThreshold ?? 20,
     min_region_area: options.minRegionArea ?? 120,
-    comparison_mode: options.comparisonMode ?? 'ai',
+    // "hybrid", matching the CLI, the dashboard and the suite runner. "ai"
+    // discards the pixel signal entirely and lets the model alone decide
+    // pass/fail — the least safe default anywhere, and worst of all here,
+    // where an upload historically carried no structural evidence either.
+    comparison_mode: options.comparisonMode ?? 'hybrid',
     suite_name: options.suiteName ?? null,
   };
+  if (dom) payload['dom'] = dom;
 
   try {
     const result = await postJson(serverUrl, '/api/sdk/snapshot', apiKey, payload);

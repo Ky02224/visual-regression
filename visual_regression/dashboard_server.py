@@ -826,6 +826,42 @@ def get_dashboard(paths=Depends(get_paths_dep), project_root=Depends(get_project
     snapshot = build_dashboard_snapshot(project_root, paths)
     return snapshot
 
+@app.get("/api/sdk/dom-capture-js")
+def get_sdk_dom_capture_js(authorized=Depends(require_dev_or_admin)):
+    """The DOM snapshot script, served so the SDK does not carry a copy.
+
+    Structural comparison is what separates this tool from a pixel differ, and
+    it needs element data from both sides. An SDK that only uploads a screenshot
+    leaves diagnose_from_dom_diff with nothing to compare and the model with its
+    structural features all zero — the strongest signal in the system, switched
+    off for the integration path a team is most likely to adopt.
+
+    Handing out the script rather than duplicating it in TypeScript means the
+    two cannot drift: a field added to the capture (parent indices, most
+    recently) reaches SDK clients without a matching release.
+    """
+    from .browser import _CAPTURE_DOM_SNAPSHOT_JS
+    return {"js": _CAPTURE_DOM_SNAPSHOT_JS}
+
+
+def _write_dom_sidecar(image_path: Path, dom_payload: object) -> None:
+    """Store a DOM snapshot where assess_result and the DOM diff look for it.
+
+    Both resolve `<image>.dom.json` beside the image, so an uploaded snapshot
+    only has to land there to be picked up by every downstream consumer.
+    """
+    if not isinstance(dom_payload, dict) or not dom_payload.get("elements"):
+        return
+    try:
+        image_path.with_suffix(".dom.json").write_text(
+            json.dumps(dom_payload), encoding="utf-8"
+        )
+    except Exception as exc:
+        # A snapshot that cannot be written costs structural analysis for this
+        # comparison; it should not fail the upload the client is waiting on.
+        logger.warning("Could not write DOM sidecar for %s: %s", image_path.name, exc)
+
+
 @app.get("/api/suite-summary")
 def get_suite_summary(file: str = Query(None), paths=Depends(get_paths_dep), user=Depends(require_auth)):
     """One suite summary, including its per-case rows.
@@ -1702,6 +1738,16 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
         capture_meta = {**build_capture_metadata(mock_cfg), "updated_by": "sdk", "source": "sdk-upload"}
         try:
             manager.save_from_image(name=name, source_image_path=tmp_path, capture_meta=capture_meta)
+            # Store the uploaded DOM beside the baseline image so later
+            # comparisons have a structural reference to diff against — without
+            # it the baseline side is blank and DOM analysis cannot run at all,
+            # however much structure the current page later supplies.
+            baseline_dir = paths.baselines_dir / manager.normalize_name(name)
+            for candidate in ("baseline.webp", "baseline.png"):
+                stored = baseline_dir / candidate
+                if stored.is_file():
+                    _write_dom_sidecar(stored, payload.get("dom"))
+                    break
         finally:
             tmp_path.unlink(missing_ok=True)
         _DashboardCache.invalidate(paths)
@@ -1735,6 +1781,7 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
 
     current_path = run_dir / "current.webp"
     _save_image(current_path, decoded_upload)
+    _write_dom_sidecar(current_path, payload.get("dom"))
     baseline_image_path = manager.resolve_baseline_image_path(name)
 
     ignore_regions = []

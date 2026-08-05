@@ -430,3 +430,78 @@ def test_t10_static_path_traversal_blocked(srv):
     resp2 = conn.getresponse()
     body2 = resp2.read()
     assert b"playwright" not in body2, f"Path traversal succeeded on root fallback: {body2[:100]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T-11 — SDK uploads carry DOM, so structural analysis works on that path too
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dom_payload(elements: list) -> dict:
+    return {
+        "elements": elements,
+        "tag_counts": {},
+        "total_elements": len(elements),
+        "avg_depth": 3.0,
+        "interactive_count": 0,
+        "has_form": False, "has_img": True, "has_video": False, "has_iframe": False,
+    }
+
+
+def test_t11_sdk_snapshot_stores_dom_sidecar(srv):
+    # The SDK holds a Playwright Page, so it can capture the DOM as cheaply as
+    # the screenshot — but it used to send only the image. That left
+    # diagnose_from_dom_diff with nothing to compare and every structural
+    # feature at zero, disabling this tool's strongest signal for exactly the
+    # integration a team is most likely to adopt. The sidecar is what every
+    # downstream consumer reads, so assert it reaches disk.
+    port, paths, store = srv
+    cookie = _login(port)
+    elements = [
+        {"tag": "div", "x": 10, "y": 10, "w": 200, "h": 120, "eid": "hero"},
+        {"tag": "img", "x": 20, "y": 20, "w": 100, "h": 60, "p": 0},
+    ]
+
+    status, data = _api(
+        port, "/api/sdk/snapshot",
+        method="POST",
+        body={"name": "dom-carrying-page", "image": _b64_png(),
+              "dom": _dom_payload(elements)},
+        cookie=cookie,
+    )
+    assert status == 200 and data.get("action") == "baseline_created", data
+
+    baseline_dir = paths.baselines_dir / "dom-carrying-page"
+    sidecars = list(baseline_dir.glob("baseline.dom.json"))
+    assert sidecars, f"no DOM sidecar written; dir holds {[p.name for p in baseline_dir.iterdir()]}"
+    stored = json.loads(sidecars[0].read_text(encoding="utf-8"))
+    assert len(stored["elements"]) == 2
+
+
+def test_t11b_sdk_snapshot_without_dom_still_succeeds(srv):
+    # Older SDKs, and pages that refuse to evaluate the capture script, send no
+    # DOM at all. That has to stay a working screenshot comparison rather than
+    # an error, so the sidecar is simply absent.
+    port, paths, store = srv
+    cookie = _login(port)
+    status, data = _api(
+        port, "/api/sdk/snapshot",
+        method="POST",
+        body={"name": "no-dom-page", "image": _b64_png()},
+        cookie=cookie,
+    )
+    assert status == 200 and data.get("action") == "baseline_created", data
+    baseline_dir = paths.baselines_dir / "no-dom-page"
+    assert baseline_dir.is_dir()
+    assert not list(baseline_dir.glob("*.dom.json"))
+
+
+def test_t11c_dom_capture_script_is_served_to_clients(srv):
+    # The SDK fetches the capture script instead of carrying a copy, so the two
+    # cannot drift apart — a field added to the capture (parent indices, most
+    # recently) reaches clients without an SDK release.
+    port, *_ = srv
+    cookie = _login(port)
+    status, data = _api(port, "/api/sdk/dom-capture-js", cookie=cookie)
+    assert status == 200, data
+    js = data.get("js") or ""
+    assert "querySelectorAll" in js and "getBoundingClientRect" in js
