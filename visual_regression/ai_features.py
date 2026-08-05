@@ -850,47 +850,6 @@ def diagnose_from_dom_diff(
             f"DOM diff: the <{tag}> element's font changed from '{el.get('font')}' "
             f"to '{match.get('font')}'."
         )
-    # A weak "missing" verdict stays last because proximity alone is the
-    # noisiest thing this function reports — but one signal turns it into
-    # arithmetic rather than a guess. When an element is removed, everything
-    # below it reflows upward by that element's own height. So if several
-    # elements underneath a vanished candidate all shifted up by close to its
-    # height, with their horizontal position unchanged, the removal is
-    # confirmed by the geometry of the elements that stayed.
-    #
-    # This matters because the reflow is exactly what outranks the removal
-    # today: the displaced siblings land in `moved`, which resolves ahead of
-    # weak-missing, so a removed <li> gets reported as a layout shift — naming
-    # the consequence instead of the cause. Measured over 500 samples, 7 of the
-    # 17 missing-element errors were reported as layout-issue and 4 as
-    # color-regression, all of them side effects of a removal.
-    def _reflow_confirms(candidate: dict) -> bool:
-        height = float(candidate.get("h", 0) or 0)
-        if height < 4:
-            return False  # too small for its removal to be legible in a shift
-        cand_y = float(candidate.get("y", 0) or 0)
-        tolerance = max(8.0, height * 0.25)
-        agreeing = 0
-        for el, match in moved:
-            if float(el.get("y", 0) or 0) <= cand_y:
-                continue  # only content below the gap reflows into it
-            if abs(float(match.get("x", 0)) - float(el.get("x", 0))) > 8:
-                continue  # a sideways move is not this reflow
-            rise = float(el.get("y", 0)) - float(match.get("y", 0))
-            if abs(rise - height) <= tolerance:
-                agreeing += 1
-        # Two independent elements agreeing on the same displacement rules out
-        # a single unrelated element happening to sit one height away.
-        return agreeing >= 2
-
-    for candidate in missing_generic_weak:
-        if _reflow_confirms(candidate):
-            tag = candidate.get("tag", "")
-            return "missing-element", (
-                f"DOM diff: a <{tag}> element is missing from the current page, "
-                f"confirmed by the elements below it shifting up by its height."
-            )
-
     if color_changed:
         el, match, prop, human = color_changed[0]
         tag = el.get("tag", "")
