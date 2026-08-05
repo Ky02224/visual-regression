@@ -32,7 +32,10 @@ captures its own reference from the commit under test cannot fail at all.
 - Baseline creation, update and version history
 - Visual compare and batch suite execution
 - Locale / timezone / device aware capture
-- AI-assisted change classification with a ResNet50 Siamese + OpenCV/SSIM fusion model
+- Change classification from structural DOM comparison fused with a ResNet50
+  Siamese + OpenCV/SSIM model
+- Playwright SDK that uploads DOM alongside screenshots, so an existing suite
+  gets structural analysis rather than pixel-only comparison
 - Public UI dataset ingestion for WebUI / RICO / Screen Annotation manifests
 - HTML report, JSON summary and JUnit output
 - Role-based access control (admin / developer / viewer) with session auth
@@ -146,7 +149,7 @@ Evaluation summaries are written to `.visual-regression\reports\ai-eval-*.json` 
 ## Playwright SDK
 
 `sdk/` is a TypeScript package that lets an existing Playwright suite send
-screenshots to this server, as a drop-in alternative to Percy:
+snapshots to this server, as a drop-in alternative to Percy:
 
 ```typescript
 import { visualSnapshot } from '../vr-sdk/dist/index';
@@ -156,6 +159,18 @@ test('homepage looks correct', async ({ page }) => {
   await visualSnapshot(page, 'homepage');
 });
 ```
+
+That one line uploads the DOM as well as the screenshot, which is what separates
+this from a pixel differ. Structural comparison needs element data from both
+sides, so an image-only upload leaves it nothing to work with; the SDK already
+holds a Playwright `Page`, so the snapshot is one `evaluate()` away. Suites that
+integrate this way get the same structural analysis as a locally driven capture
+rather than falling back to pixel arithmetic.
+
+The capture script is fetched from `/api/sdk/dom-capture-js` rather than
+duplicated in TypeScript, so the two cannot drift — a field added to the capture
+reaches clients without an SDK release. A page that refuses to run it still
+uploads a working screenshot comparison.
 
 Build it with `cd sdk && npm install && npm run build`. Authentication uses the
 automation access key from the Integrations page (`VR_API_KEY`). See
