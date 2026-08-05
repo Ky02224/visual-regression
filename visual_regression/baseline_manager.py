@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -475,6 +476,18 @@ class BaselineManager:
                 "created_at": previous_meta.get("created_at", now),
                 "updated_at": now,
                 "capture": capture_meta,
+                # Chromium renders text differently per platform and font set, so
+                # a baseline is only valid against runs from the same kind of
+                # machine — a Windows-captured reference fails on a Linux runner
+                # for reasons that have nothing to do with the page. Nothing
+                # recorded where a baseline came from, which left that mismatch
+                # undetectable until the diff images were opened. See
+                # tests/test_baseline_provenance.py, which uses this to keep
+                # dev-machine captures out of the committed set.
+                "system": {
+                    "platform": platform.system(),
+                    "release": platform.release(),
+                },
                 "history": history[-25:],
             }
             if ignore_regions is not None:
