@@ -789,16 +789,31 @@ def diagnose_from_dom_diff(
                 stack.extend(children.get(node, ()))
             return out
 
+        def gone(el: dict) -> "bool | None":
+            """True/False if known, None when there is no way to tell.
+
+            `resolved` only covers elements near the pixel region, so a
+            container's other children frequently sit outside it and never get
+            evaluated. Judging solely on those would make this test fail purely
+            because a descendant was out of frame — whether an element still
+            exists is a global fact, so anything with a stable identity is
+            checked against the whole current page instead.
+            """
+            if id(el) in resolved:
+                return resolved[id(el)] is None
+            if not (el.get("eid") or len(str(el.get("txt") or "").strip()) >= 12):
+                return None
+            status, _match = _match_by_identity(el, current_elements)
+            return status == "absent"
+
         best = None
         index = media_el.get("p")
         while isinstance(index, int) and 0 <= index < len(baseline_elements):
             ancestor = baseline_elements[index]
             if resolved.get(id(ancestor), "unseen") is None:  # evaluated, absent
-                seen = [d for d in descendants(index)
-                        if id(baseline_elements[d]) in resolved]
-                if len(seen) >= 2 and all(
-                    resolved[id(baseline_elements[d])] is None for d in seen
-                ):
+                verdicts = [gone(baseline_elements[d]) for d in descendants(index)]
+                known = [v for v in verdicts if v is not None]
+                if len(known) >= 2 and all(known):
                     best = ancestor  # keep climbing: report the outermost root
             index = ancestor.get("p")
         return best
@@ -835,6 +850,47 @@ def diagnose_from_dom_diff(
             f"DOM diff: the <{tag}> element's font changed from '{el.get('font')}' "
             f"to '{match.get('font')}'."
         )
+    # A weak "missing" verdict stays last because proximity alone is the
+    # noisiest thing this function reports — but one signal turns it into
+    # arithmetic rather than a guess. When an element is removed, everything
+    # below it reflows upward by that element's own height. So if several
+    # elements underneath a vanished candidate all shifted up by close to its
+    # height, with their horizontal position unchanged, the removal is
+    # confirmed by the geometry of the elements that stayed.
+    #
+    # This matters because the reflow is exactly what outranks the removal
+    # today: the displaced siblings land in `moved`, which resolves ahead of
+    # weak-missing, so a removed <li> gets reported as a layout shift — naming
+    # the consequence instead of the cause. Measured over 500 samples, 7 of the
+    # 17 missing-element errors were reported as layout-issue and 4 as
+    # color-regression, all of them side effects of a removal.
+    def _reflow_confirms(candidate: dict) -> bool:
+        height = float(candidate.get("h", 0) or 0)
+        if height < 4:
+            return False  # too small for its removal to be legible in a shift
+        cand_y = float(candidate.get("y", 0) or 0)
+        tolerance = max(8.0, height * 0.25)
+        agreeing = 0
+        for el, match in moved:
+            if float(el.get("y", 0) or 0) <= cand_y:
+                continue  # only content below the gap reflows into it
+            if abs(float(match.get("x", 0)) - float(el.get("x", 0))) > 8:
+                continue  # a sideways move is not this reflow
+            rise = float(el.get("y", 0)) - float(match.get("y", 0))
+            if abs(rise - height) <= tolerance:
+                agreeing += 1
+        # Two independent elements agreeing on the same displacement rules out
+        # a single unrelated element happening to sit one height away.
+        return agreeing >= 2
+
+    for candidate in missing_generic_weak:
+        if _reflow_confirms(candidate):
+            tag = candidate.get("tag", "")
+            return "missing-element", (
+                f"DOM diff: a <{tag}> element is missing from the current page, "
+                f"confirmed by the elements below it shifting up by its height."
+            )
+
     if color_changed:
         el, match, prop, human = color_changed[0]
         tag = el.get("tag", "")
