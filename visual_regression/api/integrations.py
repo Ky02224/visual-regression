@@ -27,6 +27,7 @@ from .deps import (
     get_paths_dep,
     get_port_dep,
     get_project_root_dep,
+    get_store_dep,
     require_admin,
     require_auth,
 )
@@ -107,17 +108,29 @@ def post_integrations_test_webhook(payload: dict, paths=Depends(get_paths_dep), 
 # ---------------------------------------------------------------------------
 
 @router.post("/api/integrations/rotate-key")
-def post_integrations_rotate_key(paths=Depends(get_paths_dep), user=Depends(require_admin)):
+def post_integrations_rotate_key(paths=Depends(get_paths_dep), store=Depends(get_store_dep), user=Depends(require_admin)):
     new_key = IntegrationsManager(paths.root).rotate_api_key()
     # Drop the cached key immediately: otherwise the old one keeps authorising
     # requests for up to the cache TTL after it was supposedly revoked.
     with _API_KEY_LOCK:
         _API_KEY_CACHE.clear()
+    # Revoking the credential every SDK client authenticates with is the single
+    # most disruptive action an admin can take here; it belonged in the trail.
+    # The key itself is deliberately not in the detail — an audit log readable
+    # by admins would otherwise become a second place the secret lives.
+    if store:
+        store.audit(user.email, user.role, "integrations.rotate_key", {})
     return {"ok": True, "api_key": new_key}
 
 
 @router.post("/api/integrations/reveal-key")
-def post_integrations_reveal_key(paths=Depends(get_paths_dep), user=Depends(require_admin)):
+def post_integrations_reveal_key(paths=Depends(get_paths_dep), store=Depends(get_store_dep), user=Depends(require_admin)):
+    # Every other endpoint masks this key; this one hands it over in full. That
+    # is the point of it, and it is exactly why reading it needs to leave a
+    # record — otherwise the only credential in the system can be copied with
+    # nothing anywhere to say it happened. The key stays out of the detail.
+    if store:
+        store.audit(user.email, user.role, "integrations.reveal_key", {})
     return {"ok": True, "api_key": IntegrationsManager(paths.root).reveal_api_key()}
 
 
