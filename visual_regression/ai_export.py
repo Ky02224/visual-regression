@@ -172,10 +172,16 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
         from onnxruntime.quantization import quantize_static, QuantType, CalibrationDataReader
         
         class ONNXCalibrationDataReader(CalibrationDataReader):
-            def __init__(self, samples, image_size):
+            def __init__(self, samples, image_size, rule_dim):
                 super().__init__()
                 self.samples = samples
                 self.image_size = image_size
+                # The width the graph being calibrated actually declares. This
+                # was hardcoded to len(FULL_FEATURE_NAMES), so quantising a
+                # model trained at any other width fed the calibrator inputs the
+                # graph could not take — and the activation ranges it collects
+                # are what the INT8 scales are derived from.
+                self.rule_dim = int(rule_dim)
                 self.index = 0
 
             def get_next(self):
@@ -192,10 +198,12 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
 
                 left_batch = normalize_batch_uint8(np.expand_dims(baseline_rgb, 0))
                 right_batch = normalize_batch_uint8(np.expand_dims(current_rgb, 0))
-                # Pad rule features if they don't match the FULL_FEATURE_NAMES dim (48)
-                target_dim = len(FULL_FEATURE_NAMES)
-                if len(rule_features) < target_dim:
-                    rule_features = np.pad(rule_features, (0, target_dim - len(rule_features)), mode="constant")
+                rule_features = np.asarray(rule_features)
+                if len(rule_features) > self.rule_dim:
+                    rule_features = rule_features[: self.rule_dim]
+                elif len(rule_features) < self.rule_dim:
+                    rule_features = np.pad(
+                        rule_features, (0, self.rule_dim - len(rule_features)), mode="constant")
                 rule_batch = np.expand_dims(rule_features, 0).astype(np.float32)
                 return {
                     "left_image": left_batch,
@@ -212,7 +220,8 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
         torch, _ = _require_torch()
         checkpoint = torch.load(onnx_path.with_suffix(".pt"), map_location="cpu", weights_only=False) if onnx_path.with_suffix(".pt").exists() else {}
         img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
-        reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size)
+        rule_dim = len(checkpoint.get("rule_feature_names", FULL_FEATURE_NAMES))
+        reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size, rule_dim)
 
         logger.info("[ONNX Quantization] Starting static INT8 quantization...")
         quantize_static(
@@ -392,6 +401,16 @@ def _load_legacy_or_hybrid_model(model_path: Path):
         "model_type": model_type,
         "class_names": class_names,
         "calibrated_temperature": float(checkpoint.get("calibrated_temperature", 1.3)),
+        # The three numbers an inference path needs to build an input this head
+        # will accept. They are known exactly here — rule_dim from the width the
+        # checkpoint was trained at, embedding_dim from the backbone that was
+        # actually built, num_streams from the head's own first layer — and
+        # dropping them forced every consumer to reverse-engineer them from
+        # `head.parameters()` against a hardcoded 2048, which is right only for
+        # ResNet50 and guesses wrong whenever a stream count changes.
+        "rule_dim": rule_dim,
+        "embedding_dim": embedding_dim,
+        "num_streams": num_streams,
     }
     if mtime is not None:
         with _model_cache_lock:

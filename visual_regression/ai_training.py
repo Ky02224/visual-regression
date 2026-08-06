@@ -2160,12 +2160,14 @@ def assess_result(
             expected_rule_dim = rule_input_shape[1] if len(rule_input_shape) > 1 else len(RULE_FEATURE_NAMES)
         except Exception:
             expected_rule_dim = len(RULE_FEATURE_NAMES)
-        if expected_rule_dim == len(FULL_FEATURE_NAMES):
-            rule_vector = _fit_rule_vector(
-                [rule_vector_base, dom_vec, struct_vec], expected_rule_dim
-            ).reshape(1, -1).astype(np.float32)
-        else:
-            rule_vector = rule_vector_base.reshape(1, -1).astype(np.float32)
+        # Fit to what the session declares rather than testing for equality with
+        # the current feature list: an exported model is frozen at the width it
+        # was built with, so appending a feature block made `==` false forever
+        # and dropped every DOM feature on this path — the session then rejected
+        # a 9-wide input it had been compiled to take 48 of.
+        rule_vector = _fit_rule_vector(
+            [rule_vector_base, dom_vec, struct_vec], expected_rule_dim
+        ).reshape(1, -1).astype(np.float32)
 
         session = loaded["session"]
         baseline_batch = normalize_batch_uint8(ensure_rgb_batch(all_left_imgs, image_size=img_size))
@@ -2242,19 +2244,21 @@ def assess_result(
     backbone_name = loaded.get("model_type", "resnet50").split("-")[0]
     dummy_emb = embedding_cache.get_or_compute_array(dummy_arr, loaded["backbone"], device, backbone_name=backbone_name)
 
-    try:
-        head_first_layer_in = next(loaded["head"].parameters()).shape[1]
-        _emb_dim = dummy_emb.shape[1]
-        # Subtract however many embedding streams this head was actually built
-        # for. The stream count is decided further down by the same
-        # `>= _emb_dim * 4` test; assuming three here made the remainder a whole
-        # embedding too large (2096 rather than 48 on the shipped model), which
-        # stayed invisible only while the caller used this value as a yes/no
-        # "is the full feature width supported" flag rather than a width.
-        streams = 4 if head_first_layer_in >= (_emb_dim * 4) else 3
-        expected_rule_dim = head_first_layer_in - (_emb_dim * streams)
-    except Exception:
-        expected_rule_dim = len(RULE_FEATURE_NAMES)
+    # The loader publishes the width this head was trained at. Prefer it: the
+    # arithmetic below recovers the same number only when both the embedding
+    # width and the stream count are guessed correctly, and getting the stream
+    # count wrong leaves a whole embedding in the remainder (2096 rather than 48
+    # on the shipped model).
+    model_streams = int(loaded.get("num_streams") or 0)
+    expected_rule_dim = int(loaded.get("rule_dim") or 0)
+    if not expected_rule_dim:
+        try:
+            head_first_layer_in = next(loaded["head"].parameters()).shape[1]
+            _emb_dim = dummy_emb.shape[1]
+            streams = model_streams or (4 if head_first_layer_in >= (_emb_dim * 4) else 3)
+            expected_rule_dim = head_first_layer_in - (_emb_dim * streams)
+        except Exception:
+            expected_rule_dim = len(RULE_FEATURE_NAMES)
     full_rule = _fit_rule_vector([rule_vector_base, dom_vec, struct_vec], expected_rule_dim)
     rule_vector = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0).to(device)
 
@@ -2273,13 +2277,17 @@ def assess_result(
         rule_t_batch = rule_vector.expand(len(all_left_imgs), -1)
 
         # Check if model has 4 streams
-        _emb_dim = dummy_emb.shape[1]
-        try:
-            head_first_layer_in = next(loaded["head"].parameters()).shape[1]
-        except Exception:
-            head_first_layer_in = (_emb_dim * 3) + rule_t_batch.shape[1]
+        if model_streams:
+            wants_diff_stream = model_streams >= 4
+        else:
+            _emb_dim = dummy_emb.shape[1]
+            try:
+                head_first_layer_in = next(loaded["head"].parameters()).shape[1]
+            except Exception:
+                head_first_layer_in = (_emb_dim * 3) + rule_t_batch.shape[1]
+            wants_diff_stream = head_first_layer_in >= (_emb_dim * 4)
 
-        if head_first_layer_in >= (_emb_dim * 4):
+        if wants_diff_stream:
             left_t_norm = torch.tensor(normalize_batch_uint8(ensure_rgb_batch(all_left_imgs, image_size=img_size)), dtype=torch.float32, device=device)
             right_t_norm = torch.tensor(normalize_batch_uint8(ensure_rgb_batch(all_right_imgs, image_size=img_size)), dtype=torch.float32, device=device)
             diff_t_norm = (left_t_norm - right_t_norm).abs()
@@ -2372,6 +2380,11 @@ def assess_results_batch(
         img_size = int(loaded["image_size"])
         threshold = float(loaded["threshold"])
         class_names = list(loaded["class_names"])
+        # Fixed by the model, not by the item, so it is resolved once here
+        # rather than per row. The loader knows all three exactly; the fallbacks
+        # only matter for a stub `loaded` dict, as the tests use.
+        expected_rule_dim = int(loaded.get("rule_dim") or len(RULE_FEATURE_NAMES))
+        model_streams = int(loaded.get("num_streams") or 0)
 
         with torch.no_grad():
             for batch_start in range(0, len(results_list), _BATCH_SIZE):
@@ -2404,24 +2417,20 @@ def assess_results_batch(
                     bl_dom = load_dom_snapshot(bl_path) if bl_path else None
                     cu_dom = load_dom_snapshot(cu_path) if cu_path else None
                     dom_vec = dom_feature_vector_from_snapshots(bl_dom, cu_dom)
-                    try:
-                        head_first_in = next(head.parameters()).shape[1]
-                        _emb_dim_hint = 2048  # ResNet50 default
-                        expected_rule_dim = head_first_in - (_emb_dim_hint * 3)
-                    except Exception:
-                        expected_rule_dim = len(RULE_FEATURE_NAMES)
-                    if expected_rule_dim >= len(FULL_FEATURE_NAMES):
-                        rule_rows.append(np.concatenate([rule_base, dom_vec]))
-                    else:
-                        rule_rows.append(rule_base)
+                    struct_vec = struct_feature_vector(
+                        (bl_dom or {}).get("elements"), (cu_dom or {}).get("elements"))
+                    rule_rows.append(_fit_rule_vector(
+                        [rule_base, dom_vec, struct_vec], expected_rule_dim))
 
                 # Stack batches
                 left_np = ensure_rgb_batch(left_crops, image_size=img_size)
                 right_np = ensure_rgb_batch(right_crops, image_size=img_size)
-                target_dim = len(FULL_FEATURE_NAMES)
-                rule_np = np.stack([
-                    np.pad(r, (0, max(0, target_dim - len(r))), mode="constant") for r in rule_rows
-                ]).astype(np.float32)
+                # Stacked as fitted. Padding back up to FULL_FEATURE_NAMES here
+                # undid the fit above: a head compiled for 9 rule inputs was
+                # handed 48, torch.cat produced a width it could not accept, and
+                # the outer handler quietly dropped the whole batch to the
+                # one-by-one fallback.
+                rule_np = np.stack(rule_rows).astype(np.float32)
 
                 left_t = torch.tensor(normalize_batch_uint8(left_np), dtype=torch.float32, device=device)
                 right_t = torch.tensor(normalize_batch_uint8(right_np), dtype=torch.float32, device=device)
@@ -2430,12 +2439,19 @@ def assess_results_batch(
                 left_emb = backbone(left_t).flatten(1)
                 right_emb = backbone(right_t).flatten(1)
                 emb_dim = left_emb.shape[1]
-                try:
-                    head_first_in = next(head.parameters()).shape[1]
-                except Exception:
-                    head_first_in = (emb_dim * 3) + rule_t.shape[1]
+                if model_streams:
+                    wants_diff_stream = model_streams >= 4
+                else:
+                    # No stream count published (stub or older loader): fall back
+                    # to reading the head's own first layer, using the embedding
+                    # width the backbone just produced rather than assuming one.
+                    try:
+                        head_first_in = next(head.parameters()).shape[1]
+                    except Exception:
+                        head_first_in = (emb_dim * 3) + rule_t.shape[1]
+                    wants_diff_stream = head_first_in >= (emb_dim * 4)
 
-                if head_first_in >= (emb_dim * 4):
+                if wants_diff_stream:
                     diff_t = (left_t - right_t).abs()
                     diff_emb = backbone(diff_t).flatten(1)
                     combined = torch.cat([left_emb, right_emb, (left_emb - right_emb).abs(), diff_emb, rule_t], dim=1)
