@@ -44,10 +44,46 @@ def _resolve_with_legacy_png(base: Path, relative: str) -> Path:
     return resolved
 
 
+def _sniffed_image_type(path: Path) -> str | None:
+    """The image type the bytes actually are, or None if not a known image.
+
+    reporter.save_image encodes WebP and writes it to whatever path it was
+    handed, so a stored file's extension says nothing about its encoding. Both
+    directions occur in practice: baselines captured as `baseline.png` hold WebP
+    bytes, and a full-page screenshot taller than WebP's 16383px limit falls back
+    to PNG bytes under a `.webp` name.
+
+    FileResponse derives Content-Type from the extension, so it was announcing
+    the wrong type for either case. Browsers sniff and render it anyway, which is
+    why this stayed invisible — but Content-Type is what every non-browser
+    consumer trusts, and a header that contradicts the payload is worth more
+    than a rendering bug: it is a claim the server makes and cannot support.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(12)
+    except OSError:
+        return None
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    return None
+
+
 def _serve(path: Path, headers: dict | None = None) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path, headers=headers) if headers else FileResponse(path)
+    kwargs = {}
+    if headers:
+        kwargs["headers"] = headers
+    if path.suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"}:
+        sniffed = _sniffed_image_type(path)
+        if sniffed:
+            kwargs["media_type"] = sniffed
+    return FileResponse(path, **kwargs)
 
 
 @router.get("/baseline/{baseline_name}/{version_or_file:path}")
