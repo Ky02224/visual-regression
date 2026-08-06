@@ -158,6 +158,13 @@ def export_to_onnx(model_path: Path):
             # (48-dim rule vector) from a base one (9-dim) and always assumes
             # 9 — feeding the wrong input width into a model traced with more.
             "rule_feature_names": list(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES)),
+            # The same reasoning one line up, for scale rather than width. A
+            # model trained on standardised features and then served
+            # unstandardised receives inputs orders of magnitude away from
+            # anything it saw in training — and the ONNX sidecar, not the
+            # checkpoint, is what the deployed path reads.
+            "rule_feature_mean": checkpoint.get("rule_feature_mean"),
+            "rule_feature_std": checkpoint.get("rule_feature_std"),
         }
         json_path = model_path.with_suffix(".json")
         json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -280,6 +287,7 @@ def _load_legacy_or_hybrid_model(model_path: Path):
             scripted.eval()
             class_names_ts = list(ts_meta.get("class_names", []))
             loaded_dict_ts: Dict[str, Any] = {
+                "models_dir": model_path.parent,
                 "type": "torchscript-multiclass" if class_names_ts else "torchscript-binary",
                 "torch": torch,
                 "scripted": scripted,
@@ -288,6 +296,8 @@ def _load_legacy_or_hybrid_model(model_path: Path):
                 "model_type": ts_meta.get("model_type", "resnet50-siamese-rule-fusion-multiclass"),
                 "class_names": class_names_ts,
                 "rule_dim": len(ts_meta.get("rule_feature_names", RULE_FEATURE_NAMES)),
+                "rule_feature_mean": ts_meta.get("rule_feature_mean"),
+                "rule_feature_std": ts_meta.get("rule_feature_std"),
             }
             logger.info("[TorchScript] Loaded scripted model from %s", torchscript_path.name)
             if mtime is not None:
@@ -331,12 +341,15 @@ def _load_legacy_or_hybrid_model(model_path: Path):
             session = ort.InferenceSession(str(onnx_file), sess_opts)
 
             loaded_dict = {
+                "models_dir": model_path.parent,
                 "type": "onnx-hybrid-multiclass" if class_names else "onnx-hybrid-binary",
                 "session": session,
                 "threshold": threshold,
                 "image_size": image_size,
                 "model_type": model_type,
                 "class_names": class_names,
+                "rule_feature_mean": meta.get("rule_feature_mean"),
+                "rule_feature_std": meta.get("rule_feature_std"),
             }
             if mtime is not None:
                 with _model_cache_lock:
@@ -392,6 +405,7 @@ def _load_legacy_or_hybrid_model(model_path: Path):
     head.eval()
 
     loaded_dict = {
+        "models_dir": model_path.parent,
         "type": "hybrid-multiclass" if class_names else "hybrid-binary",
         "torch": torch,
         "backbone": backbone,
@@ -401,6 +415,8 @@ def _load_legacy_or_hybrid_model(model_path: Path):
         "model_type": model_type,
         "class_names": class_names,
         "calibrated_temperature": float(checkpoint.get("calibrated_temperature", 1.3)),
+        "rule_feature_mean": checkpoint.get("rule_feature_mean"),
+        "rule_feature_std": checkpoint.get("rule_feature_std"),
         # The three numbers an inference path needs to build an input this head
         # will accept. They are known exactly here — rule_dim from the width the
         # checkpoint was trained at, embedding_dim from the backbone that was
