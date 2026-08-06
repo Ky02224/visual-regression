@@ -102,28 +102,78 @@ The distinction that matters is *when the rule can be evaluated*:
   relation between two labels.
 
 The honest caveat: this defect was found by grouping the residual errors, and it
-happens to move six of them from wrong to right. Being found that way does not
-make it wrong — the labels really were unattainable — but it does mean it cannot
-be waved through on the strength of the reasoning alone. What keeps it
-falsifiable is that the rule is stated on the input, so it can be checked
-without reference to any score, and it relabels trials the classifier gets right
-just as readily as ones it gets wrong.
+moves trials from wrong to right. Being found that way does not make it wrong —
+the labels really were unattainable — but it means it cannot be waved through on
+the strength of the reasoning alone. What keeps it falsifiable is that the rule
+is stated on the input, so it can be checked without reference to any score.
+
+### What it actually cost, measured
+
+The harness is deterministic given a seed: re-running seed 1000 reproduced all
+fifty trials — same sites, same mutation targets, same predictions, 46/50 either
+way. Each record also stores both labels (`requested_category` and `expected`),
+so the same 500 trials can be scored under both rules with nothing else varying.
+
+```
+  old labelling (by which node was deleted) : 470/500 = 94.00%
+  new labelling (by what left the page)     : 475/500 = 95.00%
+  net effect                                :   +5 trials
+```
+
+**All five moved from wrong to right. None moved the other way.** An earlier
+draft of this amendment claimed the rule "relabels trials the classifier gets
+right just as readily as ones it gets wrong". That is false, and predictably so:
+the classifier reads the rendered result, and this rule aligns ground truth with
+the rendered result, so it can only ever agree with the classifier more often on
+the affected trials. The change is one-directional by construction.
+
+That is not an argument against making it — a label the input does not determine
+is not a label worth scoring — but it does mean the +1.00pp is *not* evidence of
+anything about the model, and it disposes of any reading in which the harness
+was independently confirming the fix. Five trials, all favourable, is what the
+argument predicts and therefore not a test of it. The test is the reasoning about
+attainability, which stands or falls on its own.
+
+The five affected trials are listed here so the claim is checkable rather than
+asserted: two on developer.mozilla.org and books.toscrape.com (seed 1001), two on
+old.reddit.com (seeds 1003 and 1004), one on en.wikipedia.org (seed 1007) — each
+a `missing-element` request whose removed subtree contained a thumbnail, each
+predicted `broken-image`.
 
 The other two pairs — `missing-element`/`layout-issue` and
 `text-issue`/`layout-issue` — are untouched. Those are genuine coincidence of
 events, not mislabelling, and they continue to be scored strictly.
 
-### Consequence: the published figure is stale
+### The published figure, re-measured
 
-**94.20% was measured under the old labelling and is not comparable to anything
-measured after this change.** Until `scripts/live_eval_multiseed.py` is re-run
-across all ten seeds:
+`scripts/live_eval_multiseed.py` was re-run across all ten seeds on 2026-08-06.
+**The headline is now 95.00% (475/500), across-seed σ 2.36%, 95% CI
+[93.09%, 96.91%]** — `reports/live-eval-summary.json`.
 
-- `reports/live-eval-summary.json` and the 94.20% in the README's verification
-  table describe the previous ground truth.
-- The error table at the top of this ADR describes that same previous run. The
-  six `missing-element -> broken-image` rows are the ones this amendment
-  reclassifies; the remaining counts should be re-derived, not adjusted by hand.
+The previous run is kept as `reports/live-eval-summary-prelabelfix.json` rather
+than deleted, so the comparison above can be re-derived by anyone who wants to
+check it.
 
-The re-run is the outstanding work. No figure from it should be published
-alongside the old one without saying which labelling each was measured under.
+Three things about that number, none of which should be skipped when quoting it:
+
+- **It is not an improvement in the system.** +1.00pp of it is the labelling
+  correction, which is one-directional by construction (above). Nothing in the
+  classifier changed.
+- **94.20% and 95.00% are not two measurements of the same thing.** The old file
+  says 471/500; scoring today's identical trials under the old rule gives
+  470/500. That residual trial is page drift between 2026-08-03 and 2026-08-06,
+  not a code change — which is roughly the scale of noise to expect from
+  evaluating against live sites at all.
+- **The error table at the top of this ADR describes the 2026-08-03 run** and has
+  not been re-derived. Its `missing-element -> broken-image` row is the one this
+  amendment addresses; the rest should be regenerated from the new per-seed
+  files rather than adjusted by hand.
+
+### Determinism, and what the error bar does and does not cover
+
+Re-running a seed reproduces it exactly. That makes the evaluation reproducible
+and makes controlled comparisons like the one above possible, but it also means
+the 95% CI describes **variation across seed choice only** — it is not a
+run-to-run confidence interval, and repeating the whole evaluation will not
+resample it. A second run of all ten seeds returns 95.00% again, and that
+agreement is not independent evidence of anything.

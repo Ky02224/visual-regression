@@ -2,11 +2,11 @@
   "seeds_run": 10,
   "trials_per_seed": 50,
   "pooled_n": 500,
-  "pooled_correct": 471,
-  "pooled_accuracy": 0.942,
-  "across_seed_stdev": 0.0239,
-  "ci95_low": 0.9215,
-  "ci95_high": 0.9625,
+  "pooled_correct": 475,
+  "pooled_accuracy": 0.95,
+  "across_seed_stdev": 0.0236,
+  "ci95_low": 0.9309,
+  "ci95_high": 0.9691,
   "per_seed": [
     {
       "seed": 1000,
@@ -16,9 +16,9 @@
     },
     {
       "seed": 1001,
-      "accuracy": 0.94,
+      "accuracy": 0.98,
       "n": 50,
-      "correct": 47
+      "correct": 49
     },
     {
       "seed": 1002,
@@ -34,9 +34,9 @@
     },
     {
       "seed": 1004,
-      "accuracy": 0.94,
+      "accuracy": 0.96,
       "n": 50,
-      "correct": 47
+      "correct": 48
     },
     {
       "seed": 1005,
@@ -46,21 +46,21 @@
     },
     {
       "seed": 1006,
-      "accuracy": 0.98,
+      "accuracy": 0.96,
       "n": 50,
-      "correct": 49
+      "correct": 48
     },
     {
       "seed": 1007,
-      "accuracy": 0.92,
-      "n": 50,
-      "correct": 46
-    },
-    {
-      "seed": 1008,
       "accuracy": 0.94,
       "n": 50,
       "correct": 47
+    },
+    {
+      "seed": 1008,
+      "accuracy": 0.96,
+      "n": 50,
+      "correct": 48
     },
     {
       "seed": 1009,
@@ -71,16 +71,16 @@
   ],
   "per_class": {
     "broken-image": {
-      "n": 40,
+      "n": 46,
       "recall": 1.0
     },
     "layout-issue": {
       "n": 63,
-      "recall": 0.9365
+      "recall": 0.9048
     },
     "missing-element": {
-      "n": 82,
-      "recall": 0.7927
+      "n": 77,
+      "recall": 0.8571
     },
     "color-regression": {
       "n": 93,
@@ -95,8 +95,8 @@
       "recall": 1.0
     },
     "font-change": {
-      "n": 63,
-      "recall": 0.9841
+      "n": 62,
+      "recall": 0.9839
     }
   }
 }

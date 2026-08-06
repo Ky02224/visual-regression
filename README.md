@@ -10,7 +10,7 @@ Every claim below is enforced by CI on each push, not measured once by hand.
 |---|---|
 | Detects 81/81 injected defects, 0/9 false alarms | `Score detection rate` — fails the build on any miss or false alarm |
 | The AI inference path actually executes | `Smoke-test the AI inference path` — asserts `decision_source` is not `pixel-fallback-no-model` |
-| Classification is 94.20% (n=500) — awaiting re-measurement, see below | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
+| Classification is 95.00% (n=500), 95% CI [93.09%, 96.91%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
 | Both database backends work | `Verify the Postgres parity tests are not skipping` — fails if those tests silently skip |
 | 979 Python + 90 frontend tests pass | `Run Python tests`, `Run frontend unit tests` |
 
@@ -18,12 +18,17 @@ The detection gate runs with `--no-ai` deliberately, so it can never be blocked
 by model distribution — see
 [ADR 0004](docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md).
 
-The 94.20% classification figure was measured before a ground-truth labelling
-defect was corrected on 2026-08-06, and is not comparable to anything measured
-after it. It stands until the ten-seed evaluation is re-run. What the defect was,
-why correcting it is not the same as relaxing the scoring, and what that costs
-in comparability are all set out in
+Classification was 94.20% before 2026-08-06. The rise to 95.00% is **not an
+improvement in the system** — nothing in the classifier changed. A ground-truth
+labelling defect was corrected: trials that deleted a wrapper containing a
+thumbnail were labelled by which node the mutation script picked rather than by
+what left the page, which asked the classifier for information neither snapshot
+contains. Scored on identical trials, the correction is worth exactly +5 of 500,
+and it can only move trials in the classifier's favour. The reasoning, the five
+trials, and why the two figures are not two measurements of the same thing are
+set out in
 [ADR 0006](docs/adr/0006-classification-is-scored-strictly-despite-overlapping-labels.md#amendment-2026-08-06--one-of-the-three-pairs-was-a-labelling-defect).
+The earlier run is kept as `reports/live-eval-summary-prelabelfix.json`.
 
 Baselines are captured inside this project's Docker image
 (`scripts/generate_linux_baselines.sh`) rather than on a developer machine.
