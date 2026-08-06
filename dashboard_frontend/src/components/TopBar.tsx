@@ -88,7 +88,16 @@ export function TopBar() {
           <Menu className="w-5 h-5" />
         </button>
         <div className="min-w-0">
-          <p className="text-sm font-semibold text-[var(--on-surface)] truncate">{page.title}</p>
+          {/*
+            An <h1>, not a <p>. This is the only thing on screen that names the
+            current page, and as a paragraph it was invisible to anything that
+            navigates by structure: no page had an h1 at all, and the heading
+            outline started at the <h3> of whatever card happened to render
+            first. Tailwind's preflight strips the default h1 margin and size,
+            so the classes below still decide how it looks — the change is
+            structural only.
+          */}
+          <h1 className="text-sm font-semibold text-[var(--on-surface)] truncate">{page.title}</h1>
           {page.sub && <p className="text-xs text-[var(--on-surface-variant)] truncate">{page.sub}</p>}
         </div>
       </div>
