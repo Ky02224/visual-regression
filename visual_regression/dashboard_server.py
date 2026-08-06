@@ -1243,9 +1243,23 @@ def post_baseline_restore(payload: dict, paths=Depends(get_paths_dep), store=Dep
 def post_ignore_regions(payload: dict, paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep), store=Depends(get_store_dep), user=Depends(require_admin)):
     name = str(payload.get("name", "")).strip()
     run_id = str(payload.get("run_id", "")).strip()
-    ignore_regions = payload.get("ignore_regions", [])
     if not name:
         raise HTTPException(status_code=400, detail="Missing baseline name")
+    # Absent and empty are different instructions — "leave these alone" and
+    # "remove every one of them" — and defaulting the missing key to [] merged
+    # them into the destructive one. A request that simply omitted the field
+    # wiped every region the reviewer had drawn and answered 200 ok, so the next
+    # comparison reported a difference inside an area they had explicitly
+    # excluded, with nothing anywhere recording that the exclusion was gone.
+    # The UI always sends the key, including when clearing, so requiring it
+    # costs nothing and makes the destructive case something a caller has to
+    # ask for.
+    if "ignore_regions" not in payload:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing ignore_regions; send an empty list to clear them.",
+        )
+    ignore_regions = payload.get("ignore_regions") or []
     from .server_services import handle_ignore_regions_update
     try:
         res = handle_ignore_regions_update(
@@ -1264,8 +1278,37 @@ def post_ignore_regions(payload: dict, paths=Depends(get_paths_dep), project_roo
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/ignore-css-selectors")
-def post_ignore_css_selectors(payload: dict, user=Depends(require_dev_or_admin)):
-    return {"ok": True, "ignore_css_selectors": []}
+def post_ignore_css_selectors(payload: dict, paths=Depends(get_paths_dep), user=Depends(require_dev_or_admin)):
+    """Persist the CSS selectors excluded from comparison for a baseline.
+
+    This returned {"ok": True, "ignore_css_selectors": []} unconditionally and
+    stored nothing, while BaselineManager.save_ignore_css_selectors sat beneath
+    it fully implemented — the route was never wired to it. Any caller got a
+    success it could not act on: the selectors were accepted, acknowledged and
+    dropped. Nothing in the UI calls this today, which is the only reason it
+    went unnoticed.
+    """
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Missing baseline name")
+    # Same distinction as ignore-regions: absent means "leave them", [] means
+    # "remove them all", and collapsing the two loses the difference silently.
+    if "ignore_css_selectors" not in payload:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing ignore_css_selectors; send an empty list to clear them.",
+        )
+    raw = payload.get("ignore_css_selectors") or []
+    if not isinstance(raw, (list, tuple)):
+        raise HTTPException(status_code=400, detail="ignore_css_selectors must be a list")
+    selectors = [str(s).strip() for s in raw if str(s).strip()]
+    manager = BaselineManager(paths)
+    try:
+        manager.save_ignore_css_selectors(name, selectors)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Baseline '{name}' does not exist.")
+    _DashboardCache.invalidate(paths)
+    return {"ok": True, "ignore_css_selectors": selectors}
 
 @app.post("/api/actions/create-demo-baselines")
 def post_actions_create_demo_baselines(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep), authorized=Depends(require_dev_or_admin)):
