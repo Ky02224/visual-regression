@@ -226,7 +226,20 @@ def main() -> int:
     parser.add_argument("--max-hours", type=float, default=3.0,
                         help="Stop cleanly once this much wall time has passed.")
     parser.add_argument("--out-dir", default=".visual-regression/datasets/live-training-pairs")
+    parser.add_argument("--sites-file", default=None,
+                        help="One URL per line, replacing the built-in list. Keeping a "
+                             "batch's sites in a file, and its captures in their own "
+                             "--out-dir, is what allows a later run to train on one batch, "
+                             "the other, or both — merging them into a single manifest "
+                             "throws that choice away.")
     args = parser.parse_args()
+
+    global SITES
+    if args.sites_file:
+        raw = (ROOT / args.sites_file).read_text(encoding="utf-8")
+        SITES = [ln.strip() for ln in raw.splitlines()
+                 if ln.strip() and not ln.strip().startswith("#")]
+        print(f"Loaded {len(SITES)} sites from {args.sites_file}")
 
     out_dir = ROOT / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
