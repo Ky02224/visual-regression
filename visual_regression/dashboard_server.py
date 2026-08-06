@@ -1178,12 +1178,18 @@ def post_review(payload: dict, paths=Depends(get_paths_dep), store=Depends(get_s
     return {"ok": True, "decision": decision}
 
 @app.post("/api/run/delete")
-def post_run_delete(payload: dict, paths=Depends(get_paths_dep), user=Depends(require_admin)):
+def post_run_delete(payload: dict, paths=Depends(get_paths_dep), store=Depends(get_store_dep), user=Depends(require_admin)):
     run_ref = str(payload.get("run", "")).strip()
     if not run_ref:
         raise HTTPException(status_code=400, detail="Missing run id")
     manager = ReviewManager(paths)
     result = manager.delete_run(run_ref)
+    # Approving a run was recorded and deleting it was not, so the trail held a
+    # decision about evidence that no longer existed, with no record of who
+    # removed it. Written after the delete succeeds: an entry for an attempt
+    # that failed would claim a run was destroyed when it was not.
+    if store:
+        store.audit(user.email, user.role, "run.delete", {"run": run_ref})
     _DashboardCache.invalidate(paths)
     return {"ok": True, **result}
 
@@ -1215,7 +1221,7 @@ def post_baseline_delete(payload: dict, paths=Depends(get_paths_dep), user=Depen
     return {"ok": True, **result}
 
 @app.post("/api/baseline/restore")
-def post_baseline_restore(payload: dict, paths=Depends(get_paths_dep), user=Depends(require_admin)):
+def post_baseline_restore(payload: dict, paths=Depends(get_paths_dep), store=Depends(get_store_dep), user=Depends(require_admin)):
     name = str(payload.get("name", "")).strip()
     version = str(payload.get("version", "")).strip()
     if not name or not version:
@@ -1226,6 +1232,10 @@ def post_baseline_restore(payload: dict, paths=Depends(get_paths_dep), user=Depe
         version=version,
         restored_by=str(payload.get("restored_by", "")) or None,
     )
+    # Rolling a baseline back changes what every later run is judged against,
+    # so it belongs in the trail beside the approvals it will affect.
+    if store:
+        store.audit(user.email, user.role, "baseline.restore", {"name": name, "version": version})
     _DashboardCache.invalidate(paths)
     return {"ok": True, **result}
 
@@ -1259,15 +1269,32 @@ def post_ignore_css_selectors(payload: dict, user=Depends(require_dev_or_admin))
 
 @app.post("/api/actions/create-demo-baselines")
 def post_actions_create_demo_baselines(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep), authorized=Depends(require_dev_or_admin)):
-    result = _run_cli_action_helper(paths, project_root, port, ["create-suite-baselines", "--suite", "suite.demo.yaml", "--overwrite"])
+    # Captures every case in the demo suite with a real browser. Minutes, not
+    # milliseconds — see the note on train-ai below for why that cannot be held
+    # open on the request thread.
+    task_id = _run_cli_action_async_helper(
+        paths, project_root, port,
+        ["create-suite-baselines", "--suite", "suite.demo.yaml", "--overwrite"],
+    )
     _DashboardCache.invalidate(paths)
-    return _send_cli_result_helper(result)
+    return {"ok": True, "task_id": task_id,
+            "message": "Demo baseline capture started in the background. Poll the task status for progress."}
 
 @app.post("/api/actions/train-ai")
 def post_actions_train_ai(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep), authorized=Depends(require_dev_or_admin)):
-    result = _run_cli_action_helper(paths, project_root, port, ["train-ai", "--epochs", "20", "--samples-per-image", "12"])
+    # Twenty epochs on the GPU: hours, not seconds. Run synchronously this held
+    # the request thread — and the caller's socket — open for the whole run, so
+    # the client always timed out, the work carried on invisibly with no way to
+    # observe or cancel it, and a second click started a second training run on
+    # top of the first. The task machinery below already existed for exactly
+    # this and was being used by two of nine actions.
+    task_id = _run_cli_action_async_helper(
+        paths, project_root, port,
+        ["train-ai", "--epochs", "20", "--samples-per-image", "12"],
+    )
     _DashboardCache.invalidate(paths)
-    return _send_cli_result_helper(result)
+    return {"ok": True, "task_id": task_id,
+            "message": "Training started in the background. Poll the task status for progress."}
 
 @app.post("/api/actions/compare-defect")
 def post_actions_compare_defect(paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep), authorized=Depends(require_dev_or_admin)):
@@ -1279,7 +1306,14 @@ def post_actions_compare_defect(paths=Depends(get_paths_dep), project_root=Depen
 
 @app.post("/api/actions/create-baseline")
 def post_actions_create_baseline(payload: dict, paths=Depends(get_paths_dep), project_root=Depends(get_project_root_dep), port=Depends(get_port_dep), authorized=Depends(require_dev_or_admin)):
-    args = ["create-baseline", "--name", str(payload.get("name", ""))]
+    # Checked here rather than left to the CLI. A missing name is the caller's
+    # mistake, and forwarding it produced a failed subprocess reported as 500 —
+    # which tells the client the server broke when in fact the request was
+    # incomplete, and buries the reason in captured stderr.
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Missing baseline name")
+    args = ["create-baseline", "--name", name]
     args.extend(
         _payload_to_args_helper(
             payload,
@@ -1394,7 +1428,10 @@ def _dispatch_compare_matrix(payload: dict, paths, project_root, port) -> Dict[s
     browsers = payload.get("browsers") or []
     devices = payload.get("devices") or []
     locales = payload.get("locales") or []
-    args = ["compare-matrix", "--name", str(payload.get("name", ""))]
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Missing baseline name")
+    args = ["compare-matrix", "--name", name]
     if payload.get("url"):
         args.extend(["--url", str(payload.get("url"))])
     for browser in browsers:
