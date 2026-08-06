@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-08-05.
+Accepted, 2026-08-05. Amended 2026-08-06 — see
+[Amendment](#amendment-2026-08-06--one-of-the-three-pairs-was-a-labelling-defect).
 
 ## Context
 
@@ -65,3 +66,64 @@ every measurement taken before this analysis existed.
   [ADR 0001](0001-detection-and-classification-are-separate-metrics.md) for why
   detection and classification are already kept apart rather than averaged into
   one headline.
+
+## Amendment, 2026-08-06 — one of the three pairs was a labelling defect
+
+The decision above stands. One of the three entangled pairs, however, turned out
+not to be entanglement at all, but a bug in how the harness assigned ground
+truth — and that has to be separated from the merge this ADR refuses, because
+the two look similar and are not.
+
+`scripts/live_dom_mutation_eval.py` labels a trial by **which node its mutation
+script deleted**. Its `missing-element` mutation picks from `p/span/a/div/li`.
+On real pages those routinely wrap a thumbnail — `<a><img></a>` is the ordinary
+card and nav pattern — so when the picker happened to choose such a wrapper, the
+harness recorded `missing-element` while what actually left the page was an
+image. Both snapshots show an `<img>` present before and absent after. Nothing
+in the input distinguishes that from deleting the `<img>` directly.
+
+So the expected answer was not merely hard to reach; it was **not a function of
+the input**. The harness was scoring the classifier on which node the mutation
+script happened to select, which the classifier is never shown. The fix labels
+by what left the page: if the removed subtree took a media element with it, the
+trial is a `broken-image` trial.
+
+### Why this is not the merge this ADR rejects
+
+The distinction that matters is *when the rule can be evaluated*:
+
+- A **scoring merge** changes what counts as correct for a given prediction. It
+  can only be applied after a prediction exists, and the pairs to merge are
+  chosen by looking at which ones are getting missed. That is fitting the
+  taxonomy to the score, and it stays refused.
+- This change alters the **stimulus→label** function in the trial generator. It
+  is decidable from the mutation alone, before any model runs, and it is stated
+  as a property of the page ("did a media element leave?") rather than as a
+  relation between two labels.
+
+The honest caveat: this defect was found by grouping the residual errors, and it
+happens to move six of them from wrong to right. Being found that way does not
+make it wrong — the labels really were unattainable — but it does mean it cannot
+be waved through on the strength of the reasoning alone. What keeps it
+falsifiable is that the rule is stated on the input, so it can be checked
+without reference to any score, and it relabels trials the classifier gets right
+just as readily as ones it gets wrong.
+
+The other two pairs — `missing-element`/`layout-issue` and
+`text-issue`/`layout-issue` — are untouched. Those are genuine coincidence of
+events, not mislabelling, and they continue to be scored strictly.
+
+### Consequence: the published figure is stale
+
+**94.20% was measured under the old labelling and is not comparable to anything
+measured after this change.** Until `scripts/live_eval_multiseed.py` is re-run
+across all ten seeds:
+
+- `reports/live-eval-summary.json` and the 94.20% in the README's verification
+  table describe the previous ground truth.
+- The error table at the top of this ADR describes that same previous run. The
+  six `missing-element -> broken-image` rows are the ones this amendment
+  reclassifies; the remaining counts should be re-derived, not adjusted by hand.
+
+The re-run is the outstanding work. No figure from it should be published
+alongside the old one without saying which labelling each was measured under.

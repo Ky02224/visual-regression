@@ -163,7 +163,18 @@ MUTATION_JS = {
             const el = document.querySelector('[data-vrt-mutated]');
             if (!el) return null;
             const r = el.getBoundingClientRect();
-            const info = {tag: el.tagName, x: r.x, y: r.y, w: r.width, h: r.height};
+            // Whether an image goes with it decides the label. The picker
+            // chooses from p/span/a/div/li, and on real pages those routinely
+            // wrap a thumbnail — <a><img></a> is the standard card and nav
+            // pattern. Removing the wrapper takes the image off the page, and
+            // no comparison of two snapshots can tell that apart from removing
+            // the image itself: both leave an <img> present before and absent
+            // after. Reporting it lets the label describe what a viewer lost
+            // rather than which node the script happened to pick.
+            const media = el.matches('img,svg,video,canvas,picture')
+                || !!el.querySelector('img,svg,video,canvas,picture');
+            const info = {tag: el.tagName, x: r.x, y: r.y, w: r.width, h: r.height,
+                          tookMedia: media};
             el.remove();
             return info;
         }
@@ -398,14 +409,25 @@ def main():
                 current_image_path=current_path,
             )
             pred_label = assessment.label or "benign"
-            expected_c = to_consolidated(category)
+            # Ground truth follows the visible outcome, not the node the picker
+            # chose. Removing a wrapper that contained a thumbnail takes an
+            # image off the page, which is what a reviewer sees and what the
+            # snapshots record; calling it "missing-element" because the script
+            # deleted an <a> asked the classifier for information no comparison
+            # of before and after contains. Six of 29 residual errors were this
+            # one mismatch — see ADR 0006.
+            expected_category = category
+            if category == "missing-element" and (mutated_info or {}).get("tookMedia"):
+                expected_category = "broken-image"
+            expected_c = to_consolidated(expected_category)
             pred_c = to_consolidated(pred_label)
             correct = expected_c == pred_c
 
             record = {
                 "trial": i,
                 "site": url,
-                "expected": category,
+                "expected": expected_category,
+                "requested_category": category,
                 "expected_consolidated": expected_c,
                 "predicted": pred_label,
                 "predicted_consolidated": pred_c,
@@ -419,7 +441,7 @@ def main():
             results.append(record)
             mark = "OK " if correct else "ERR"
             site_short = url.split("//")[-1][:24]
-            print(f"[{i+1:3d}/{args.trials}] {mark} site={site_short:24s} expected={category:18s} predicted={pred_label:18s} mismatch={result.mismatch_pct:.3f}%")
+            print(f"[{i+1:3d}/{args.trials}] {mark} site={site_short:24s} expected={expected_category:18s} predicted={pred_label:18s} mismatch={result.mismatch_pct:.3f}%")
             i += 1
 
         browser.close()
