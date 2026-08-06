@@ -33,6 +33,12 @@ def main() -> int:
     parser.add_argument("--first-seed", type=int, default=1000)
     parser.add_argument("--out-dir", default="reports/live-eval")
     parser.add_argument("--summary", default="reports/live-eval-summary.json")
+    parser.add_argument("--model-path", default=None,
+                        help="Evaluate a model other than the deployed one, e.g. a "
+                             "candidate from a training workspace.")
+    parser.add_argument("--no-dom", action="store_true",
+                        help="Withhold the DOM sidecars from every seed — the "
+                             "screenshot-only measurement. See live_dom_mutation_eval.py.")
     args = parser.parse_args()
 
     out_dir = ROOT / args.out_dir
@@ -44,13 +50,18 @@ def main() -> int:
     for index, seed in enumerate(seeds, start=1):
         out_file = out_dir / f"seed-{seed}.json"
         print(f"[{index}/{len(seeds)}] seed={seed} ...", flush=True)
+        cmd = [
+            sys.executable, str(ROOT / "scripts" / "live_dom_mutation_eval.py"),
+            "--trials", str(args.trials),
+            "--seed", str(seed),
+            "--out", str(out_file),
+        ]
+        if args.model_path:
+            cmd += ["--model-path", args.model_path]
+        if args.no_dom:
+            cmd += ["--no-dom"]
         proc = subprocess.run(
-            [
-                sys.executable, str(ROOT / "scripts" / "live_dom_mutation_eval.py"),
-                "--trials", str(args.trials),
-                "--seed", str(seed),
-                "--out", str(out_file),
-            ],
+            cmd,
             cwd=str(ROOT),
             capture_output=True,
             text=True,

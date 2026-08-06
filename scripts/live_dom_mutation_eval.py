@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 import time
 from collections import Counter
@@ -255,7 +256,8 @@ def to_consolidated(name: str) -> str:
     return _consolidate_label(name)
 
 
-def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, idx: int):
+def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, idx: int,
+              write_dom: bool = True):
     page.goto(url, wait_until="networkidle", timeout=25000)
     # A custom webfont that finishes loading between the baseline and
     # current capture changes text metrics (fallback-font width vs
@@ -352,8 +354,22 @@ def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, 
     current_path = tmp_dir / f"current_{idx}.png"
     baseline_path.write_bytes(baseline_png)
     current_path.write_bytes(current_png)
-    baseline_path.with_suffix(".dom.json").write_text(json.dumps(baseline_dom), encoding="utf-8")
-    current_path.with_suffix(".dom.json").write_text(json.dumps(current_dom), encoding="utf-8")
+    # Absent sidecars are how a screenshot-only client looks to the classifier:
+    # load_dom_snapshot finds no <image>.dom.json and every DOM-derived signal —
+    # the rule engine's verdict, the 39 DOM features, the 14 structural ones —
+    # drops out. Simulating that by withholding the file exercises the real
+    # production path rather than stubbing an internal.
+    #
+    # Deleting is not optional. tmp_dir is reused across runs and the names are
+    # fixed (baseline_0.png, ...), so a sidecar left by an earlier with-DOM run
+    # would be picked up here and silently turn a "no-DOM" measurement into a
+    # partly-with-DOM one, with nothing in the output to show it.
+    for path, snapshot in ((baseline_path, baseline_dom), (current_path, current_dom)):
+        sidecar = path.with_suffix(".dom.json")
+        if write_dom:
+            sidecar.write_text(json.dumps(snapshot), encoding="utf-8")
+        else:
+            sidecar.unlink(missing_ok=True)
 
     current_img = cv2.imdecode(np.frombuffer(current_png, np.uint8), cv2.IMREAD_COLOR)
     result, _, _ = compare_arrays(
@@ -369,6 +385,15 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--out", type=str, default=None)
+    parser.add_argument("--no-dom", action="store_true",
+                        help="Withhold the .dom.json sidecars, so the classifier sees "
+                             "only the two screenshots. This is what a client that "
+                             "uploads pixels alone gets, and it is the only setting in "
+                             "which the model's own judgement decides the label — with "
+                             "DOM present the rule engine's verdict overrides it on the "
+                             "large majority of trials. The mutation choice and the "
+                             "ground truth are unaffected, so a seed produces the same "
+                             "trials either way and the two runs compare directly.")
     args = parser.parse_args()
 
     seed = args.seed if args.seed is not None else int(time.time() * 1000) % (2**31)
@@ -378,8 +403,14 @@ def main():
     paths = WorkspacePaths(root=ROOT / ".visual-regression")
     model_path = Path(args.model_path) if args.model_path else paths.models_dir / "visual_ai.pt"
     print(f"Model: {model_path}")
+    print(f"DOM sidecars: {'withheld (screenshot-only)' if args.no_dom else 'written'}")
 
-    tmp_dir = paths.root / "tmp-live-dom-eval"
+    # Per-process, because the file names inside are fixed (baseline_0.png and
+    # so on). Two evaluations running at once — comparing two models, or a
+    # with-DOM and a no-DOM run — overwrote each other's captures in a single
+    # shared directory and silently scored each model partly on the other's
+    # screenshots.
+    tmp_dir = paths.root / f"tmp-live-dom-eval-{os.getpid()}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
@@ -394,7 +425,8 @@ def main():
             url = rng.choice(SITES)
             category = rng.choice(CATEGORIES)
             try:
-                out = run_trial(page, url, category, rng, tmp_dir, i)
+                out = run_trial(page, url, category, rng, tmp_dir, i,
+                                write_dom=not args.no_dom)
             except Exception as e:
                 print(f"  [skip] {url} {category}: {e}")
                 continue
@@ -485,6 +517,11 @@ def main():
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps({"seed": seed, "accuracy": correct_n / total, "results": results}, indent=2), encoding="utf-8")
     print(f"\nSaved to {out_file}")
+
+    # The captures are worth keeping only while a run is being debugged, and a
+    # per-process directory would otherwise leave one behind for every seed of
+    # every sweep. Failures return before this point, so their evidence stays.
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
