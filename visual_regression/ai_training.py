@@ -1245,6 +1245,21 @@ def train_model(
                 (backbone.module if isinstance(backbone, nn.DataParallel) else backbone).load_state_dict(ckpt["backbone_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            # T_max travels in the scheduler's state, so a resume asking for
+            # more epochs restored the *old* horizon and kept annealing against
+            # it. Past that horizon CosineAnnealingLR does not hold at eta_min —
+            # it turns around — so a 4-epoch schedule resumed to epoch 12 became
+            # an unintended cyclic LR sweeping 1e-5 to 5e-5 and back, which is
+            # what made validation loss oscillate across resumed runs instead of
+            # settling. Re-point it at the horizon this run was actually asked
+            # for, so the decay finishes where the training does.
+            if scheduler.T_max != epochs:
+                logger.info(
+                    "  Cosine horizon was saved as T_max=%d; this run asks for %d epochs — "
+                    "re-pointing it so the schedule decays to the end of this run.",
+                    scheduler.T_max, epochs,
+                )
+                scheduler.T_max = epochs
             start_epoch = ckpt["epoch"] + 1
             recent_losses = deque(ckpt.get("recent_losses", []), maxlen=5)
             train_loss_history = ckpt.get("train_loss_history", [])
@@ -1288,7 +1303,31 @@ def train_model(
     except ImportError:
         _tqdm = None
 
+    # Starting at infinity meant the first epoch after any resume always counted
+    # as "best" and overwrote model_path, however good the model already saved
+    # there was. A run resumed at epoch 4 with val_loss 0.1455 replaced a file
+    # saved at 0.0280 for that reason, and nothing in the log said so.
+    #
+    # The saved model records the loss it was saved at, so it can say for itself
+    # what has to be beaten. That compares like with like — both numbers are
+    # "the deployable file's val_loss" — where the loss history cannot, since it
+    # may span earlier runs on different data.
     best_val_loss = float("inf")
+    if start_epoch > 1 and model_path.exists():
+        try:
+            prior = torch.load(model_path, map_location="cpu", weights_only=False)
+            prior_val = prior.get("val_loss")
+            if isinstance(prior_val, (int, float)):
+                best_val_loss = float(prior_val)
+                logger.info(
+                    "  Existing %s was saved at val_loss=%.4f; only a better epoch will replace it.",
+                    model_path.name, best_val_loss,
+                )
+        except Exception as exc:
+            logger.warning(
+                "  Could not read the val_loss of the existing %s (%s: %s); this run may "
+                "overwrite it with a worse model.", model_path.name, type(exc).__name__, exc,
+            )
     patience_counter = 0
     patience = 3
 
