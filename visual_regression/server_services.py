@@ -42,7 +42,7 @@ def handle_run_upload(
         build_capture_metadata,
         _initial_decision_status,
     )
-    from .image_compare import compare_images, parse_ignore_regions
+    from .image_compare import compare_images, ignore_regions_from_metadata, parse_ignore_regions
     from .decision import decide_pass_fail
     from .reporter import generate_html_report, save_image, write_json
     from .ai_training import assess_result
@@ -67,17 +67,17 @@ def handle_run_upload(
     baseline_image_path = manager.resolve_baseline_image_path(name)
     
     try:
-        threshold_pct = float(parts.get("threshold_pct", 0.1))
+        threshold_pct = float(parts.get("threshold_pct", 0.5))
     except ValueError:
-        threshold_pct = 0.1
+        threshold_pct = 0.5
     try:
-        pixel_threshold = int(parts.get("pixel_threshold", 10))
+        pixel_threshold = int(parts.get("pixel_threshold", 20))
     except ValueError:
-        pixel_threshold = 10
+        pixel_threshold = 20
     try:
-        min_region_area = int(parts.get("min_region_area", 20))
+        min_region_area = int(parts.get("min_region_area", 120))
     except ValueError:
-        min_region_area = 20
+        min_region_area = 120
     comparison_mode = parts.get("comparison_mode", "hybrid")
     no_ai = parts.get("no_ai") == "true"
     ignore_regions_raw = parts.get("ignore_region", "")
@@ -86,14 +86,15 @@ def handle_run_upload(
     if not ignore_regions:
         try:
             meta = manager.load_metadata(name)
-            saved_regions = meta.get("ignore_regions", [])
-            for r in saved_regions:
-                if isinstance(r, dict):
-                    ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
-                elif isinstance(r, (list, tuple)) and len(r) == 4:
-                    ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Baseline %r metadata could not be read (%s: %s); comparing with no "
+                "ignore regions.", name, type(exc).__name__, exc,
+            )
+        else:
+            ignore_regions.extend(
+                ignore_regions_from_metadata(meta.get("ignore_regions", []), name)
+            )
     
     result, diff_overlay, binary_diff = compare_images(
         baseline_path=baseline_image_path,

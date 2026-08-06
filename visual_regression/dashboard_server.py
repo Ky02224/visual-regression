@@ -1757,7 +1757,7 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
         }
 
     from .cli import _copy_baseline_into_run, now_stamp_precise, summarize_severity, build_ai_explanation, ai_model_is_available, resolve_ai_model_path, build_capture_metadata, _initial_decision_status
-    from .image_compare import compare_images
+    from .image_compare import compare_images, ignore_regions_from_metadata
     from .decision import decide_pass_fail
     from .reporter import generate_html_report, save_image, write_json
     from .ai_training import assess_result
@@ -1787,24 +1787,29 @@ def post_sdk_snapshot(payload: dict, request: Request, paths=Depends(get_paths_d
     ignore_regions = []
     try:
         meta = manager.load_metadata(name)
-        if "custom_threshold_pct" in meta:
-            threshold_pct = float(meta["custom_threshold_pct"])
-        for r in meta.get("ignore_regions", []):
-            if isinstance(r, dict):
-                ignore_regions.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
-            elif isinstance(r, (list, tuple)) and len(r) == 4:
-                ignore_regions.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
     except Exception as exc:
-        # One malformed region aborted the loop and left `ignore_regions`
-        # holding whatever had been parsed so far — so the comparison quietly
-        # ran with some or none of the user's ignore regions applied, and
-        # reported a mismatch in an area they had explicitly excluded. Also
-        # covers a custom_threshold_pct that will not parse, which silently
-        # reverts the case to the default threshold.
         logger.warning(
-            "Baseline %r has metadata that could not be fully parsed (%s: %s); comparing with "
-            "%d ignore region(s) and threshold %.3f%%.",
-            name, type(exc).__name__, exc, len(ignore_regions), threshold_pct,
+            "Baseline %r metadata could not be read (%s: %s); comparing with no ignore "
+            "regions and threshold %.3f%%.",
+            name, type(exc).__name__, exc, threshold_pct,
+        )
+    else:
+        try:
+            if "custom_threshold_pct" in meta:
+                threshold_pct = float(meta["custom_threshold_pct"])
+        except (TypeError, ValueError) as exc:
+            # Reverting to the default silently would compare the case at a
+            # sensitivity its owner did not choose.
+            logger.warning(
+                "Baseline %r has an unparseable custom_threshold_pct (%s); using %.3f%%.",
+                name, exc, threshold_pct,
+            )
+        # Per-region parsing: one malformed entry used to abort the loop and
+        # drop every region after it, so the comparison ran with some or none of
+        # the regions the reviewer had drawn and reported a difference inside an
+        # area they had explicitly excluded.
+        ignore_regions.extend(
+            ignore_regions_from_metadata(meta.get("ignore_regions", []), name)
         )
 
     result, diff_overlay, binary_diff = compare_images(

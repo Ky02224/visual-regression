@@ -60,6 +60,48 @@ def parse_ignore_regions(values: Sequence[str]) -> List[IgnoreRegion]:
     return regions
 
 
+def ignore_regions_from_metadata(saved: object, baseline_name: str = "") -> List[IgnoreRegion]:
+    """Read a baseline's stored ignore regions, keeping the ones that parse.
+
+    Callers used to walk this list inside one try/except, so a single malformed
+    entry aborted the loop and dropped every region after it. The comparison
+    then ran with some or none of the regions the reviewer had drawn and
+    reported a difference inside an area they had explicitly excluded — which
+    reads as a real defect, with nothing anywhere to say the exclusion had been
+    ignored.
+
+    Each entry is parsed on its own instead, so one bad record costs only
+    itself, and what was skipped is logged rather than lost silently.
+    """
+    regions: List[IgnoreRegion] = []
+    skipped = 0
+    for item in saved if isinstance(saved, (list, tuple)) else []:
+        try:
+            if isinstance(item, dict):
+                region = (int(item["x"]), int(item["y"]),
+                          int(item["width"]), int(item["height"]))
+            elif isinstance(item, (list, tuple)) and len(item) == 4:
+                region = (int(item[0]), int(item[1]), int(item[2]), int(item[3]))
+            else:
+                skipped += 1
+                continue
+            if region[2] <= 0 or region[3] <= 0:
+                skipped += 1
+                continue
+            regions.append(region)
+        except (KeyError, TypeError, ValueError):
+            skipped += 1
+
+    if skipped:
+        logger.warning(
+            "Baseline %r: %d ignore region(s) could not be read and were skipped; "
+            "comparing with the remaining %d. Differences inside the skipped areas "
+            "will be reported.",
+            baseline_name or "<unnamed>", skipped, len(regions),
+        )
+    return regions
+
+
 def _load_image(path: Path) -> np.ndarray:
     if not path.exists():
         raise FileNotFoundError(f"Image file not found: {path}")
