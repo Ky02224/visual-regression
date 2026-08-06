@@ -89,8 +89,17 @@ def test_active_learning_incremental_fine_tuning_trigger(mock_train_background, 
     for i in range(10):
         (al_dir / f"run_{i}.json").write_text("{}", encoding="utf-8")
 
-    # Trigger count check
+    # First call only seeds .last_trained_count. Without that step a workspace
+    # whose counter file is missing reads its whole existing backlog as new and
+    # fires a full retrain on the next single review — observed on a real
+    # workspace holding 9 historical reviews and no counter.
     queue_ai_training_sample(paths)
-    
-    # Background training should be triggered!
+    mock_train_background.assert_not_called()
+    assert (al_dir / ".last_trained_count").read_text(encoding="utf-8").strip() == "10"
+
+    # Ten *new* reviews after that do trigger it.
+    for i in range(10, 20):
+        (al_dir / f"run_{i}.json").write_text("{}", encoding="utf-8")
+    queue_ai_training_sample(paths)
+
     mock_train_background.assert_called_once()

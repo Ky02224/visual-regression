@@ -316,13 +316,21 @@ def find_selectors_for_coordinates(paths: WorkspacePaths, name: str, regions: li
 def _run_background_ai_training(paths: WorkspacePaths):
     global _ai_training_in_progress, _last_ai_train_time
     try:
-        from .ai_training import train_model
+        from .ai_training import adopt_model_if_gate_passes, train_model
         logger.info("[AI Trainer] Starting background automatic training loop...")
         broadcast_event("ai_training", {"status": "started"})
         model_path = paths.models_dir / "visual_ai.pt"
+        # Train to a staging path, never onto the deployed file. This wrote
+        # directly to visual_ai.pt, so ten review clicks replaced the model
+        # serving every comparison with one that had passed no evaluation and
+        # left no backup — the CLI's train-ai has staged and gated since it was
+        # written, and this path simply bypassed it.
+        staging_model_path = model_path.with_name(f"{model_path.stem}.staging{model_path.suffix}")
+        for stale in staging_model_path.parent.glob(f"{staging_model_path.stem}.*"):
+            stale.unlink(missing_ok=True)
         train_model(
             paths=paths,
-            model_path=model_path,
+            model_path=staging_model_path,
             epochs=5,
             batch_size=16,
             learning_rate=1e-4,
@@ -331,12 +339,29 @@ def _run_background_ai_training(paths: WorkspacePaths):
         )
         try:
             from .ai_training import export_to_onnx, compile_to_torchscript
-            export_to_onnx(model_path)
-            compile_to_torchscript(model_path)
+            export_to_onnx(staging_model_path)
+            compile_to_torchscript(staging_model_path)
         except Exception as export_err:
             logger.warning(f"[AI Trainer Warning] Failed to re-export model formats: {export_err}")
-        logger.info("[AI Trainer] Background training successfully completed! Model weights updated.")
-        broadcast_event("ai_training", {"status": "finished", "success": True})
+
+        min_acc = float(os.environ.get("LENS_AUTOTRAIN_MIN_ACCURACY", "0.5"))
+        gate = adopt_model_if_gate_passes(
+            paths=paths,
+            staging_model_path=staging_model_path,
+            target_model_path=model_path,
+            min_real_accuracy=min_acc,
+        )
+        if gate["adopted"]:
+            logger.info("[AI Trainer] Background training completed and adopted. %s", gate["message"])
+        else:
+            logger.warning(
+                "[AI Trainer] Background training completed but was NOT adopted; the deployed "
+                "model is unchanged. %s", gate["message"],
+            )
+        broadcast_event("ai_training", {
+            "status": "finished", "success": True,
+            "adopted": gate["adopted"], "message": gate["message"],
+        })
     except Exception as e:
         logger.error(f"[AI Trainer Error] Background training failed: {e}")
         broadcast_event("ai_training", {"status": "finished", "success": False, "error": str(e)})
@@ -373,8 +398,34 @@ def queue_ai_training_sample(paths: WorkspacePaths):
                 "which may trigger an unnecessary retrain.",
                 last_trained_file.name, type(exc).__name__, exc,
             )
+    # Configurable, because 10 is aggressive for a team reviewing all day and
+    # far too slow for one evaluating the tool. 0 or less disables the trigger
+    # entirely, which is the setting a production deployment usually wants:
+    # retrain on a schedule someone chose, not on whenever the count happens to
+    # tick over.
+    try:
+        threshold = int(os.environ.get("LENS_AUTOTRAIN_REVIEW_THRESHOLD", "10"))
+    except ValueError:
+        threshold = 10
     logger.info(f"[Active Learning] Review decision saved. Current reviews: {current_count}. Last trained: {last_trained_count}.")
-    if current_count - last_trained_count >= 10:
+    if threshold <= 0:
+        return
+    # An unreadable or absent .last_trained_count used to read as 0, making the
+    # whole existing backlog look new and firing a retrain nobody asked for on
+    # the very next review. Seed it instead, so the threshold counts reviews
+    # from here rather than from the beginning of time.
+    if not last_trained_file.exists():
+        try:
+            last_trained_file.write_text(str(current_count), encoding="utf-8")
+            logger.info(
+                "[Active Learning] No %s yet; seeding it at the current %d reviews so the "
+                "next retrain is triggered by new decisions, not the existing backlog.",
+                last_trained_file.name, current_count,
+            )
+        except Exception as exc:
+            logger.warning("[Active Learning] Could not seed %s: %s", last_trained_file.name, exc)
+        return
+    if current_count - last_trained_count >= threshold:
         with _ai_review_queue_lock:
             if _ai_training_in_progress:
                 logger.info("[Active Learning] Background training already in progress. Skipping trigger.")
