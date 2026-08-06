@@ -924,3 +924,202 @@ def are_images_identical_hash(image_a: np.ndarray, image_b: np.ndarray, threshol
     distance = bin(diff).count('1')
     return distance <= threshold
 
+
+
+# ---------------------------------------------------------------------------
+# Pixel-derived structural signals
+# ---------------------------------------------------------------------------
+#
+# Without a DOM the model receives the nine RULE_FEATURE_NAMES and 53 zeros, and
+# every one of those nine measures *how much* changed — none of them says what
+# kind of change it was. That is why the screenshot-only classifier cannot tell
+# a recolour from a truncation: the information is not in its input.
+#
+# The rule engine reads those distinctions from the DOM. Most of them have a
+# pixel equivalent that survives when the DOM does not:
+#
+#   an element moved     -> the content below it is translated by a constant
+#                           offset, which phase correlation recovers directly
+#   a colour changed     -> hue shifts inside the region while its edges stay put
+#   a font changed       -> stroke and edge statistics change while hue does not
+#   text was truncated   -> text-like density drops on one side of the region
+#   an element vanished  -> the region collapses toward a flat background colour
+#
+# These are computed from the two crops the model is already given, so they cost
+# one pass of cheap OpenCV per sample and no extra backbone time.
+PIXEL_STRUCT_FEATURE_NAMES = [
+    "px_translate_y",          # vertical offset that best aligns the pair (normalised)
+    "px_translate_x",
+    "px_translate_conf",       # how strongly that offset is supported
+    "px_hue_shift",            # mean hue rotation inside the changed area
+    "px_sat_shift",
+    "px_value_shift",
+    "px_edge_density_delta",   # stroke/outline change: font substitution
+    "px_edge_orientation_delta",
+    "px_ink_ratio_delta",      # text-like coverage: truncation removes ink
+    "px_flatness_delta",       # collapse toward a flat fill: element removed
+    "px_bbox_fill_ratio",      # how much of the crop the change occupies
+    "px_change_aspect",        # wide-and-short (a line of text) vs blocky
+]
+
+FULL_FEATURE_NAMES_V2 = FULL_FEATURE_NAMES + PIXEL_STRUCT_FEATURE_NAMES
+
+
+def _to_gray(img: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+
+
+def pixel_struct_feature_vector(baseline: "np.ndarray | None", current: "np.ndarray | None") -> np.ndarray:
+    """Describe *what kind* of change the two crops show, not just how much.
+
+    Returns zeros when the crops are missing or unusable, matching how the DOM
+    blocks behave when there is no sidecar — a model trained with this block can
+    still be given nothing and will simply see no evidence.
+    """
+    n = len(PIXEL_STRUCT_FEATURE_NAMES)
+    if baseline is None or current is None:
+        return np.zeros(n, dtype=np.float32)
+    try:
+        if baseline.shape != current.shape:
+            h = min(baseline.shape[0], current.shape[0])
+            w = min(baseline.shape[1], current.shape[1])
+            if h < 8 or w < 8:
+                return np.zeros(n, dtype=np.float32)
+            baseline, current = baseline[:h, :w], current[:h, :w]
+        h, w = baseline.shape[:2]
+        if h < 8 or w < 8:
+            return np.zeros(n, dtype=np.float32)
+
+        # Measure inside the change, not across the page. A recolour touches a
+        # few hundred glyph pixels out of a million; averaged over the whole
+        # image every one of these statistics collapses to zero and the classes
+        # become indistinguishable — measured, and the reason an earlier version
+        # of this function separated nothing. Phase correlation is the exception
+        # and stays global, because a layout shift is a property of the page.
+        full_gb, full_gc = _to_gray(baseline), _to_gray(current)
+        _d = cv2.absdiff(full_gb, full_gc)
+        _ys, _xs = np.nonzero(_d > 8)
+        if _ys.size:
+            pad = 8
+            y0, y1 = max(0, int(_ys.min()) - pad), min(h, int(_ys.max()) + 1 + pad)
+            x0, x1 = max(0, int(_xs.min()) - pad), min(w, int(_xs.max()) + 1 + pad)
+            if (y1 - y0) >= 8 and (x1 - x0) >= 8:
+                baseline = baseline[y0:y1, x0:x1]
+                current = current[y0:y1, x0:x1]
+        gb, gc = _to_gray(baseline), _to_gray(current)
+
+        # --- translation: a layout shift moves content by a constant offset ---
+        try:
+            (dx, dy), conf = cv2.phaseCorrelate(full_gb.astype(np.float32), full_gc.astype(np.float32))
+            translate_x = float(np.clip(dx / max(w, 1), -1.0, 1.0))
+            translate_y = float(np.clip(dy / max(h, 1), -1.0, 1.0))
+            translate_conf = float(np.clip(conf, 0.0, 1.0))
+        except Exception:
+            translate_x = translate_y = translate_conf = 0.0
+
+        # --- colour: hue moves, geometry does not ---
+        if baseline.ndim == 3 and current.ndim == 3:
+            hb = cv2.cvtColor(baseline, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hc = cv2.cvtColor(current, cv2.COLOR_BGR2HSV).astype(np.float32)
+            changed = np.abs(gc.astype(np.int16) - gb.astype(np.int16)) > 8
+            if changed.any():
+                hue_shift = float(np.mean(np.abs(hc[..., 0][changed] - hb[..., 0][changed])) / 180.0)
+                sat_shift = float(np.mean(np.abs(hc[..., 1][changed] - hb[..., 1][changed])) / 255.0)
+                val_shift = float(np.mean(np.abs(hc[..., 2][changed] - hb[..., 2][changed])) / 255.0)
+            else:
+                hue_shift = sat_shift = val_shift = 0.0
+        else:
+            hue_shift = sat_shift = val_shift = 0.0
+
+        # --- strokes: a font substitution changes edges, not colour ---
+        eb, ec = cv2.Canny(gb, 60, 160), cv2.Canny(gc, 60, 160)
+        edge_b, edge_c = float(eb.mean()) / 255.0, float(ec.mean()) / 255.0
+        edge_density_delta = edge_c - edge_b
+
+        def _orientation(gray):
+            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            mag = np.abs(gx).sum() + np.abs(gy).sum()
+            return float(np.abs(gx).sum() / mag) if mag > 0 else 0.5
+        edge_orientation_delta = _orientation(gc) - _orientation(gb)
+
+        # --- ink: truncation removes text, leaving background ---
+        def _ink(gray):
+            thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                        cv2.THRESH_BINARY_INV, 15, 10)
+            return float(thr.mean()) / 255.0
+        ink_b, ink_c = _ink(gb), _ink(gc)
+        ink_ratio_delta = ink_c - ink_b
+
+        # --- flatness: a removed element leaves a uniform fill ---
+        flatness_delta = float(gc.std() - gb.std()) / 128.0
+
+        # --- geometry of the change itself ---
+        diff = cv2.absdiff(gb, gc)
+        ys, xs = np.nonzero(diff > 8)
+        if ys.size:
+            bh = float(ys.max() - ys.min() + 1)
+            bw = float(xs.max() - xs.min() + 1)
+            bbox_fill = float(ys.size) / max(bw * bh, 1.0)
+            aspect = bw / max(bh, 1.0)
+            change_aspect = float(np.clip(np.log1p(aspect) / 4.0, 0.0, 1.0))
+        else:
+            bbox_fill = change_aspect = 0.0
+
+        values = [
+            translate_y, translate_x, translate_conf,
+            hue_shift, sat_shift, val_shift,
+            edge_density_delta, edge_orientation_delta,
+            ink_ratio_delta, flatness_delta,
+            bbox_fill, change_aspect,
+        ]
+        out = np.asarray(values, dtype=np.float32)
+        return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    except Exception:
+        return np.zeros(n, dtype=np.float32)
+
+
+def rule_feature_stats(rows: "np.ndarray") -> "tuple[np.ndarray, np.ndarray]":
+    """Per-feature mean and standard deviation for standardising the rule vector.
+
+    Constant columns get a std of 1 so standardising leaves them at zero rather
+    than dividing by nothing — width_ratio and height_ratio are exactly 1.0 on
+    every same-size comparison, which is all of them.
+    """
+    rows = np.asarray(rows, dtype=np.float32)
+    mean = rows.mean(axis=0)
+    std = rows.std(axis=0)
+    std[std < 1e-6] = 1.0
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
+def standardise_rule_vector(vec: "np.ndarray", mean, std) -> "np.ndarray":
+    """Put every rule feature on a comparable scale before the fusion layer.
+
+    Measured on this project's captures, the raw features span a standard
+    deviation ratio of 2.4e10: max_delta varies by ~24 while px_translate_x
+    varies by ~0.003. Concatenated straight onto an 8192-wide image embedding
+    and fed to a single Linear, the small-scale columns cannot move the output
+    enough for gradient descent to find them — which is why zeroing the entire
+    53-column DOM block changed the network's predictions not at all, while a
+    gradient-boosted tree over the same features (scale-invariant by
+    construction) reached 66.7% where the network reached 36.0%.
+
+    Applied identically at training and inference; the statistics travel in the
+    checkpoint so the two cannot disagree. A model saved without them is left
+    untouched, keeping its original behaviour.
+    """
+    if mean is None or std is None:
+        return vec
+    vec = np.asarray(vec, dtype=np.float32)
+    mean = np.asarray(mean, dtype=np.float32)
+    std = np.asarray(std, dtype=np.float32)
+    width = vec.shape[-1]
+    if mean.shape[-1] != width or std.shape[-1] != width:
+        # A checkpoint whose stats predate a feature block: standardise the
+        # columns it knows and leave the rest, rather than refusing outright.
+        n = min(width, mean.shape[-1], std.shape[-1])
+        out = np.array(vec, dtype=np.float32, copy=True)
+        out[..., :n] = (out[..., :n] - mean[:n]) / std[:n]
+        return out
+    return (vec - mean) / std

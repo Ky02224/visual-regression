@@ -63,6 +63,9 @@ class PairSample:
     label_index: int
     label_name: str
     dom_features: "np.ndarray | None" = None  # Optional DOM features for multimodal training
+    # Pixel-derived structural signals. Unlike dom_features these survive a
+    # screenshot-only comparison, which is the case they exist for.
+    pixel_features: "np.ndarray | None" = None
 def _build_resnet50_backbone(pretrained: bool):
     _, nn = _require_torch()
     resnet50, ResNet50_Weights = _require_torchvision()

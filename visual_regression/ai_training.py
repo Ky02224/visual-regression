@@ -19,13 +19,18 @@ from .config import resolve_image_path
 from .ai_features import (
     DEFAULT_IMAGE_SIZE,
     RULE_FEATURE_NAMES,
-    FULL_FEATURE_NAMES,
+    FULL_FEATURE_NAMES as FULL_FEATURE_NAMES,
     ensure_rgb_batch,
     feature_vector_from_result,
     normalize_batch_uint8,
     stack_feature_rows,
     dom_feature_vector_from_snapshots,
     struct_feature_vector,
+    pixel_struct_feature_vector,
+    PIXEL_STRUCT_FEATURE_NAMES,
+    rule_feature_stats,
+    standardise_rule_vector,
+    FULL_FEATURE_NAMES_V2,
     load_dom_snapshot,
     diagnose_from_dom_diff,
 )
@@ -281,6 +286,9 @@ def _build_pair_sample(
         rule_features=feature_vector_from_result(result),
         label_index=label_index,
         label_name=consolidated_label,
+        # Computed from the crops the model is shown, so the block describes the
+        # same change the images do.
+        pixel_features=pixel_struct_feature_vector(baseline_crop, current_crop),
     )
 
 
@@ -409,7 +417,13 @@ def _load_run_pair_samples(
         # Concatenate rule + DOM features into a single feature vector
         struct_feats = struct_feature_vector(
             (baseline_dom or {}).get("elements"), (current_dom or {}).get("elements"))
-        full_features = np.concatenate([pair.rule_features, dom_feats, struct_feats])
+        # Append-only order: rule(9) | dom(39) | struct(14) | pixel-struct(12).
+        # _fit_rule_vector truncates to whatever width a model was built for, so
+        # a checkpoint that predates a block keeps every earlier block aligned.
+        px_feats = pair.pixel_features
+        if px_feats is None:
+            px_feats = np.zeros(len(PIXEL_STRUCT_FEATURE_NAMES), dtype=np.float32)
+        full_features = np.concatenate([pair.rule_features, dom_feats, struct_feats, px_feats])
         pair.rule_features = full_features
         pair.dom_features = dom_feats
         samples.append(pair)
@@ -419,9 +433,9 @@ def _load_run_pair_samples(
 def _collate_numpy(batch: list) -> tuple:
     baselines = np.stack([b[0] for b in batch])
     currents = np.stack([b[1] for b in batch])
-    # Pad rule features to FULL_FEATURE_NAMES length so synthetic (9-dim) and
+    # Pad rule features to the current full width so synthetic (9-dim) and
     # run-pair (48-dim) samples can coexist in the same batch (Proposal F).
-    target_dim = len(FULL_FEATURE_NAMES)
+    target_dim = len(FULL_FEATURE_NAMES_V2)
     rules = np.stack([
         np.pad(b[2], (0, max(0, target_dim - len(b[2]))), mode="constant")
         for b in batch
@@ -1196,7 +1210,7 @@ def train_model(
     head = SiameseFusionHead(
         nn,
         embedding_dim=embedding_dim,
-        rule_dim=len(FULL_FEATURE_NAMES),
+        rule_dim=len(FULL_FEATURE_NAMES_V2),
         output_dim=len(class_names),
     ).model.to(device)
 
@@ -1272,6 +1286,26 @@ def train_model(
     # Initialize optimizer with grouped learning rates
     optimizer = torch.optim.AdamW(train_params, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+
+    # Feature standardisation statistics, sampled from the loader itself so they
+    # describe exactly the vectors the model will see. Without this the fusion
+    # layer receives columns whose standard deviations differ by ten orders of
+    # magnitude and never learns to read the small ones — see
+    # standardise_rule_vector for the measurement.
+    rule_mean = rule_std = None
+    try:
+        collected = []
+        for _bl, _cur, _rule, _lbl in train_loader:
+            collected.append(np.asarray(_rule, dtype=np.float32))
+            if sum(c.shape[0] for c in collected) >= 512:
+                break
+        if collected:
+            rule_mean, rule_std = rule_feature_stats(np.concatenate(collected, axis=0))
+            logger.info("  Rule-feature standardisation fitted on %d vectors (width %d).",
+                        sum(c.shape[0] for c in collected), rule_mean.shape[0])
+    except Exception as exc:
+        logger.warning("  Could not fit rule-feature standardisation (%s: %s); training unstandardised.",
+                       type(exc).__name__, exc)
 
     # Checkpoint resume: load previous state if exists
     ckpt_path = model_path.with_suffix(".ckpt.pt")
@@ -1424,6 +1458,7 @@ def train_model(
             # comparable with earlier runs; the screenshot-only skill is
             # measured where it matters, by the live no-DOM evaluation.
             rule_np = _apply_dom_dropout(rule_np, dom_dropout, dropout_rng)
+            rule_np = standardise_rule_vector(rule_np, rule_mean, rule_std)
             left_t_norm = torch.tensor(normalize_batch_uint8(bl_batch), dtype=torch.float32, device=device)
             right_t_norm = torch.tensor(normalize_batch_uint8(cur_batch), dtype=torch.float32, device=device)
             diff_t_norm = (left_t_norm - right_t_norm).abs()
@@ -1502,7 +1537,9 @@ def train_model(
                 "pretrained_backbone": pretrained_backbone,
                 "freeze_backbone": freeze_backbone,
                 "image_size": DEFAULT_IMAGE_SIZE,
-                "rule_feature_names": FULL_FEATURE_NAMES,
+                "rule_feature_names": FULL_FEATURE_NAMES_V2,
+        "rule_feature_mean": (rule_mean.tolist() if rule_mean is not None else None),
+        "rule_feature_std": (rule_std.tolist() if rule_std is not None else None),
                 "threshold": DEFAULT_CONFIDENCE_FLOOR,
                 "class_names": class_names,
                 "embedding_dim": embedding_dim,
@@ -1631,7 +1668,9 @@ def train_model(
         "pretrained_backbone": pretrained_backbone,
         "freeze_backbone": freeze_backbone,
         "image_size": DEFAULT_IMAGE_SIZE,
-        "rule_feature_names": FULL_FEATURE_NAMES,
+        "rule_feature_names": FULL_FEATURE_NAMES_V2,
+        "rule_feature_mean": (rule_mean.tolist() if rule_mean is not None else None),
+        "rule_feature_std": (rule_std.tolist() if rule_std is not None else None),
         "threshold": DEFAULT_CONFIDENCE_FLOOR,
         "class_names": class_names,
         "embedding_dim": embedding_dim,
@@ -1784,6 +1823,18 @@ def _diagnose_dom_diff_best(baseline_dom_elements, current_dom_elements, result:
     )
 
 
+def _standardised_rule_vector(loaded, parts, expected_dim):
+    """Fit the rule vector to the model's width, then put it on the model's scale.
+
+    Both steps belong together and both come from the checkpoint: a model
+    trained on standardised features must be given standardised features, and a
+    model trained before standardisation existed records no statistics and is
+    left exactly as it was.
+    """
+    vec = _fit_rule_vector(parts, expected_dim)
+    return standardise_rule_vector(vec, loaded.get("rule_feature_mean"), loaded.get("rule_feature_std"))
+
+
 def _finalize_classification_assessment(
     loaded, probabilities, result, baseline_image, current_image, crops,
     dom_elements, baseline_dom_elements, current_dom_elements, model_path, temp,
@@ -1806,6 +1857,8 @@ def _finalize_classification_assessment(
     threshold = float(loaded["threshold"])
     dom_evidence = ""
     dom_label = None
+
+
     if loaded["type"].endswith("-binary"):
         score = float(probabilities[1])
         label = "meaningful-change" if score >= threshold else ""
@@ -2245,7 +2298,7 @@ def assess_result(
         dom_vec = dom_feature_vector_from_snapshots(baseline_dom, current_dom)
         struct_vec = struct_feature_vector(baseline_dom_elements, current_dom_elements)
         rule_dim = int(loaded.get("rule_dim", len(RULE_FEATURE_NAMES)))
-        full_rule = _fit_rule_vector([rule_vector_base, dom_vec, struct_vec], rule_dim)
+        full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec], rule_dim)
         rule_t = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0)
 
         left_t = torch.tensor(normalize_batch_uint8(ensure_rgb_batch(all_left_imgs, image_size=img_size)), dtype=torch.float32)
@@ -2294,8 +2347,8 @@ def assess_result(
         # was built with, so appending a feature block made `==` false forever
         # and dropped every DOM feature on this path — the session then rejected
         # a 9-wide input it had been compiled to take 48 of.
-        rule_vector = _fit_rule_vector(
-            [rule_vector_base, dom_vec, struct_vec], expected_rule_dim
+        rule_vector = _standardised_rule_vector(
+            loaded, [rule_vector_base, dom_vec, struct_vec], expected_rule_dim
         ).reshape(1, -1).astype(np.float32)
 
         session = loaded["session"]
@@ -2388,7 +2441,7 @@ def assess_result(
             expected_rule_dim = head_first_layer_in - (_emb_dim * streams)
         except Exception:
             expected_rule_dim = len(RULE_FEATURE_NAMES)
-    full_rule = _fit_rule_vector([rule_vector_base, dom_vec, struct_vec], expected_rule_dim)
+    full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec], expected_rule_dim)
     rule_vector = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0).to(device)
 
     all_probs = []
@@ -2548,8 +2601,8 @@ def assess_results_batch(
                     dom_vec = dom_feature_vector_from_snapshots(bl_dom, cu_dom)
                     struct_vec = struct_feature_vector(
                         (bl_dom or {}).get("elements"), (cu_dom or {}).get("elements"))
-                    rule_rows.append(_fit_rule_vector(
-                        [rule_base, dom_vec, struct_vec], expected_rule_dim))
+                    rule_rows.append(_standardised_rule_vector(
+                        loaded, [rule_base, dom_vec, struct_vec], expected_rule_dim))
 
                 # Stack batches
                 left_np = ensure_rgb_batch(left_crops, image_size=img_size)
