@@ -6,7 +6,8 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "tsc && node --test \"test/*.test.js\""
   },
   "keywords": ["visual-regression", "playwright", "testing", "percy-alternative"],
   "license": "MIT",

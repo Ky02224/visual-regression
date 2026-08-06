@@ -83,6 +83,21 @@ export interface SnapshotResult {
 // Core helper — POST JSON to the server
 // ---------------------------------------------------------------------------
 
+/**
+ * How long to wait on the dashboard before giving up, in milliseconds.
+ *
+ * node's http.request has no default timeout: a server that accepts the socket
+ * and then never answers leaves the promise pending forever, and since every
+ * snapshot is awaited, one unresponsive server hangs the whole test run with no
+ * error to explain it. Override with VR_TIMEOUT_MS.
+ */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+function requestTimeoutMs(): number {
+  const raw = Number(process.env['VR_TIMEOUT_MS']);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+}
+
 function postJson(serverUrl: string, path: string, apiKey: string | undefined, body: Record<string, unknown>): Promise<SnapshotResult> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(path, serverUrl);
@@ -97,6 +112,7 @@ function postJson(serverUrl: string, path: string, apiKey: string | undefined, b
         'Content-Length': Buffer.byteLength(bodyStr),
         ...(apiKey ? { 'X-Access-Key': apiKey } : {}),
       },
+      timeout: requestTimeoutMs(),
     };
 
     const lib = parsed.protocol === 'https:' ? https : http;
@@ -112,6 +128,11 @@ function postJson(serverUrl: string, path: string, apiKey: string | undefined, b
       });
     });
 
+    // 'timeout' only fires the event; the socket stays open unless it is
+    // destroyed, and without that the promise never settles.
+    req.on('timeout', () => {
+      req.destroy(new Error(`Timed out after ${requestTimeoutMs()}ms waiting for ${serverUrl}`));
+    });
     req.on('error', reject);
     req.write(bodyStr);
     req.end();
@@ -136,6 +157,19 @@ function postJson(serverUrl: string, path: string, apiKey: string | undefined, b
  */
 let domCaptureScript: string | null | undefined;
 
+/**
+ * Clear the cached DOM-capture script. Test-only.
+ *
+ * The cache is deliberately process-wide — the script is fetched once per run —
+ * which is exactly what makes its states hard to assert on without a way to
+ * return to the initial one.
+ *
+ * @internal
+ */
+export function __resetDomCaptureCacheForTests(): void {
+  domCaptureScript = undefined;
+}
+
 function getJson(serverUrl: string, path: string, apiKey: string | undefined): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(path, serverUrl);
@@ -147,11 +181,16 @@ function getJson(serverUrl: string, path: string, apiKey: string | undefined): P
         path: parsed.pathname + parsed.search,
         method: 'GET',
         headers: { ...(apiKey ? { 'X-Access-Key': apiKey } : {}) },
+        timeout: requestTimeoutMs(),
       },
       (res) => {
         let data = '';
         res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`GET ${path} returned ${res.statusCode}`));
+            return;
+          }
           try {
             resolve(JSON.parse(data) as Record<string, unknown>);
           } catch {
@@ -160,6 +199,9 @@ function getJson(serverUrl: string, path: string, apiKey: string | undefined): P
         });
       },
     );
+    req.on('timeout', () => {
+      req.destroy(new Error(`Timed out after ${requestTimeoutMs()}ms waiting for ${serverUrl}`));
+    });
     req.on('error', reject);
     req.end();
   });
@@ -174,11 +216,28 @@ async function captureDom(
   try {
     if (domCaptureScript === undefined) {
       const payload = await getJson(serverUrl, '/api/sdk/dom-capture-js', apiKey);
-      domCaptureScript = typeof payload['js'] === 'string' ? (payload['js'] as string) : null;
+      const js = payload['js'];
+      if (typeof js === 'string' && js.length > 0) {
+        domCaptureScript = js;
+      } else {
+        // Reached only when the server answered 2xx and genuinely carried no
+        // script — a property of that server, so it is safe to latch for the
+        // run. Everything else now rejects in getJson (4xx/5xx are checked
+        // there) and lands in the catch below with the cache still unset.
+        //
+        // That split is the point: previously any response without a "js" key —
+        // including the error body of a 403 returned before the API key was
+        // configured — latched `null` for the lifetime of the process, and
+        // every later snapshot uploaded pixels only. The run still passed, so
+        // nothing anywhere reported that structural comparison had been off.
+        domCaptureScript = null;
+      }
     }
     if (!domCaptureScript) return undefined;
     return await page.evaluate(domCaptureScript);
   } catch {
+    // Thrown before any assignment above, so the script stays `undefined` and
+    // the next snapshot tries again.
     return undefined;
   }
 }

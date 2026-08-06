@@ -12,7 +12,7 @@ Every claim below is enforced by CI on each push, not measured once by hand.
 | The AI inference path actually executes | `Smoke-test the AI inference path` — asserts `decision_source` is not `pixel-fallback-no-model` |
 | Classification is 95.00% (n=500), 95% CI [93.09%, 96.91%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
 | Both database backends work | `Verify the Postgres parity tests are not skipping` — fails if those tests silently skip |
-| 979 Python + 90 frontend tests pass | `Run Python tests`, `Run frontend unit tests` |
+| 1000 Python + 90 frontend + 8 SDK tests pass | `Run Python tests`, `Run frontend unit tests`, `Run Playwright SDK tests` |
 
 The detection gate runs with `--no-ai` deliberately, so it can never be blocked
 by model distribution — see

@@ -147,6 +147,16 @@ jobs:
           npm install --no-audit --no-fund
           npm run build
 
+      # Compiling proved only that it parses. These run the compiled output
+      # against a throwaway HTTP server, covering the parts a consumer depends
+      # on and cannot see: that the DOM travels with the screenshot, that a
+      # server which cannot supply the capture script degrades to pixels
+      # instead of failing the suite, and that an unresponsive server times out
+      # rather than hanging the caller's test run.
+      - name: Run Playwright SDK tests
+        working-directory: sdk
+        run: npm test
+
       - name: Run npm audit
         working-directory: dashboard_frontend
         # react-router-dom is pinned to the latest available version (7.18.2).
