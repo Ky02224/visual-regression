@@ -356,14 +356,6 @@ _CAPTURE_DOM_SNAPSHOT_JS = """
   let hasIframe = false;
   let interactiveCount = 0;
   const elements = [];
-  // node -> its index in `elements`, so each entry can record which tracked
-  // element contains it. Geometry alone cannot tell "this container was
-  // removed, and its image went with it" from "this image was removed, and its
-  // container collapsed around the hole" -- both leave the container's box
-  // unmatchable. Real parentage can: a removed container loses *every* tracked
-  // descendant, whereas a removed image leaves its siblings (the caption, the
-  // link) still present. diagnose_from_dom_diff uses that distinction.
-  const nodeIndex = new Map();
 
   function getDepth(el) {
     let depth = 0;
@@ -423,13 +415,6 @@ _CAPTURE_DOM_SNAPSHOT_JS = """
             if (txt) entry.txt = txt.slice(0, 60);
           } catch (e) { /* ignore */ }
         }
-        // Nearest tracked ancestor. querySelectorAll('*') yields document
-        // order, so every ancestor that qualified has already been pushed and
-        // is in the map by the time its descendants are reached.
-        let ancestor = el.parentElement;
-        while (ancestor && !nodeIndex.has(ancestor)) ancestor = ancestor.parentElement;
-        if (ancestor) entry.p = nodeIndex.get(ancestor);
-        nodeIndex.set(el, elements.length);
         elements.push(entry);
       }
     }
