@@ -7,6 +7,12 @@
  * asserted is what a consumer installs.
  *
  * Run with: npm test  (builds first — the tests import from dist/)
+ *
+ * The script is a bare `node --test`, which discovers test files itself. The
+ * alternatives are version-dependent in ways that only show up on the runner:
+ * a `test/*.test.js` glob needs the expansion Node added in 22 and failed on
+ * CI's Node 20, while passing the directory resolves as a module specifier on
+ * Node 24. Auto-discovery has behaved the same since Node 18.
  */
 const { test, describe, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert');

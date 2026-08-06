@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc && node --test \"test/*.test.js\""
+    "test": "tsc && node --test"
   },
   "keywords": ["visual-regression", "playwright", "testing", "percy-alternative"],
   "license": "MIT",
