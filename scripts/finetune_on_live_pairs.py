@@ -113,6 +113,11 @@ def main() -> int:
     parser.add_argument("--run-pair-oversample", type=int, default=2,
                         help="The 15x default exists for workspaces holding a handful "
                              "of real runs; with thousands, repetition just wastes epochs.")
+    parser.add_argument("--dom-dropout", type=float, default=0.0,
+                        help="Fraction of training samples whose DOM+structural feature "
+                             "block is zeroed, so the image streams learn to classify "
+                             "without DOM — the screenshot-only inference case. 0 keeps "
+                             "the previous behaviour.")
     parser.add_argument("--min-pairs", type=int, default=50,
                         help="Refuse to train on fewer than this many pairs. Lower it "
                              "only to smoke-test the pipeline end to end.")
@@ -185,6 +190,7 @@ def main() -> int:
         use_local_baselines=False,
         include_run_pairs=True,
         run_pair_oversample=args.run_pair_oversample,
+        dom_dropout=args.dom_dropout,
     )
 
     print("\n=== training summary ===")

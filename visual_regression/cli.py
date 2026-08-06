@@ -1667,6 +1667,7 @@ def cmd_train_ai(args, paths: WorkspacePaths) -> int:
         max_public_images=args.max_public_images,
         force_cpu=args.force_cpu,
         backbone_name=args.backbone,
+        dom_dropout=args.dom_dropout,
     )
 
     real_eval = evaluate_model_on_runs(paths=paths, model_path=staging_model_path)
@@ -2085,6 +2086,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--samples-per-image", type=int, default=16)
     train_parser.add_argument("--pixel-threshold", type=int, default=20)
     train_parser.add_argument("--min-region-area", type=int, default=120)
+    train_parser.add_argument("--dom-dropout", type=float, default=0.0,
+                              help="Fraction of training samples whose DOM/structural features are zeroed, teaching the model the screenshot-only case")
     train_parser.add_argument("--no-pretrained", action="store_true", help="Disable ImageNet pretrained weights for ResNet50")
     train_parser.add_argument("--dataset-manifest", help="Path to public dataset manifest created by prepare-public-datasets")
     train_parser.add_argument("--max-public-images", type=int, help="Cap the number of imported public dataset images used for training")

@@ -377,6 +377,31 @@ def _collate_numpy(batch: list) -> tuple:
     return baselines, currents, rules, labels
 
 
+def _apply_dom_dropout(rule_np: np.ndarray, p: float, rng: "np.random.Generator") -> np.ndarray:
+    """Zero the DOM+structural feature block on a random fraction of samples.
+
+    Every real training pair carries a DOM sidecar, so the model always trains
+    with all 62 features populated — and the DOM block is so predictive (the
+    rule engine reaches 94% from it alone) that gradient descent leans on it
+    and the image pathway is never forced to carry the classification. At
+    screenshot-only inference that block arrives as zeros, an input the model
+    has never seen, and its predictions collapse toward a single class.
+
+    Zeroing the block on a fraction of samples makes "no DOM" part of the
+    training distribution: on those samples the images are the only signal
+    left, so the CNN streams have to learn to classify from pixels. The pixel
+    features (the first len(RULE_FEATURE_NAMES) columns) are always available
+    at inference, so they are never dropped.
+    """
+    if p <= 0:
+        return rule_np
+    mask = rng.random(rule_np.shape[0]) < p
+    if mask.any():
+        rule_np = rule_np.copy()
+        rule_np[mask, len(RULE_FEATURE_NAMES):] = 0.0
+    return rule_np
+
+
 
 class StreamingSyntheticDataset:
     """Generates pair-samples on-the-fly — only source images live in RAM."""
@@ -1000,6 +1025,7 @@ def train_model(
     use_local_baselines: bool = True,
     include_run_pairs: bool = True,
     run_pair_oversample: int = 15,
+    dom_dropout: float = 0.0,
 ) -> Dict[str, object]:
     torch, nn = _require_torch()
     paths.ensure()
@@ -1339,7 +1365,12 @@ def train_model(
         epoch_loss = 0.0
         num_batches = 0
         loader_iter = _tqdm(train_loader, desc=f"Epoch {epoch_num}/{epochs}", unit="batch", leave=False) if _tqdm else train_loader
+        dropout_rng = np.random.default_rng(epoch_num * 7919)  # per-epoch stream, reproducible per epoch
         for bl_batch, cur_batch, rule_np, lbl_np in loader_iter:
+            # Train-time only. Validation keeps its DOM so val_loss stays
+            # comparable with earlier runs; the screenshot-only skill is
+            # measured where it matters, by the live no-DOM evaluation.
+            rule_np = _apply_dom_dropout(rule_np, dom_dropout, dropout_rng)
             left_t_norm = torch.tensor(normalize_batch_uint8(bl_batch), dtype=torch.float32, device=device)
             right_t_norm = torch.tensor(normalize_batch_uint8(cur_batch), dtype=torch.float32, device=device)
             diff_t_norm = (left_t_norm - right_t_norm).abs()
