@@ -88,12 +88,51 @@ def _extract_diff_crop(
     crop_seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Crop both images around the changed region + padding.
-    If no meaningful diff (benign), fall back to a deterministic random crop."""
+
+    `result.regions` holds only differences large enough to clear
+    min_region_area (120px by default). Plenty of real defects do not: recolour
+    a heading and only the glyph strokes change, which is a few hundred
+    scattered pixels and forms no contiguous region of that size. The fallback
+    then handed the model a *random* crop — so on 90 of 93 colour-regression
+    trials it was shown an unchanged part of the page and asked what had
+    changed there. Answering "nothing" was correct for what it saw, and the
+    class scored 2.2%.
+
+    So when no region survives the threshold, locate the change from the raw
+    per-pixel difference instead, which is still there regardless of how small
+    or scattered it is. The random crop remains only for genuinely identical
+    images, where there is nothing to centre on and a benign sample is what is
+    wanted.
+    """
     h_bl, w_bl = baseline.shape[:2]
     h_cu, w_cu = current.shape[:2]
     h = min(h_bl, h_cu)
     w = min(w_bl, w_cu)
-    
+
+    def _framed(x1: int, y1: int, x2: int, y2: int):
+        """A window of at least 64x64 that contains the box.
+
+        Centring alone is not enough near an edge: a change in the top-left
+        corner centres on a window half of which lies outside the image, and
+        clamping it leaves something too small for the backbone. Slide the
+        window back inside instead of shrinking it, so the change stays in
+        frame wherever on the page it happens to be.
+        """
+        def _span(lo: int, hi: int, limit: int) -> tuple[int, int]:
+            want = max(64, (hi - lo) + 2 * padding)
+            if want >= limit:
+                return 0, limit
+            centre = (lo + hi) // 2
+            start = centre - want // 2
+            start = max(0, min(start, limit - want))   # slide, never shrink
+            return start, start + want
+
+        nx1, nx2 = _span(x1, x2, w)
+        ny1, ny2 = _span(y1, y2, h)
+        if (nx2 - nx1) < 64 or (ny2 - ny1) < 64:
+            return None      # the page itself is smaller than the backbone needs
+        return baseline[ny1:ny2, nx1:nx2], current[ny1:ny2, nx1:nx2]
+
     if result.regions:
         x1 = max(0, min(r.x for r in result.regions) - padding)
         y1 = max(0, min(r.y for r in result.regions) - padding)
@@ -101,6 +140,20 @@ def _extract_diff_crop(
         y2 = min(h, max(r.y + r.height for r in result.regions) + padding)
         if (x2 - x1) >= 64 and (y2 - y1) >= 64:
             return baseline[y1:y2, x1:x2], current[y1:y2, x1:x2]
+
+    # Sub-threshold change: find it in the raw difference.
+    try:
+        delta = cv2.absdiff(baseline[:h, :w], current[:h, :w])
+        if delta.ndim == 3:
+            delta = delta.max(axis=2)
+        ys, xs = np.nonzero(delta > 8)   # above sensor/compression noise, below min_region_area
+        if ys.size:
+            framed = _framed(int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+            if framed is not None:
+                return framed
+    except Exception:
+        pass   # any shape/dtype surprise falls through to the random crop below
+
     rng = np.random.default_rng(crop_seed)
     ch = min(h, max(256, h // 3))
     cw = min(w, max(256, w // 3))
@@ -1841,6 +1894,12 @@ def _should_suppress_ai_label(result: CompareResult, label: str, score: float, t
     # silently discard a confirmed defect.
     if dom_confirmed:
         return score < min(threshold, DEFAULT_CONFIDENCE_FLOOR)
+    # Letting a confident model override these was measured on 2026-08-06 and
+    # rejected: on the 150 screenshot-only trials it changed, colour-regression
+    # stayed at 0% and text-issue at 0%, because the verdicts the rules were
+    # discarding had been wrong to begin with. The rules hide no recoverable
+    # signal, and the with-DOM exemption above remains the only one earned by
+    # independent evidence.
     if _is_micro_rendering_noise(result):
         return True
     if result.mismatch_pct < 0.2 and not result.regions:
@@ -2736,3 +2795,71 @@ def evaluate_model_on_runs(paths: WorkspacePaths, model_path: Path) -> Dict[str,
 def _write_temp_eval_image(rgb_image: np.ndarray, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(target), cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
+
+def adopt_model_if_gate_passes(
+    paths: WorkspacePaths,
+    staging_model_path: Path,
+    target_model_path: Path,
+    min_real_accuracy: float = 0.5,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Promote a freshly trained model only if it still classifies reviewed runs.
+
+    Every route that replaces the deployed model must pass through here. The CLI
+    had this gate; the dashboard's active-learning retrain did not — it trained
+    straight onto models/visual_ai.pt, so ten review clicks silently swapped the
+    deployed model for one nothing had measured, with no backup to fall back to.
+    Sharing one implementation is what stops the two paths drifting apart again.
+
+    The evaluation set is the human-reviewed run pairs, which is the only ground
+    truth that comes from people rather than from the system's own opinion. With
+    none of them yet, there is nothing to gate on and the model is adopted with
+    that stated plainly rather than implied by silence.
+
+    Adopting moves every staged sidecar (.json, .onnx, .torchscript.pt, ...)
+    alongside the weights, backing up whatever it replaces as .bak-<timestamp>.
+    A blocked model is deleted, so a staging file can never be mistaken later
+    for a deployed one.
+    """
+    import shutil
+    import time as _time
+
+    evaluation = evaluate_model_on_runs(paths=paths, model_path=staging_model_path)
+    samples = int(evaluation.get("samples") or 0)
+    accuracy = evaluation.get("evaluation", {}).get("accuracy")
+
+    if samples <= 0:
+        passed = True
+        message = "No human-reviewed run pairs available yet; adopting without real-data validation."
+    elif accuracy is not None and accuracy < min_real_accuracy:
+        passed = False
+        message = (
+            f"Real-run accuracy {accuracy:.2%} on {samples} reviewed samples is below the "
+            f"required {min_real_accuracy:.2%} threshold."
+        )
+    else:
+        passed = True
+        message = f"Passed real-run accuracy gate: {accuracy:.2%} on {samples} reviewed samples."
+
+    adopted = passed or force
+    if adopted:
+        stamp = _time.strftime("%Y%m%dT%H%M%S")
+        for staged in list(staging_model_path.parent.glob(f"{staging_model_path.stem}.*")):
+            suffix_chain = staged.name[len(staging_model_path.stem):]
+            target_file = staged.with_name(f"{target_model_path.stem}{suffix_chain}")
+            if target_file.exists():
+                shutil.move(str(target_file), str(target_file.with_name(f"{target_file.name}.bak-{stamp}")))
+            shutil.move(str(staged), str(target_file))
+    else:
+        for staged in staging_model_path.parent.glob(f"{staging_model_path.stem}.*"):
+            staged.unlink(missing_ok=True)
+
+    return {
+        "passed": passed,
+        "forced": bool(force) and not passed,
+        "adopted": adopted,
+        "message": message,
+        "samples": samples,
+        "accuracy": accuracy,
+        "evaluation": evaluation,
+    }
