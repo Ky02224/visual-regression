@@ -164,6 +164,7 @@ def export_to_onnx(model_path: Path):
             # anything it saw in training — and the ONNX sidecar, not the
             # checkpoint, is what the deployed path reads.
             "rule_feature_mean": checkpoint.get("rule_feature_mean"),
+            "noise_override_confidence": checkpoint.get("noise_override_confidence"),
             "rule_feature_std": checkpoint.get("rule_feature_std"),
         }
         json_path = model_path.with_suffix(".json")
@@ -297,6 +298,7 @@ def _load_legacy_or_hybrid_model(model_path: Path):
                 "class_names": class_names_ts,
                 "rule_dim": len(ts_meta.get("rule_feature_names", RULE_FEATURE_NAMES)),
                 "rule_feature_mean": ts_meta.get("rule_feature_mean"),
+                "noise_override_confidence": ts_meta.get("noise_override_confidence"),
                 "rule_feature_std": ts_meta.get("rule_feature_std"),
             }
             logger.info("[TorchScript] Loaded scripted model from %s", torchscript_path.name)
@@ -349,6 +351,7 @@ def _load_legacy_or_hybrid_model(model_path: Path):
                 "model_type": model_type,
                 "class_names": class_names,
                 "rule_feature_mean": meta.get("rule_feature_mean"),
+                "noise_override_confidence": meta.get("noise_override_confidence"),
                 "rule_feature_std": meta.get("rule_feature_std"),
             }
             if mtime is not None:
@@ -389,9 +392,30 @@ def _load_legacy_or_hybrid_model(model_path: Path):
     output_dim = len(class_names) if class_names else 1
     rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
     classifier_state = checkpoint["classifier_state_dict"]
-    first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-    in_features = classifier_state[first_weight_key].shape[1]
-    num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
+    # Which head architecture produced this checkpoint is written in its own key
+    # names: the widened head projects the rule vector through "rule_proj" and
+    # keeps the classifier in "trunk", the flat one is a bare Sequential whose
+    # first layer is "0". Reading the shape off the wrong one silently builds a
+    # head the weights cannot load into.
+    widened = any(k.startswith("rule_proj.") for k in classifier_state)
+    image_projection_dim = None
+    if widened:
+        in_features = classifier_state["trunk.0.weight"].shape[1]
+        projection_dim = classifier_state["rule_proj.3.weight"].shape[0]
+        if "image_proj.0.weight" in classifier_state:
+            # The image side is projected too. Its own layer states both widths,
+            # which the trunk no longer can: trunk.0 now sees 512 columns, not
+            # the 8192 the backbone actually produces, so deriving image_dim by
+            # subtraction would build a head a quarter the right size and the
+            # load would fail on shapes.
+            image_dim = classifier_state["image_proj.0.weight"].shape[1]
+            image_projection_dim = classifier_state["image_proj.0.weight"].shape[0]
+        else:
+            image_dim = in_features - projection_dim
+    else:
+        first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
+        image_dim = classifier_state[first_weight_key].shape[1] - rule_dim
+    num_streams = 3 if image_dim == embedding_dim * 3 else 4
 
     head = SiameseFusionHead(
         nn,
@@ -399,6 +423,8 @@ def _load_legacy_or_hybrid_model(model_path: Path):
         rule_dim=rule_dim,
         output_dim=output_dim,
         num_streams=num_streams,
+        widen_rule_features=widened,
+        image_projection_dim=image_projection_dim,
     ).model
 
     head.load_state_dict(checkpoint["classifier_state_dict"])
@@ -416,6 +442,7 @@ def _load_legacy_or_hybrid_model(model_path: Path):
         "class_names": class_names,
         "calibrated_temperature": float(checkpoint.get("calibrated_temperature", 1.3)),
         "rule_feature_mean": checkpoint.get("rule_feature_mean"),
+        "noise_override_confidence": checkpoint.get("noise_override_confidence"),
         "rule_feature_std": checkpoint.get("rule_feature_std"),
         # The three numbers an inference path needs to build an input this head
         # will accept. They are known exactly here — rule_dim from the width the

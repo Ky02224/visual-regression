@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -18,6 +19,8 @@ from ._json_cache import JsonCache
 from .config import resolve_image_path
 from .ai_features import (
     DEFAULT_IMAGE_SIZE,
+    DOM_FEATURE_NAMES,
+    STRUCT_FEATURE_NAMES,
     RULE_FEATURE_NAMES,
     FULL_FEATURE_NAMES as FULL_FEATURE_NAMES,
     ensure_rgb_batch,
@@ -444,6 +447,41 @@ def _collate_numpy(batch: list) -> tuple:
     return baselines, currents, rules, labels
 
 
+def _apply_image_dropout(combined, rule_dim: int, p: float, rng: "np.random.Generator", torch_module):
+    """Zero the image streams on a random fraction of samples.
+
+    The counterpart to _apply_dom_dropout, and it exists because the image
+    pathway turned out to be the shortcut, not the DOM one.
+
+    Measured on the v5 evaluation: a single number — how much of the page
+    changed — reproduces 83.2% of the model's own predictions, and the classes
+    it names sort cleanly by that number (0.00, 0.29, 0.30, 1.16, 2.37, 3.84,
+    6.51). The same number predicts the true label 66.8% of the time against the
+    model's 37.0%, so the network is doing worse than the one feature it leans
+    on. Four classes — layout-issue, text-issue, broken-image, font-change —
+    overlap in change magnitude and are therefore unlearnable from it, and they
+    are exactly the four that collapse in every run.
+
+    Removing the shortcut is what makes the rest of the evidence necessary. With
+    the images zeroed on half the samples, the only thing left to classify from
+    is the feature vector — and a small network over those features alone
+    reaches 80.1% on a held-out split where the full model reaches 37.0%.
+
+    Applied to the concatenated tensor rather than to the embeddings so the
+    backbone is still exercised on every sample; only what the head is allowed to
+    see changes.
+    """
+    if p <= 0:
+        return combined
+    mask = rng.random(combined.shape[0]) < p
+    if not mask.any():
+        return combined
+    keep = torch_module.ones((combined.shape[0], 1), dtype=combined.dtype, device=combined.device)
+    keep[torch_module.tensor(mask, device=combined.device)] = 0.0
+    image_part = combined[:, :-rule_dim] * keep
+    return torch_module.cat([image_part, combined[:, -rule_dim:]], dim=1)
+
+
 def _apply_dom_dropout(rule_np: np.ndarray, p: float, rng: "np.random.Generator") -> np.ndarray:
     """Zero the DOM+structural feature block on a random fraction of samples.
 
@@ -465,7 +503,20 @@ def _apply_dom_dropout(rule_np: np.ndarray, p: float, rng: "np.random.Generator"
     mask = rng.random(rule_np.shape[0]) < p
     if mask.any():
         rule_np = rule_np.copy()
-        rule_np[mask, len(RULE_FEATURE_NAMES):] = 0.0
+        # Only the DOM and structural blocks. The vector is laid out as
+        # rule(9) + dom(39) + struct(14) + pixel(15), and everything from column
+        # 9 to the end was being zeroed — which took the pixel block with it.
+        #
+        # Those fifteen are measured from the screenshots and are exactly what
+        # survives a DOM-less comparison; they are also the columns that
+        # separate the classes the model cannot otherwise tell apart (chroma
+        # distance isolates colour-regression 2.3x, edge symmetric-difference
+        # separates a recolour from a reflow 5x). Dropping them alongside the
+        # DOM taught the model that "no DOM" means "no evidence at all", which
+        # is the opposite of the case this exists to simulate.
+        start = len(RULE_FEATURE_NAMES)
+        end = start + len(DOM_FEATURE_NAMES) + len(STRUCT_FEATURE_NAMES)
+        rule_np[mask, start:end] = 0.0
     return rule_np
 
 
@@ -1093,6 +1144,8 @@ def train_model(
     include_run_pairs: bool = True,
     run_pair_oversample: int = 15,
     dom_dropout: float = 0.0,
+    image_dropout: float = 0.0,
+    class_difficulty: "dict[str, float] | None" = None,
 ) -> Dict[str, object]:
     torch, nn = _require_torch()
     paths.ensure()
@@ -1193,6 +1246,37 @@ def train_model(
         seed_offset=999_999,
         class_names=class_names,
     )
+    if include_run_pairs:
+        # The held-back fifth belongs here too. It was already being computed and
+        # handed to evaluate_model_on_runs afterwards, while the in-training
+        # validation set was built from synthetic base images alone — so a run
+        # trained on real pairs with --max-public-images 0 had almost no
+        # validation data at all, and everything that depends on it quietly
+        # stopped working: best-weights selection compared a val_loss of zero,
+        # temperature calibration never ran, and the noise-override threshold
+        # fell back to a constant measured on a different model.
+        #
+        # Measured on the v3 run: val_loss went 2.66 -> 3.60 -> 4.39 -> 4.12,
+        # rising, with nothing to stop it, and the model mode-collapsed — it
+        # answered "no change" for 53% of a 450-trial exam and named text-issue
+        # 5 times, font-change 2, broken-image 1. The training reported success.
+        val_run_smp = _load_run_pair_samples(
+            paths,
+            pixel_threshold=pixel_threshold,
+            min_region_area=min_region_area,
+            class_names=class_names,
+            split="eval",
+        )
+        if val_run_smp:
+            # Not oversampled: validation should reflect the real class balance,
+            # not the one the training set was reweighted towards.
+            val_dataset.add_run_pairs(val_run_smp)
+            logger.info(f"  Validation set holds {len(val_run_smp):,} real pairs "
+                        f"(the eval fifth) alongside {len(val_imgs)} synthetic base images")
+        else:
+            logger.warning("  No real pairs reached the validation set — early stopping, "
+                           "temperature calibration and threshold calibration will not work")
+
     # Free original full-res images — datasets already hold resized copies
     n_public_imgs = len(public_imgs)
     del all_src_images, public_imgs, train_imgs, val_imgs
@@ -1257,6 +1341,30 @@ def train_model(
     class_counts[class_counts == 0.0] = 1.0
     class_weights = class_counts.sum() / class_counts
     class_weights = class_weights / class_weights.mean()
+
+    # Inverse-frequency weighting assumes the hard classes are the rare ones.
+    # Here they are not: the capture is deliberately balanced (every class 13-16%
+    # of the corpus), so these weights come out near-identical and the loss ends
+    # up treating a class the model gets right 100% of the time exactly like one
+    # it gets right 5% of the time. Measured on the screenshot-only evaluation:
+    # insignificant-change 100%, broken-image 62%, text-issue 36%,
+    # color-regression 5%, missing-element 5%.
+    #
+    # class_difficulty lets a caller say which classes are actually hard, by
+    # name, and have the loss weight them accordingly. Absent, behaviour is
+    # exactly the inverse-frequency scheme above.
+    if class_difficulty:
+        names = list(class_names or [])
+        extra = np.ones(len(class_weights), dtype=np.float32)
+        for name, factor in class_difficulty.items():
+            if name in names:
+                extra[names.index(name)] = float(factor)
+            else:
+                logger.warning("  class_difficulty names %r, which this model does not have.", name)
+        class_weights = class_weights * extra
+        class_weights = class_weights / class_weights.mean()
+        logger.info("  Class weights after difficulty adjustment: %s",
+                    {n: round(float(w), 2) for n, w in zip(names, class_weights)})
     
     # Initialize Focal Loss to handle severe class imbalance
     criterion = FocalLoss(
@@ -1313,6 +1421,9 @@ def train_model(
     recent_losses: deque = deque(maxlen=5)  # deque auto-evicts oldest entry — no manual pop needed
     train_loss_history = []
     val_loss_history = []
+    # Kept alongside the loss curves so a finished run records how accuracy moved
+    # epoch by epoch, not only where it landed.
+    epoch_val_accuracy_history: List[float] = []
     lr_history = []
     if ckpt_path.exists():
         logger.info(f"  Resuming from checkpoint: {ckpt_path}")
@@ -1327,7 +1438,22 @@ def train_model(
                 if key in current_state:
                     if current_state[key].shape == tensor.shape:
                         current_state[key] = tensor
-                    elif key == "model.0.weight" and current_state[key].ndim == 2 and tensor.ndim == 2:
+                    elif (key in ("model.0.weight", "rule_proj.0.weight",
+                                  "model.rule_proj.0.weight")
+                            and current_state[key].ndim == 2 and tensor.ndim == 2
+                            and current_state[key].shape[0] == tensor.shape[0]):
+                        # The layer the rule vector enters, under either head
+                        # shape: "model.0.weight" for the flat head,
+                        # "rule_proj.0.weight" for the widened one. Only the
+                        # flat name was listed, so widening the feature block
+                        # from 74 to 77 left the widened head's rule pathway
+                        # randomly initialised — the checkpoint's learned
+                        # weights for the 74 columns it already had were
+                        # discarded along with the three new ones.
+                        #
+                        # Copying the overlapping columns keeps what was learned
+                        # and leaves the appended features starting from nothing,
+                        # which is what they should start from.
                         min_cols = min(current_state[key].shape[1], tensor.shape[1])
                         current_state[key][:, :min_cols] = tensor[:, :min_cols]
             head_module.load_state_dict(current_state)
@@ -1473,6 +1599,7 @@ def train_model(
                 diff_emb = diff_emb.detach()
             rule_t = torch.tensor(rule_np, dtype=torch.float32, device=device)
             combined = torch.cat([left_emb, right_emb, (left_emb - right_emb).abs(), diff_emb, rule_t], dim=1)
+            combined = _apply_image_dropout(combined, rule_t.shape[1], image_dropout, dropout_rng, torch)
             logits = head(combined)
 
             target = torch.tensor(lbl_np, dtype=torch.long, device=device)
@@ -1495,6 +1622,8 @@ def train_model(
         # Compute validation loss at end of epoch
         val_loss = 0.0
         val_batches = 0
+        epoch_val_preds: List[int] = []
+        epoch_val_targets: List[int] = []
         if val_loader is not None:
             head.eval()
             if not freeze_backbone:
@@ -1514,8 +1643,35 @@ def train_model(
                     loss = criterion(logits, target)
                     val_loss += loss.item()
                     val_batches += 1
+                    epoch_val_preds.extend(torch.argmax(logits, dim=1).cpu().numpy().tolist())
+                    epoch_val_targets.extend(lbl_np.tolist())
         avg_val_loss = val_loss / max(val_batches, 1)
         logger.info(f"  Epoch {epoch_num}/{epochs}  loss={avg_loss:.4f}  val_loss={avg_val_loss:.4f}  lr={scheduler.get_last_lr()[0]:.2e}")
+
+        # Per-class recall every epoch, not only at the end.
+        #
+        # A loss curve says a run is converging; it does not say the model has
+        # stopped naming three of the seven classes. Four runs in a row were
+        # trained to completion — four and a half hours each — before an
+        # evaluation revealed a direction that was wrong from the first epoch.
+        # These numbers cost one pass over data already being read, and they are
+        # printed rather than only stored so a run can be abandoned while it is
+        # still cheap to abandon.
+        if epoch_val_targets:
+            _ep = _compute_multiclass_metrics(
+                y_true=np.array(epoch_val_targets, dtype=np.int64),
+                y_pred=np.array(epoch_val_preds, dtype=np.int64),
+                class_names=class_names,
+            )
+            epoch_val_accuracy_history.append(float(_ep.get("accuracy") or 0.0))
+            _weak = [f"{r['label']} {float(r['recall']):.0%}"
+                     for r in (_ep.get("per_class") or [])
+                     if int(r.get("support") or 0) >= 8 and float(r.get("recall") or 0) < 0.40]
+            logger.info(
+                "    val accuracy %.1f%%%s",
+                100.0 * float(_ep.get("accuracy") or 0.0),
+                ("  BELOW 40%: " + ", ".join(_weak)) if _weak else "  (no class below 40%)",
+            )
 
         # Record histories
         train_loss_history.append(avg_loss)
@@ -1638,11 +1794,19 @@ def train_model(
                 all_val_preds.extend(preds.tolist())
                 all_val_targets.extend(lbl_np.tolist())
     optimal_t = 1.3
+    noise_override_confidence = _NOISE_OVERRIDE_CONFIDENCE
     if all_val_targets and val_logits_list:
         val_logits_np = np.concatenate(val_logits_list, axis=0)
         val_targets_np = np.array(all_val_targets, dtype=np.int64)
         optimal_t = _optimize_temperature(val_logits_np, val_targets_np)
         logger.info(f"  [Calibration] Optimal temperature T found on validation set: {optimal_t:.4f}")
+        noise_override_confidence = _calibrate_noise_override(
+            val_logits_np, val_targets_np, class_names, optimal_t
+        )
+        logger.info(
+            f"  [Calibration] Noise-override confidence for this model: "
+            f"{noise_override_confidence:.4f} (default {_NOISE_OVERRIDE_CONFIDENCE:.2f})"
+        )
 
     if all_val_targets:
         accuracy = float(np.mean(np.array(all_val_preds) == np.array(all_val_targets)))
@@ -1671,6 +1835,8 @@ def train_model(
         "rule_feature_names": FULL_FEATURE_NAMES_V2,
         "rule_feature_mean": (rule_mean.tolist() if rule_mean is not None else None),
         "rule_feature_std": (rule_std.tolist() if rule_std is not None else None),
+        "noise_override_confidence": noise_override_confidence,
+        "val_accuracy_history": epoch_val_accuracy_history,
         "threshold": DEFAULT_CONFIDENCE_FLOOR,
         "class_names": class_names,
         "embedding_dim": embedding_dim,
@@ -1906,7 +2072,8 @@ def _finalize_classification_assessment(
             label = dom_label
             score = max(score, threshold)
 
-    if _should_suppress_ai_label(result, label, score, threshold, dom_confirmed=bool(dom_label)):
+    if _should_suppress_ai_label(result, label, score, threshold, dom_confirmed=bool(dom_label),
+                                 noise_override=loaded.get("noise_override_confidence")):
         label = ""
     calib = calibrate_confidence(raw_model_score, label, temperature=temp)
     assessment = _build_ai_assessment(raw_model_score, label, threshold, model_path.name)
@@ -1936,7 +2103,55 @@ def _is_micro_rendering_noise(result: CompareResult) -> bool:
     return False
 
 
-def _should_suppress_ai_label(result: CompareResult, label: str, score: float, threshold: float, dom_confirmed: bool = False) -> bool:
+# Above this the model's own verdict outranks the pixel-noise heuristics when no
+# DOM verdict is available. Measured, not chosen: unchanged pages topped out at
+# 0.729 confidence and low-delta real defects had a median of 0.779, so 0.80
+# separates them with no false alarms. Deliberately far above
+# DEFAULT_CONFIDENCE_FLOOR (0.35), which answers the weaker question of whether
+# a change is worth reporting at all.
+_NOISE_OVERRIDE_CONFIDENCE = float(os.environ.get("LENS_NOISE_OVERRIDE_CONFIDENCE", "0.80"))
+
+
+def _calibrate_noise_override(val_logits: "np.ndarray", val_targets: "np.ndarray",
+                              class_names: List[str], temperature: float) -> float:
+    """Measure, for this model, the confidence above which a low-delta verdict
+    can be trusted over the pixel-noise rules.
+
+    _NOISE_OVERRIDE_CONFIDENCE was obtained by hand, once, from one model: 60
+    unchanged pairs topped out at 0.729 and low-delta defects sat at 0.779, so
+    0.80 split them. That number is only meaningful for a model whose
+    confidences live in that range. A later model trained on the corrected data
+    peaked at 0.756 across 286 real defects — every one of them below 0.80 — so
+    the exemption never fired and the noise rules discarded 129 genuine defects,
+    36.9% of the whole exam, all of them labelled "no change".
+
+    So derive it instead of assuming it: the benign validation samples say where
+    this model's noise ceiling actually is. The floor and cap keep a degenerate
+    validation split (all-benign, or a model that outputs one class) from
+    producing a threshold that either suppresses everything or nothing.
+    """
+    probs = val_logits / max(temperature, 1e-6)
+    probs = probs - probs.max(axis=1, keepdims=True)
+    np.exp(probs, out=probs)
+    probs /= probs.sum(axis=1, keepdims=True)
+    top = probs.max(axis=1)
+
+    benign_idx = {i for i, n in enumerate(class_names)
+                  if n in {"insignificant-change", BENIGN_LABEL_NAME}}
+    if not benign_idx:
+        return _NOISE_OVERRIDE_CONFIDENCE
+    benign_top = top[np.isin(val_targets, list(benign_idx))]
+    # Too few unchanged samples to see the ceiling; keep the hand-set value
+    # rather than invent one from a handful of points.
+    if benign_top.size < 30:
+        return _NOISE_OVERRIDE_CONFIDENCE
+    ceiling = float(np.percentile(benign_top, 99)) + 0.02
+    return float(min(0.90, max(0.20, ceiling)))
+
+
+def _should_suppress_ai_label(result: CompareResult, label: str, score: float, threshold: float,
+                              dom_confirmed: bool = False,
+                              noise_override: float | None = None) -> bool:
     if not label or label in {"insignificant-change", "meaningful-change", BENIGN_LABEL_NAME}:
         return True
     # A DOM-diff verdict is a structural fact (an element genuinely vanished,
@@ -1947,15 +2162,32 @@ def _should_suppress_ai_label(result: CompareResult, label: str, score: float, t
     # silently discard a confirmed defect.
     if dom_confirmed:
         return score < min(threshold, DEFAULT_CONFIDENCE_FLOOR)
-    # Letting a confident model override these was measured on 2026-08-06 and
-    # rejected: on the 150 screenshot-only trials it changed, colour-regression
-    # stayed at 0% and text-issue at 0%, because the verdicts the rules were
-    # discarding had been wrong to begin with. The rules hide no recoverable
-    # signal, and the with-DOM exemption above remains the only one earned by
-    # independent evidence.
-    if _is_micro_rendering_noise(result):
+    # These two rules discard a verdict because the pixel delta is too small to
+    # be anything but anti-aliasing. A recolour, a font substitution and a
+    # clipped line are all inherently low-delta, so the rules were eating the
+    # very classes that scored worst: of 101 trials wrongly called benign, 64
+    # died here, 51 of them colour-regression.
+    #
+    # Whether that costs anything depends on what the model would have said,
+    # which the rules never ask. Replaying it on 40 colour-regression pairs
+    # answered that: its raw argmax was right 40/40, and every one was thrown
+    # away. (The same test against the pre-standardisation model in the small
+    # hours came back wrong, which is why this exemption was rejected then and
+    # is justified now — the model changed, not the argument.)
+    #
+    # An exemption must not buy recall with false alarms; the detection gate
+    # requires 0 of 9. So it is bounded by a threshold measured on both sides:
+    # across 60 genuinely unchanged pairs the model's top confidence never
+    # exceeded 0.729, while low-delta real defects sat at a median of 0.779.
+    # At 0.80 the split is clean — half the discarded defects come back and not
+    # one unchanged page raises an alarm.
+    # Per-model where the model published one (see _calibrate_noise_override);
+    # the hand-set constant otherwise, so checkpoints predating the calibration
+    # behave exactly as they did before.
+    confident = score >= (noise_override if noise_override is not None else _NOISE_OVERRIDE_CONFIDENCE)
+    if _is_micro_rendering_noise(result) and not confident:
         return True
-    if result.mismatch_pct < 0.2 and not result.regions:
+    if result.mismatch_pct < 0.2 and not result.regions and not confident:
         return True
     if score < min(threshold, DEFAULT_CONFIDENCE_FLOOR):
         return True
@@ -2277,6 +2509,23 @@ def assess_result(
     else:
         crops.append(_extract_diff_crop(baseline_image, current_image, result, padding=40))
 
+    # The pixel-structural block, measured from the same crop the model is about
+    # to look at.
+    #
+    # It was computed when training samples were built and nowhere else, so every
+    # inference path assembled [rule, dom, struct] — 62 columns — and
+    # _fit_rule_vector zero-padded the remaining 15. The model was therefore
+    # trained on evidence it never received in production, and without a DOM
+    # sidecar those 15 were the only thing left describing *what kind* of change
+    # had happened: the other 9 are magnitude and similarity scalars, which is
+    # exactly the magnitude-only behaviour measured on the deployed model (one
+    # mismatch_pct reproduces 83.2% of its predictions).
+    #
+    # The same 15, on crops from sites held out entirely, classify the seven
+    # categories at 83.3%.
+    px_vec = (pixel_struct_feature_vector(crops[0][0], crops[0][1]) if crops
+              else np.zeros(len(PIXEL_STRUCT_FEATURE_NAMES), dtype=np.float32))
+
     # Generate all augmentations for all crops
     all_left_imgs = []
     all_right_imgs = []
@@ -2298,7 +2547,7 @@ def assess_result(
         dom_vec = dom_feature_vector_from_snapshots(baseline_dom, current_dom)
         struct_vec = struct_feature_vector(baseline_dom_elements, current_dom_elements)
         rule_dim = int(loaded.get("rule_dim", len(RULE_FEATURE_NAMES)))
-        full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec], rule_dim)
+        full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec, px_vec], rule_dim)
         rule_t = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0)
 
         left_t = torch.tensor(normalize_batch_uint8(ensure_rgb_batch(all_left_imgs, image_size=img_size)), dtype=torch.float32)
@@ -2348,7 +2597,7 @@ def assess_result(
         # and dropped every DOM feature on this path — the session then rejected
         # a 9-wide input it had been compiled to take 48 of.
         rule_vector = _standardised_rule_vector(
-            loaded, [rule_vector_base, dom_vec, struct_vec], expected_rule_dim
+            loaded, [rule_vector_base, dom_vec, struct_vec, px_vec], expected_rule_dim
         ).reshape(1, -1).astype(np.float32)
 
         session = loaded["session"]
@@ -2441,7 +2690,7 @@ def assess_result(
             expected_rule_dim = head_first_layer_in - (_emb_dim * streams)
         except Exception:
             expected_rule_dim = len(RULE_FEATURE_NAMES)
-    full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec], expected_rule_dim)
+    full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec, px_vec], expected_rule_dim)
     rule_vector = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0).to(device)
 
     all_probs = []
@@ -2601,8 +2850,12 @@ def assess_results_batch(
                     dom_vec = dom_feature_vector_from_snapshots(bl_dom, cu_dom)
                     struct_vec = struct_feature_vector(
                         (bl_dom or {}).get("elements"), (cu_dom or {}).get("elements"))
+                    # Same 15 columns the single-item path was missing. This
+                    # branch appends its crops above, so the pair just added is
+                    # the one to measure.
+                    px_vec = pixel_struct_feature_vector(left_crops[-1], right_crops[-1])
                     rule_rows.append(_standardised_rule_vector(
-                        loaded, [rule_base, dom_vec, struct_vec], expected_rule_dim))
+                        loaded, [rule_base, dom_vec, struct_vec, px_vec], expected_rule_dim))
 
                 # Stack batches
                 left_np = ensure_rgb_batch(left_crops, image_size=img_size)
@@ -2672,7 +2925,8 @@ def assess_results_batch(
                         if label:
                             score = max(score, threshold)
                     label = _apply_hard_feature_veto(label, result, bl_img, cu_img)
-                    if _should_suppress_ai_label(result, label, score, threshold):
+                    if _should_suppress_ai_label(result, label, score, threshold,
+                                                 noise_override=loaded.get("noise_override_confidence")):
                         label = ""
                     calib = calibrate_confidence(raw_model_score, label, temperature=temp)
                     assessments.append({
@@ -2849,11 +3103,43 @@ def _write_temp_eval_image(rgb_image: np.ndarray, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(target), cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
 
+def _collapsed_classes(evaluation: Dict[str, Any],
+                       floor: float) -> "list[tuple[str, float, int]]":
+    """Classes the model has effectively stopped detecting.
+
+    Returns (name, recall, support) for each class scoring below `floor`, worst
+    first. Classes with too few samples to judge are left alone — a class seen
+    three times says nothing about the model, and blocking on it would make the
+    gate depend on which pairs happened to land in the eval fifth.
+    """
+    metrics = (evaluation or {}).get("evaluation", {}) or {}
+    per_class = metrics.get("per_class") or metrics.get("per_class_metrics") or []
+    # _compute_multiclass_metrics emits a list of {label, precision, recall,
+    # support}; accept a mapping too, since callers elsewhere hand back both.
+    if isinstance(per_class, dict):
+        rows = [dict(v, label=k) for k, v in per_class.items() if isinstance(v, dict)]
+    elif isinstance(per_class, list):
+        rows = [r for r in per_class if isinstance(r, dict)]
+    else:
+        return []
+    out = []
+    for stats in rows:
+        support = int(stats.get("support") or 0)
+        recall = stats.get("recall")
+        if support < 8 or recall is None:
+            continue
+        if float(recall) < floor:
+            out.append((str(stats.get("label") or stats.get("class") or "?"),
+                        float(recall), support))
+    return sorted(out, key=lambda t: t[1])
+
+
 def adopt_model_if_gate_passes(
     paths: WorkspacePaths,
     staging_model_path: Path,
     target_model_path: Path,
     min_real_accuracy: float = 0.5,
+    min_class_accuracy: float = 0.40,
     force: bool = False,
 ) -> Dict[str, Any]:
     """Promote a freshly trained model only if it still classifies reviewed runs.
@@ -2891,8 +3177,27 @@ def adopt_model_if_gate_passes(
             f"required {min_real_accuracy:.2%} threshold."
         )
     else:
-        passed = True
-        message = f"Passed real-run accuracy gate: {accuracy:.2%} on {samples} reviewed samples."
+        # An overall average hides a collapsed class, and a collapsed class is
+        # the failure that actually reaches users: a tool that never reports
+        # broken images is worse than one that is uniformly mediocre, because
+        # nobody can tell which answers to trust.
+        #
+        # This is not hypothetical. A model trained 2026-08-07 scored
+        # text-issue 0%, broken-image 0% and font-change 3.2% while answering
+        # "no change" for over half the exam — and its overall figure would have
+        # walked straight through a 50% average gate onto the deployed path.
+        collapsed = _collapsed_classes(evaluation, min_class_accuracy)
+        if collapsed:
+            passed = False
+            detail = ", ".join(f"{name} {acc:.1%} ({n})" for name, acc, n in collapsed)
+            message = (
+                f"Overall accuracy {accuracy:.2%} is acceptable, but these classes are below "
+                f"the {min_class_accuracy:.0%} per-class floor: {detail}. A model is not "
+                f"adopted for being good on average."
+            )
+        else:
+            passed = True
+            message = f"Passed real-run accuracy gate: {accuracy:.2%} on {samples} reviewed samples."
 
     adopted = passed or force
     if adopted:
@@ -2914,5 +3219,9 @@ def adopt_model_if_gate_passes(
         "message": message,
         "samples": samples,
         "accuracy": accuracy,
+        "collapsed_classes": [
+            {"class": name, "recall": recall, "support": n}
+            for name, recall, n in _collapsed_classes(evaluation, min_class_accuracy)
+        ],
         "evaluation": evaluation,
     }

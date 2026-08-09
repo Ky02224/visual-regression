@@ -237,16 +237,29 @@ class TestShouldSuppressAiLabel:
     def test_a_low_score_is_suppressed(self):
         assert _should_suppress_ai_label(self._big(), "layout-issue", 0.01, 0.5) is True
 
-    def test_micro_noise_is_suppressed_even_with_a_confident_label(self):
-        assert _should_suppress_ai_label(_result(mismatch=0.01), "layout-issue", 0.99, 0.5) is True
+    def test_micro_noise_is_suppressed_when_the_model_is_unsure(self):
+        """The rule's whole purpose: a barely-there pixel delta that the model
+        cannot vouch for is anti-aliasing, not a defect."""
+        assert _should_suppress_ai_label(_result(mismatch=0.01), "layout-issue", 0.60, 0.5) is True
+
+    def test_micro_noise_yields_to_a_model_that_is_sure(self):
+        """A recolour changes only glyph strokes, so it never clears the noise
+        floor — 51 of 56 colour-regression trials were being discarded here
+        while the model's raw verdict was right 40 times out of 40. The bar is
+        measured: unchanged pages never exceeded 0.729 confidence, so 0.80
+        recovers them without a single false alarm."""
+        assert _should_suppress_ai_label(_result(mismatch=0.01), "color-regression", 0.85, 0.5) is False
 
     def test_a_dom_confirmed_label_survives_the_pixel_heuristics(self):
         """A DOM diff is a structural fact — an element genuinely vanished. Text
         changes routinely produce a pixel delta too small to clear the noise
-        floor, and suppressing those discards a confirmed defect."""
+        floor, and suppressing those discards a confirmed defect. DOM evidence
+        needs no confidence bar; it is independent of the model."""
         tiny = _result(mismatch=0.01)
         assert _should_suppress_ai_label(tiny, "text-issue", 0.99, 0.5, dom_confirmed=True) is False
-        assert _should_suppress_ai_label(tiny, "text-issue", 0.99, 0.5, dom_confirmed=False) is True
+        assert _should_suppress_ai_label(tiny, "text-issue", 0.50, 0.5, dom_confirmed=True) is False
+        # Without DOM and without confidence, still suppressed.
+        assert _should_suppress_ai_label(tiny, "text-issue", 0.50, 0.5, dom_confirmed=False) is True
 
     def test_a_dom_confirmed_label_still_needs_a_score(self):
         assert _should_suppress_ai_label(self._big(), "text-issue", 0.001, 0.5, dom_confirmed=True) is True

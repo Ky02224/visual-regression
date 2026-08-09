@@ -420,7 +420,8 @@ def struct_feature_vector(baseline_elements: list | None,
     return np.array(feats, dtype=np.float32)
 
 
-def _match_by_identity(el: dict, candidates: list) -> tuple[str, dict | None]:
+def _match_by_identity(el: dict, candidates: list,
+                       text_set_intact: bool = False) -> tuple[str, dict | None]:
     """id/text identity tiers of _match_element, split out so the caller can
     resolve every element's identity match first (order-independent — ids
     and unique-in-page text are unambiguous regardless of which baseline
@@ -446,8 +447,29 @@ def _match_by_identity(el: dict, candidates: list) -> tuple[str, dict | None]:
             return "found", txt_matches[0]
         if not txt_matches:
             return "absent", None
-        # Multiple candidates share this exact text — ambiguous, fall
-        # through to geometry rather than guess among identical text.
+        # Several candidates carry this exact text. Falling through to geometry
+        # here is what let a reflow read as a deletion: repeated text is common
+        # (a link's label duplicated on its inner <span>, a desktop/mobile pair)
+        # and geometry gives up past 100px, so an element pushed 148px down came
+        # back unmatched and was reported missing. Measured on the corrected
+        # exam, that accounted for 11 of 23 layout-issue trials.
+        #
+        # Counting settles what position cannot. If the page still holds as many
+        # copies of this text as the baseline did, none of them was deleted —
+        # whichever moved, the set is intact, so pair with the nearest and let
+        # the geometry checks downstream call it a move. Fewer copies than the
+        # baseline means one really did go, and the ambiguity has to stand:
+        # matching the survivor would hide the deletion.
+        #
+        # The count is decided by the caller against the whole page, not against
+        # `candidates` — that list shrinks as earlier elements claim their
+        # matches, so the second of two twins would otherwise always look like
+        # the page had lost one.
+        if text_set_intact:
+            ex, ey = el.get("x", 0), el.get("y", 0)
+            nearest = min(txt_matches,
+                          key=lambda c: (c.get("x", 0) - ex) ** 2 + (c.get("y", 0) - ey) ** 2)
+            return "found", nearest
 
     return "none", None
 
@@ -496,6 +518,19 @@ def _match_by_geometry(el: dict, candidates: list, max_dist: float = 100.0) -> t
         width_floor = 0.03 if tag in _TEXT_TAGS else 0.25
         if not (width_floor <= cw / ew <= 4.0 and 0.4 <= ch / eh <= 2.5):
             continue
+        # Tag and size alone will happily pair two different list items. When a
+        # <li> is deleted the next one slides up into the vacated slot, matches
+        # on shape, and the removal is reported as "the element moved" — a
+        # missing-element read as a layout-issue.
+        #
+        # Text settles it, because the edits that legitimately change an
+        # element's text change it by truncating: one side stays a prefix of
+        # the other. Two unrelated strings mean two unrelated elements.
+        e_txt = (el.get("txt") or "").strip().lower()
+        c_txt = (c.get("txt") or "").strip().lower()
+        if len(e_txt) >= 8 and len(c_txt) >= 8:
+            if not (e_txt.startswith(c_txt) or c_txt.startswith(e_txt)):
+                continue
         ccx, ccy = c.get("x", 0), c.get("y", 0)
         dist = ((ex - ccx) ** 2 + (ey - ccy) ** 2) ** 0.5
         if dist < best_dist:
@@ -618,6 +653,7 @@ def diagnose_from_dom_diff(
 
     missing_media_strong, missing_generic_strong, missing_generic_weak = [], [], []
     moved, font_changed, color_changed, text_issue = [], [], [], []
+    failed_to_load: list = []
 
     # Two-phase matching: identity (id/unique text) first, since those are
     # exact and order-independent — resolving them regardless of processing
@@ -632,12 +668,42 @@ def diagnose_from_dom_diff(
     # resolving it in ascending distance order — most confident pairing
     # claims first — fixes that without touching the already-unambiguous
     # identity tier or the geometry heuristics themselves.
+    # How many elements share each (tag, text) in the baseline — the reference
+    # the identity tier needs to tell "this text moved" from "one copy of this
+    # text was deleted".
+    def _twin_counts(elements: list) -> dict:
+        counts: dict = {}
+        for _el in elements:
+            _t = _el.get("txt")
+            if _t and len(_t) >= 8:
+                _k = (_el.get("tag"), _t)
+                counts[_k] = counts.get(_k, 0) + 1
+        return counts
+
+    baseline_twins = _twin_counts(baseline_elements)
+    current_twins = _twin_counts(current_elements)
+
+    def _media_box_counts(elements: list) -> dict:
+        counts: dict = {}
+        for _el in elements:
+            if _el.get("tag") in _MEDIA_TAGS:
+                _k = (_el.get("tag"), _el.get("w"), _el.get("h"))
+                counts[_k] = counts.get(_k, 0) + 1
+        return counts
+
+    media_box_counts_baseline = _media_box_counts(baseline_elements)
+    media_box_counts_current = _media_box_counts(current_elements)
+
     claimed_matches: set = set()
     resolved: dict[int, dict | None] = {}
     pending: list[dict] = []
     for el in baseline_near:
         available = [c for c in match_candidates if id(c) not in claimed_matches]
-        status, match = _match_by_identity(el, available)
+        key = (el.get("tag"), el.get("txt"))
+        status, match = _match_by_identity(
+            el, available,
+            text_set_intact=current_twins.get(key, 0) >= baseline_twins.get(key, 0) > 0,
+        )
         if status == "found":
             resolved[id(el)] = match
             claimed_matches.add(id(match))
@@ -684,7 +750,54 @@ def diagnose_from_dom_diff(
                 # searched globally" is trustworthy on its own, unlike the
                 # common tags below where that same check is routinely
                 # fooled by reflow coincidence.
-                missing_media_strong.append(el)
+                # Before calling it gone, check the page still doesn't hold it.
+                # An <img>'s decoded size is a fingerprint of the image file
+                # itself, so it identifies the same image wherever it ended up —
+                # unlike position, which a reflow invalidates. Geometry matching
+                # gives up past 100px, and a grown element pushes content down by
+                # more than that routinely, so an image that merely moved was
+                # being reported as a broken image: measured 3 false alarms in 10
+                # layout-issue/missing-element trials, all of them this.
+                fingerprint = (el.get("nw"), el.get("nh"))
+                still_there = False
+                if all(fingerprint):
+                    for c in current_elements:
+                        if (c.get("tag") == tag and (c.get("nw"), c.get("nh")) == fingerprint
+                                and id(c) not in claimed_matches):
+                            still_there = True
+                            break
+                else:
+                    # <svg>, <canvas> and <video> have no decoded size to
+                    # fingerprint, so the check above cannot see them and every
+                    # icon a reflow pushed past the 100px cap was reported as a
+                    # broken image — four sites out of four in a layout-issue
+                    # probe (preact, bootstrap, pydantic, linuxfoundation), each
+                    # an <svg> that had merely moved.
+                    #
+                    # Their rendered box serves instead, decided by count rather
+                    # than by position, the same way repeated text is: a page
+                    # holding as many 24x24 <svg>s as before has not lost one,
+                    # whichever of them moved. Fewer than before means one did
+                    # go, and it is reported.
+                    #
+                    # Count alone is too generous: an icon that genuinely
+                    # vanished from one corner while an unrelated same-sized one
+                    # sits in another would be excused. A reflow displaces
+                    # content *vertically* and leaves its column alone, so the
+                    # survivor also has to still be in this element's column for
+                    # "it moved" to be the better reading.
+                    box = (tag, el.get("w"), el.get("h"))
+                    counts_intact = media_box_counts_current.get(box, 0) >= \
+                        media_box_counts_baseline.get(box, 0) > 0
+                    still_there = counts_intact and any(
+                        c.get("tag") == tag
+                        and (c.get("w"), c.get("h")) == (el.get("w"), el.get("h"))
+                        and abs(c.get("x", 0) - el.get("x", 0)) <= 12
+                        and id(c) not in claimed_matches
+                        for c in current_elements
+                    )
+                if not still_there:
+                    missing_media_strong.append(el)
             elif has_identity:
                 missing_generic_strong.append(el)
             else:
@@ -712,6 +825,18 @@ def diagnose_from_dom_diff(
         # in the same eval — a wide, safe margin above the noise band, so
         # 1.4x filters the font-settling false positive without weakening
         # detection of genuine truncation.
+        # An image that decoded in the baseline and decodes to nothing now has
+        # failed to load. This is checked before every other "matched but
+        # changed" case because it is not a heuristic: the browser reported the
+        # decode result directly, so nothing measured from geometry or style
+        # can be a better explanation of the same element.
+        #
+        # `cmp` guards against reading a still-loading image as a broken one —
+        # naturalWidth is legitimately 0 until the decode finishes, and the
+        # capture does not always wait for every image on the page.
+        if tag == "img" and el.get("nw") and match.get("cmp") and match.get("nw") == 0:
+            failed_to_load.append((el, match))
+            continue
         b_sw, b_cw = el.get("sw"), el.get("cw")
         c_sw, c_cw = match.get("sw"), match.get("cw")
         if tag in _TEXT_TAGS and b_sw is not None and b_cw and c_sw is not None and c_cw:
@@ -760,6 +885,14 @@ def diagnose_from_dom_diff(
             moved.append((el, match))
             continue
 
+    if failed_to_load:
+        el, match = failed_to_load[0]
+        return "broken-image", (
+            f"DOM diff: the <img> element at ({match.get('x')},{match.get('y')}) still "
+            f"occupies its {match.get('w')}x{match.get('h')} box but decoded to nothing "
+            f"(naturalWidth 0), where the baseline decoded it at "
+            f"{el.get('nw')}x{el.get('nh')}."
+        )
     if missing_media_strong:
         tag = missing_media_strong[0].get("tag", "")
         return "broken-image", (
@@ -960,6 +1093,12 @@ PIXEL_STRUCT_FEATURE_NAMES = [
     "px_flatness_delta",       # collapse toward a flat fill: element removed
     "px_bbox_fill_ratio",      # how much of the crop the change occupies
     "px_change_aspect",        # wide-and-short (a line of text) vs blocky
+    # Appended after measurement showed the three above them separate nothing.
+    # See pixel_struct_feature_vector for the numbers and why hue and edge
+    # density are the wrong quantities to have measured.
+    "px_chroma_shift",         # Lab a/b distance: a recolour, hue holes and all
+    "px_lum_shift",            # Lab L distance: content appearing or vanishing
+    "px_edge_symdiff",         # edges that moved, not edges that were counted
 ]
 
 FULL_FEATURE_NAMES_V2 = FULL_FEATURE_NAMES + PIXEL_STRUCT_FEATURE_NAMES
@@ -1066,12 +1205,50 @@ def pixel_struct_feature_vector(baseline: "np.ndarray | None", current: "np.ndar
         else:
             bbox_fill = change_aspect = 0.0
 
+        # --- the three above, measured the way that actually separates ---
+        #
+        # `hue_shift` and `edge_density_delta` were measured across 280 training
+        # pairs and separate nothing: hue lands in 0.17-0.31 for every class and
+        # edge density in -0.033..0.001. Both are the wrong quantity.
+        #
+        # Hue is undefined for a desaturated colour and wraps at 180, so the
+        # commonest recolour of all — a coloured heading turned grey — reads as
+        # noise. Lab chroma distance has no such hole: the same pairs give 61.9
+        # for colour-regression against 17-27 for every other class.
+        #
+        # Edge *density* barely moves when a font is swapped, because the new
+        # glyphs have about as many edges as the old ones; what moves is *where*
+        # the edges are. The symmetric difference over the union captures that —
+        # 0.125 for a recolour (shapes untouched) against 0.87 for a reflow.
+        #
+        # Appended rather than substituted: feature order is append-only, models
+        # are fitted by truncation, and rewriting these two in place would hand
+        # the deployed model inputs that do not mean what it was trained on.
+        if baseline.ndim == 3 and current.ndim == 3:
+            lab_b = cv2.cvtColor(baseline, cv2.COLOR_BGR2LAB).astype(np.float32)
+            lab_c = cv2.cvtColor(current, cv2.COLOR_BGR2LAB).astype(np.float32)
+            changed_px = np.abs(gc.astype(np.int16) - gb.astype(np.int16)) > 8
+            if changed_px.any():
+                chroma_shift = float(
+                    np.abs(lab_c[..., 1:] - lab_b[..., 1:]).sum(axis=2)[changed_px].mean() / 255.0)
+                lum_shift = float(
+                    np.abs(lab_c[..., 0] - lab_b[..., 0])[changed_px].mean() / 255.0)
+            else:
+                chroma_shift = lum_shift = 0.0
+        else:
+            chroma_shift = lum_shift = 0.0
+
+        eb_mask, ec_mask = eb > 0, ec > 0
+        union = float((eb_mask | ec_mask).mean())
+        edge_symdiff = float((eb_mask ^ ec_mask).mean() / union) if union > 1e-9 else 0.0
+
         values = [
             translate_y, translate_x, translate_conf,
             hue_shift, sat_shift, val_shift,
             edge_density_delta, edge_orientation_delta,
             ink_ratio_delta, flatness_delta,
             bbox_fill, change_aspect,
+            chroma_shift, lum_shift, edge_symdiff,
         ]
         out = np.asarray(values, dtype=np.float32)
         return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)

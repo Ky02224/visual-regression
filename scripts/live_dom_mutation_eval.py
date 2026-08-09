@@ -182,13 +182,90 @@ MUTATION_JS = {
     """,
     "layout-issue": """
         () => {
+            // A layout issue is a *reflow*: something changes size and
+            // everything after it moves. Offsetting one element with
+            // position:relative did not do that — relative positioning paints
+            // the element somewhere else and leaves the flow exactly as it
+            // was, so the page below never moved.
+            //
+            // Measured across the captured pairs, the consequence was that
+            // this category disturbed 1.4% of the page with a mean vertical
+            // translation of 0.0009, while missing-element disturbed 11.4%
+            // with a translation of -0.0083. The mutation named after layout
+            // change was producing less layout change than the one named after
+            // removal, which is why the two were persistently confused: the
+            // data taught the distinction backwards.
+            //
+            // Growing the element's height pushes every following block down,
+            // which is what a real layout regression looks like — an image
+            // without dimensions loading late, a font swap changing line
+            // counts, a container losing its max-height.
             const el = document.querySelector('[data-vrt-mutated]');
             if (!el) return null;
-            const cs = getComputedStyle(el);
-            if (cs.position === 'static') el.style.position = 'relative';
-            el.style.left = '45px';
-            el.style.top = '25px';
-            return {tag: el.tagName};
+            const r = el.getBoundingClientRect();
+
+            // Watch what is supposed to move. Page height is a poor proxy: on a
+            // site whose scroll container is not the body, or whose sections
+            // have fixed heights, body.scrollHeight is identical either side of
+            // a mutation that did reflow, and identical either side of one that
+            // did not. Following content moving down is the definition of the
+            // category, so measure that directly.
+            const top = r.bottom + window.scrollY;
+            const probes = [];
+            for (const n of document.body.querySelectorAll('*')) {
+                if (el.contains(n) || n.contains(el)) continue;
+                const q = n.getBoundingClientRect();
+                if (q.width <= 0 || q.height <= 0) continue;
+                if (q.top + window.scrollY <= top + 1) continue;
+                const pos = getComputedStyle(n).position;
+                if (pos === 'fixed' || pos === 'sticky') continue;  // pinned; never moves
+                probes.push([n, q.top + window.scrollY]);
+                if (probes.length >= 40) break;
+            }
+            const before = document.body.scrollHeight;
+            const grow = Math.max(60, Math.round(r.height * 0.8));
+
+            // min-height does nothing to an inline box — the picker draws from
+            // p/span/a/h1/h2/h3/li and several of those are inline by default,
+            // so the mutation silently did nothing at all: page height
+            // unchanged, zero pixel difference, and a pair labelled
+            // "layout-issue" showing no layout issue. 59% of those trials were
+            // then answered "no change", which was the correct reading.
+            // Promoting to block first is what makes the growth take effect.
+            const display = getComputedStyle(el).display;
+            if (display === 'inline' || display === 'contents') {
+                el.style.setProperty('display', 'block', 'important');
+            }
+            el.style.setProperty('min-height', (r.height + grow) + 'px', 'important');
+            el.style.setProperty('margin-bottom',
+                ((parseFloat(getComputedStyle(el).marginBottom) || 0) + 40) + 'px', 'important');
+
+            let shifted = 0;
+            for (const [n, was] of probes) {
+                shifted = Math.max(shifted, Math.abs(n.getBoundingClientRect().top + window.scrollY - was));
+            }
+            const after = document.body.scrollHeight;
+
+            // Refuse rather than mislabel. Some elements genuinely cannot push
+            // anything — a grid cell in a fixed-height row, a box inside
+            // overflow:hidden — and growing those yields a pair that carries
+            // this label while showing no reflow at all. Returning null makes
+            // run_trial skip the trial, which costs a page load; keeping it
+            // would cost another round of training on wrong ground truth.
+            const reflowed = shifted > 5 || after !== before;
+            if (!reflowed) {
+                // Put the page back. The styles were applied before it was
+                // possible to know whether they did anything, and leaving them
+                // on a refused element would silently colour the next attempt
+                // on this same page.
+                for (const k of ['display', 'min-height', 'margin-bottom']) {
+                    el.style.removeProperty(k);
+                }
+                el.removeAttribute('data-vrt-mutated');
+                return null;
+            }
+            return {tag: el.tagName, grew: grow, pageBefore: before, pageAfter: after,
+                    shifted: Math.round(shifted), probes: probes.length, reflowed: true};
         }
     """,
     "color-regression": """
@@ -209,10 +286,49 @@ MUTATION_JS = {
     """,
     "broken-image": """
         () => {
+            // A broken image is one whose source failed to load: the <img> is
+            // still in the document, still occupies its box, and the browser
+            // paints its broken-image placeholder or alt text in that space.
+            // Nothing around it reflows.
+            //
+            // This used to call el.remove(), which is the *opposite* — the
+            // element disappears and the layout collapses, which is exactly
+            // what the missing-element mutation does. The label said
+            // "broken-image" while the pixels showed a removal, so the
+            // classifier was graded on telling apart two categories that had
+            // been made identical: on the r7 evaluation 70% of broken-image
+            // trials were called missing-element, which was the correct
+            // reading of what it had been shown. demo_portal/styles.css has
+            // always modelled the real thing ("in-place grey placeholder with
+            // an X, like a real failed <img> ... so surrounding layout does not
+            // reflow"); the harness simply disagreed with it.
             const el = document.querySelector('[data-vrt-mutated]');
             if (!el) return null;
-            el.remove();
-            return {tag: el.tagName};
+            const r = el.getBoundingClientRect();
+            // Pin the box first. Once the source fails, an <img> with no
+            // intrinsic size collapses to its alt-text box and the page
+            // reflows after all — which would reintroduce the very confusion
+            // this is fixing.
+            // setProperty with 'important' and an explicit aspect-ratio /
+            // max-width reset, because plain inline width/height was not
+            // enough: sites size images through aspect-ratio, max-width:100%
+            // or a flex/grid track, and once the source fails the box is
+            // recomputed from the (now absent) intrinsic size. Measured on the
+            // first re-capture, broken-image still shifted the page by -0.0157
+            // — the same direction as a removal, which is the confusion this
+            // whole change exists to remove.
+            const lock = {
+                width: r.width + 'px', height: r.height + 'px',
+                'min-width': r.width + 'px', 'min-height': r.height + 'px',
+                'max-width': r.width + 'px', 'max-height': r.height + 'px',
+                'aspect-ratio': 'auto', 'object-fit': 'fill', flex: '0 0 auto',
+            };
+            for (const [k, v] of Object.entries(lock)) el.style.setProperty(k, v, 'important');
+            el.setAttribute('alt', el.getAttribute('alt') || 'image');
+            el.setAttribute('src', '/__vrt_broken_image_source__.png');
+            el.removeAttribute('srcset');
+            el.removeAttribute('sizes');
+            return {tag: el.tagName, w: r.width, h: r.height};
         }
     """,
     "text-issue": """
@@ -291,11 +407,20 @@ def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, 
         count = page.evaluate(_COUNT_JS, [tags, require_block, require_leaf])
         if not count:
             return None  # no suitable element on this page for this category; skip trial
-        index = rng.randrange(count)  # seeded by --seed, unlike the JS-side Math.random() this replaces
-        picked = page.evaluate(_PICK_AT_INDEX_JS, [tags, index, require_block, require_leaf])
-        if not picked:
-            return None
-        mutated_info = page.evaluate(MUTATION_JS[category])
+        # A mutation may decline the element it was given — layout-issue does
+        # this when growing the box pushes nothing, because the alternative is
+        # emitting a pair labelled "layout-issue" that contains no layout issue.
+        # Each attempt is one more evaluate() on a page that is already loaded,
+        # so try a few before giving the page up; the mutation restores what it
+        # touched on refusal, which is what makes retrying on the same page safe.
+        for _attempt in range(8):
+            index = rng.randrange(count)  # seeded by --seed, unlike the JS-side Math.random() this replaces
+            picked = page.evaluate(_PICK_AT_INDEX_JS, [tags, index, require_block, require_leaf])
+            if not picked:
+                continue
+            mutated_info = page.evaluate(MUTATION_JS[category])
+            if mutated_info is not None:
+                break
         if mutated_info is None:
             return None
     else:

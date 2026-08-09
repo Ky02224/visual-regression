@@ -25,17 +25,36 @@ def test_ahash_and_perceptual_identical_check():
 
 
 def test_siamese_fusion_head_num_streams():
-    import torch.nn as nn
-    
-    # 4-stream default
-    head_4 = SiameseFusionHead(nn, embedding_dim=10, rule_dim=5, output_dim=2, num_streams=4)
-    first_layer_4 = head_4.model[0]
-    assert first_layer_4.in_features == (10 * 4) + 5
+    """The stream count must decide how much image data the head expects.
 
-    # 3-stream fallback
-    head_3 = SiameseFusionHead(nn, embedding_dim=10, rule_dim=5, output_dim=2, num_streams=3)
-    first_layer_3 = head_3.model[0]
-    assert first_layer_3.in_features == (10 * 3) + 5
+    Checked on the flat head, whose first Linear takes the concatenation
+    directly. The widened head is covered by test_widened_fusion_head.py: it
+    projects the rule columns first, so its trunk width is image + projection
+    and the raw rule width no longer appears there.
+    """
+    import torch.nn as nn
+
+    head_4 = SiameseFusionHead(nn, embedding_dim=10, rule_dim=5, output_dim=2,
+                               num_streams=4, widen_rule_features=False)
+    assert head_4.model[0].in_features == (10 * 4) + 5
+
+    head_3 = SiameseFusionHead(nn, embedding_dim=10, rule_dim=5, output_dim=2,
+                               num_streams=3, widen_rule_features=False)
+    assert head_3.model[0].in_features == (10 * 3) + 5
+
+
+def test_widened_head_still_scales_with_num_streams():
+    """Same property, expressed where the widened head keeps it: the trunk sees
+    every image stream plus the projected rule vector."""
+    import torch.nn as nn
+
+    from visual_regression.ai_models import RULE_PROJECTION_DIM
+
+    for streams in (3, 4):
+        head = SiameseFusionHead(nn, embedding_dim=10, rule_dim=5, output_dim=2,
+                                 num_streams=streams)
+        trunk_in = head.model.state_dict()["trunk.0.weight"].shape[1]
+        assert trunk_in == (10 * streams) + RULE_PROJECTION_DIM
 
 
 def test_complete_siamese_model_dynamic_forward():

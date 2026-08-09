@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sys
@@ -97,6 +98,20 @@ def materialise_runs(manifest_path: Path, runs_dir: Path) -> dict:
 
 
 def main() -> int:
+    # Without this every logger.info in the training path is dropped: no handler
+    # is configured, so Python's last-resort handler emits WARNING and above and
+    # nothing else. Everything the run tries to report about itself went to
+    # nowhere — the validation split size, the resumed epoch, the temperature and
+    # noise-override calibration, the partial-checkpoint warning, and the
+    # per-epoch per-class recall. Six training runs were judged on a progress bar
+    # and a final number because of it, and three of them were diagnosed hours
+    # late for want of a line the code was already writing.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest",
                         default=".visual-regression/datasets/live-training-pairs/manifest.json")
@@ -113,11 +128,25 @@ def main() -> int:
     parser.add_argument("--run-pair-oversample", type=int, default=2,
                         help="The 15x default exists for workspaces holding a handful "
                              "of real runs; with thousands, repetition just wastes epochs.")
+    parser.add_argument("--boost-class", action="append", default=[], metavar="NAME=FACTOR",
+                        help="Multiply a class's loss weight, e.g. --boost-class color-regression=4. "
+                             "The corpus is balanced by construction, so inverse-frequency weighting "
+                             "treats a class the model gets right 5%% of the time exactly like one it "
+                             "gets right 100%% of the time; this is how to say which are actually hard.")
     parser.add_argument("--dom-dropout", type=float, default=0.0,
                         help="Fraction of training samples whose DOM+structural feature "
                              "block is zeroed, so the image streams learn to classify "
                              "without DOM — the screenshot-only inference case. 0 keeps "
                              "the previous behaviour.")
+    parser.add_argument("--image-dropout", type=float, default=0.0,
+                        help="Fraction of training samples whose image streams are "
+                             "zeroed, so the head must classify from the feature "
+                             "vector. The images encode change magnitude, which "
+                             "reproduces 83.2%% of the model's predictions and cannot "
+                             "separate layout-issue, text-issue, broken-image and "
+                             "font-change from one another; removing it on some "
+                             "samples is what forces the rest of the evidence to be "
+                             "used. 0 keeps the previous behaviour.")
     parser.add_argument("--min-pairs", type=int, default=50,
                         help="Refuse to train on fewer than this many pairs. Lower it "
                              "only to smoke-test the pipeline end to end.")
@@ -191,6 +220,9 @@ def main() -> int:
         include_run_pairs=True,
         run_pair_oversample=args.run_pair_oversample,
         dom_dropout=args.dom_dropout,
+        image_dropout=args.image_dropout,
+        class_difficulty={k: float(v) for k, v in
+                          (spec.split("=", 1) for spec in args.boost_class)} or None,
     )
 
     print("\n=== training summary ===")

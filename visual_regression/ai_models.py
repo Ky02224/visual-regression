@@ -146,10 +146,117 @@ class LegacyRuleMLP:  # pragma: no cover - only used for older checkpoints
         vector = self.torch.tensor(feature_vector_from_result(result), dtype=self.torch.float32).unsqueeze(0)
         with self.torch.no_grad():
             return float(self.torch.sigmoid(self.model(vector)).item())
+# How wide the rule features are made before they meet the image embedding.
+# Concatenated raw, 74 columns sit beside 8192 image columns — 0.9% of the input
+# — and a single Linear has little reason to weight them. Projecting them first
+# gives them a comparable share and their own non-linearity, so "the strokes
+# changed but the hue did not" can be composed before the image drowns it out.
+RULE_PROJECTION_DIM = 256
+
+# Projecting the image side to the rule side's width, so neither pathway is 32x
+# the other. Off by default: it did what it was built to do and that turned out
+# not to be the constraint.
+#
+# Measured (v6, 3605 pairs): the head went from 8.96M parameters to 2.93M and the
+# train/val ratio from 3.6x to 1.1x — the overfitting was gone. Accuracy did not
+# follow. Validation stayed at 35.1% against v5's 37.1%, and no-DOM evaluation
+# fell from 37.0% to 28.2%. What limits the pixel-only case is that the model is
+# trained with DOM features always present and then asked to work with 53 of its
+# 77 columns zeroed: a controlled test put that shift at 91.2% -> 60.0%, and
+# training with dom_dropout recovers it to 79.5%.
+#
+# Kept, with its tests, because it is correct and cheap to switch on; a run that
+# is genuinely overfitting can set it.
+IMAGE_PROJECTION_DIM = None
+
+
+class _RuleProjectingHead:
+    """Fusion head that widens the rule vector before concatenating it.
+
+    Deliberately consumes the same single concatenated tensor the old head did
+    — image streams first, rule features last — so every call site
+    (`head(torch.cat([...]))`), the training loop, all three inference paths and
+    the ONNX/TorchScript exporters keep working untouched. It splits the tensor
+    itself using the rule width it was built with.
+    """
+
+    def __init__(self, nn_module, torch_module, image_dim: int, rule_dim: int,
+                 output_dim: int, projection_dim: int = RULE_PROJECTION_DIM,
+                 image_projection_dim: "int | None" = IMAGE_PROJECTION_DIM):
+        self._torch = torch_module
+        self.rule_dim = rule_dim
+        self.rule_proj = nn_module.Sequential(
+            nn_module.Linear(rule_dim, 128),
+            nn_module.BatchNorm1d(128),
+            nn_module.ReLU(),
+            nn_module.Linear(128, projection_dim),
+            nn_module.ReLU(),
+        )
+        # The image streams arrive as 8192 dimensions against the rule vector's
+        # 77, and the trunk's first layer was Linear(8448, 1024) — 8.65M weights,
+        # nearly all of them fed by pixels. That is capacity to memorise with,
+        # and measurement says it is being used that way: train loss 0.499
+        # against val loss 1.788, while a small model over the same 24 pixel
+        # statistics reaches 82.0% without DOM where this head reaches 37.0%.
+        # The evidence is not that the images are useless — it is that 8192
+        # dimensions of them drown 77 dimensions of explicit evidence.
+        #
+        # Projecting the image side down to match puts the two pathways on
+        # comparable footing and removes most of what was available for
+        # memorisation. None restores the previous architecture exactly, which
+        # is what every checkpoint trained before this needs.
+        self.image_proj = None
+        trunk_in = image_dim + projection_dim
+        if image_projection_dim:
+            self.image_proj = nn_module.Sequential(
+                nn_module.Linear(image_dim, image_projection_dim),
+                nn_module.BatchNorm1d(image_projection_dim),
+                nn_module.ReLU(),
+                nn_module.Dropout(0.30),
+            )
+            trunk_in = image_projection_dim + projection_dim
+        self.trunk = nn_module.Sequential(
+            nn_module.Linear(trunk_in, 1024),
+            nn_module.BatchNorm1d(1024),
+            nn_module.ReLU(),
+            nn_module.Dropout(0.15),
+            nn_module.Linear(1024, 256),
+            nn_module.BatchNorm1d(256),
+            nn_module.ReLU(),
+            nn_module.Dropout(0.08),
+            nn_module.Linear(256, output_dim),
+        )
+        modules = {"rule_proj": self.rule_proj, "trunk": self.trunk}
+        if self.image_proj is not None:
+            modules["image_proj"] = self.image_proj
+        self.model = nn_module.ModuleDict(modules)
+
+        def _forward(combined):
+            image = combined[:, : -self.rule_dim]
+            rule = combined[:, -self.rule_dim:]
+            if self.image_proj is not None:
+                image = self.image_proj(image)
+            return self.trunk(torch_module.cat([image, self.rule_proj(rule)], dim=1))
+
+        self.model.forward = _forward
+
+
 class SiameseFusionHead:  
-    def __init__(self, nn_module, embedding_dim: int, rule_dim: int, output_dim: int, num_streams: int = 4):
+    def __init__(self, nn_module, embedding_dim: int, rule_dim: int, output_dim: int,
+                 num_streams: int = 4, widen_rule_features: bool = True,
+                 image_projection_dim: "int | None" = IMAGE_PROJECTION_DIM):
+        image_dim = embedding_dim * num_streams
+        if widen_rule_features:
+            from .ai_models import _RuleProjectingHead as _RPH  # self-reference, kept explicit
+            import torch as _torch
+            # image_projection_dim=None reproduces the head as it was before the
+            # image side was projected. Checkpoints trained then carry no
+            # image_proj weights, and building one for them fails the load.
+            self.model = _RPH(nn_module, _torch, image_dim, rule_dim, output_dim,
+                              image_projection_dim=image_projection_dim).model
+            return
         self.model = nn_module.Sequential(
-            nn_module.Linear((embedding_dim * num_streams) + rule_dim, 1024),
+            nn_module.Linear(image_dim + rule_dim, 1024),
             nn_module.BatchNorm1d(1024),       
             nn_module.ReLU(),
             nn_module.Dropout(0.15),         
@@ -206,8 +313,25 @@ class CompleteSiameseModel(_ModuleBase):
 
         emb_dim = left_emb.shape[1]
         try:
-            head_first = next(self.head.parameters())
-            expected_dim = head_first.shape[1]
+            # A widened head (SiameseFusionHead(widen_rule_features=True)) is a
+            # ModuleDict registering rule_proj before trunk, so
+            # next(self.head.parameters()) picks up rule_proj.0.weight —
+            # shape[1] == rule_dim (a few dozen), not the image width the trunk
+            # actually expects. That read as "small head" and fell through to
+            # the 3-stream branch, so torch.onnx.export ran the model with the
+            # diff-image stream missing and the head's first matmul saw 6400
+            # columns where the trunk was built for 8448 (4 streams x 2048 +
+            # the 256-wide rule projection). Preferring a state-dict entry
+            # under "trunk." — the layer that actually receives this
+            # concatenation — is what the correct-but-slower fallback branch
+            # below already computes; try it first when it is available.
+            head_state = self.head.state_dict()
+            trunk_key = next((k for k in head_state if k.startswith("trunk.")
+                              and head_state[k].dim() == 2), None)
+            if trunk_key is not None:
+                expected_dim = head_state[trunk_key].shape[1]
+            else:
+                expected_dim = next(self.head.parameters()).shape[1]
         except Exception:
             expected_dim = (emb_dim * 3) + rule_features.shape[1]
 

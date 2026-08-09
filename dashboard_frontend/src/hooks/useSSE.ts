@@ -82,10 +82,19 @@ function getOrCreateConnection(url: string): SharedConnection {
 
       const attempt = conn.reconnectAttempt;
       if (attempt < maxRetries) {
+        // Exponential backoff, not a fixed 3s. EventSource does not expose the
+        // HTTP status to onerror, so a 401 on an unauthenticated tab is
+        // indistinguishable from a dropped connection — and retrying every
+        // three seconds produced ten identical "GET /api/events/stream 401"
+        // lines in the server log for anyone sitting on the login page.
+        // Retrying cannot produce a session, and the noise buries real errors.
+        // Backing off keeps the recovery for genuinely transient failures while
+        // making the hopeless case cheap and quiet.
+        const delay = Math.min(3000 * 2 ** attempt, 60000);
         conn.reconnectTimeoutId = setTimeout(() => {
           conn.reconnectAttempt = attempt + 1;
           connect();
-        }, 3000);
+        }, delay);
       }
     };
 

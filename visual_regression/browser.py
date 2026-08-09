@@ -395,6 +395,18 @@ _CAPTURE_DOM_SNAPSHOT_JS = """
         // when non-empty so absence doesn't produce false matches.
         if (el.id) entry.eid = el.id;
         if (typeof el.className === 'string' && el.className.trim()) entry.ecls = el.className.trim();
+        // Whether an image actually loaded is a fact the browser already
+        // knows, and it is the whole definition of a broken image: the
+        // element is still present, still occupying its box, but decoded to
+        // nothing. `complete && naturalWidth === 0` is exactly that state.
+        // Without this the DOM says nothing at all about a failed load — the
+        // rule engine scored 0/10 on the category and every verdict came from
+        // the pixels alone.
+        if (tag === 'img') {
+          entry.nw = el.naturalWidth;
+          entry.nh = el.naturalHeight;
+          entry.cmp = el.complete === true;
+        }
         const TEXT_TAGS = ['p','span','a','button','h1','h2','h3','h4','h5','h6','label','code','pre','li'];
         if (TEXT_TAGS.includes(tag)) {
           try {

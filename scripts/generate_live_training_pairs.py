@@ -258,7 +258,7 @@ def main() -> int:
     rng = random.Random(args.seed + len(records))
     deadline = time.time() + args.max_hours * 3600
     start_idx = len(records)
-    ok = fail = 0
+    ok = fail = skipped = 0
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
@@ -273,9 +273,18 @@ def main() -> int:
             url = rng.choice(SITES)
             category = rng.choice(CATEGORIES)
             try:
-                _result, baseline_path, current_path, mutated = run_trial(
-                    page, url, category, rng, out_dir, idx
-                )
+                trial = run_trial(page, url, category, rng, out_dir, idx)
+                # run_trial declines rather than mislabels: no element on this
+                # page suits the category, or the mutation could not produce the
+                # phenomenon it is named after — layout-issue refuses an element
+                # whose growth pushes nothing, since the alternative is a pair
+                # labelled "layout-issue" showing no layout issue. Unpacking that
+                # None raised, which the loop reported as a failed trial; it is a
+                # skip, and saying so keeps the log honest about what went wrong.
+                if trial is None:
+                    skipped += 1
+                    continue
+                _result, baseline_path, current_path, mutated = trial
                 records.append({
                     "baseline": str(baseline_path),
                     "current": str(current_path),
