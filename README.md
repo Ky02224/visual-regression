@@ -259,6 +259,99 @@ lowest of the six. That is where the remaining work is. The four scored as
 `insignificant-change` are a different failure: the change was real but small
 enough that the noise floor discarded it before the label mattered.
 
+### Which part of the system produces that number
+
+94.80% is the output of four sources at once — a deterministic DOM structure
+comparison, 53 DOM-derived feature columns, 15 pixel-structural columns, and a
+ResNet50 Siamese embedding — and on its own says nothing about which of them is
+carrying it. Removing one at a time, over the same seeds and trials:
+
+| Configuration | Accuracy | vs full |
+|---|---|---|
+| Full system (n=500) | 94.80% | — |
+| Structural verdict computed and discarded (n=150) | 38.67% | **−56pp** |
+
+`LENS_ABLATE_DOM_ENGINE=true` leaves the DOM feature columns populated and the
+network unchanged; only the rule engine's override is withheld. So the drop is
+that override alone, and the answer is that it decides the result. `--no-dom`
+cannot measure this — it removes the verdict and 53 of the 77 columns together.
+Run the matrix with `python scripts/ablation_study.py --seeds 3 --trials 50`.
+
+Where the 56 points go is more informative than the total. Without the
+structural verdict, recall by class is:
+
+```
+  insignificant-change  100.0%   (29/29)
+  broken-image           84.6%   (11/13)
+  missing-element        41.9%   (18/43)
+  color-regression        0.0%   ( 0/28)
+  text-issue              0.0%   ( 0/24)
+  font-change             0.0%   ( 0/13)
+```
+
+Three classes go to zero. All three are changes to *text*: its colour, its
+overflow, its typeface. The network is not failing at colour in general — see
+the next section, where it reads a repainted block at 89% and an inverted image
+at 100% — it is failing at colour on glyphs.
+
+### Capability boundary
+
+**These are diagnostic runs, not a second headline.** The system is the two
+channels together; 94.80% is what it does. What follows takes it apart to find
+out which channel covers what, using changes chosen specifically because one
+channel cannot see them. Several of them are rare in production — the point is
+attribution, not a second accuracy figure.
+
+Every mutation in the default set is DOM-visible by construction: a node leaves
+the tree, a recorded computed style changes, an `<img>` stops decoding. So the
+rule engine answers them, and no result from that set can say whether the
+visual stream contributes anything.
+
+`--blind` runs six mutations that repaint the page while leaving every field
+the DOM snapshot records identical — `font-weight` (only `fontFamily` is
+stored), CSS `filter` and `visibility` (not stored), background colour on a
+`div` (stored for text tags only), `-webkit-text-fill-color` (leaves
+`getComputedStyle().color` reporting the original). The rule engine has nothing
+to match on, so what survives is the visual stream's own judgement:
+
+| DOM-invisible change | Accuracy | n |
+|---|---|---|
+| Unchanged page | 100% | 77 |
+| Image hidden in place | 100% | 26 |
+| Image colour-inverted | 100% | 25 |
+| Block background repainted | 86.0% | 50 |
+| Text hidden in place | 4.2% | 48 |
+| Font **weight** changed | 0% | 31 |
+| Text painted transparent | 0% | 43 |
+
+Read the last three rows against the full-system numbers before drawing a
+conclusion from them. A *typeface* substitution — the font change that happens
+in production, when a webfont fails and the fallback renders — is recorded by
+the snapshot as `fontFamily` and the full system scores **100%** on it (62/62).
+The 0% here is `font-weight`, which the snapshot does not store and which was
+picked for exactly that reason. Neither row describes a defect the deployed
+system misses; together they locate which channel would have to catch it.
+
+The split is not between easy and hard changes; it is between region-scale and
+glyph-scale ones. `blind-img-hidden` and `blind-text-hidden` apply the *same*
+CSS property to different elements and score 100% against 4.2%. A ResNet50
+downsamples by a factor of two in its first 7x7 convolution, and stroke-weight
+evidence does not survive that.
+
+The two experiments agree, which is what makes the boundary worth stating. The
+ablation above found the network at 0% on `color-regression` — a mutation that
+recolours *text*. This one finds it at 86% on a repainted `div` and 100% on an
+inverted image. Same channel, same colour dimension, opposite results,
+separated by the scale of the region that changed.
+
+Which gives each channel a domain the other cannot enter. Colour and region
+changes on non-text elements are invisible to the DOM comparison — no colour is
+recorded outside text tags — and the visual stream handles them at 86–100%.
+Structural attribution is invisible to the pixels, and the DOM comparison is
+worth 56 points of accuracy there. Reporting either channel as the primary one
+would misdescribe the system: it is the pair that produces 94.80%, and each
+covers a class of change the other is blind to.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) — how the pieces fit and why
