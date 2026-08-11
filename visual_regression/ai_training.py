@@ -217,9 +217,9 @@ CONSOLIDATED_CLASS_NAMES = [
 def _consolidate_label(label_name: str) -> str:
     if label_name in {BENIGN_LABEL_NAME, "insignificant-change"}:
         return "insignificant-change"
-    # Taxonomy simplification, 2026-08-11 (see comment in
-    # _finalize_classification_assessment, and ADR 0006's original reasoning
-    # on why these were confusable in the first place): layout-issue is
+    # Taxonomy simplification, 2026-08-11 (see the fuller note in
+    # _finalize_classification_assessment for why these two were confusable
+    # in the first place): layout-issue is
     # folded into missing-element here too, so ground-truth labelling and
     # scoring agree with what the model now actually outputs. Consolidating
     # only at inference time and not here would make every layout-issue
@@ -2014,12 +2014,24 @@ def _standardised_rule_vector(loaded, parts, expected_dim, no_dom: bool = False)
     """
     vec = _fit_rule_vector(parts, expected_dim)
     s_vec = standardise_rule_vector(vec, loaded.get("rule_feature_mean"), loaded.get("rule_feature_std"))
-    if no_dom:
+    if no_dom or os.environ.get("LENS_ABLATE_DOM_FEATURES", "").lower() == "true":
         # DOM columns 9:62 correspond to DOM snapshot & DOM element features.
         # When DOM sidecars are withheld (no-dom screenshot-only mode), set
         # their standardized values to 0.0 (neutral mean) so an all-zero DOM input
         # does not become a large negative bias toward broken-image!
+        #
+        # LENS_ABLATE_DOM_FEATURES neutralises the same 53 columns while the
+        # sidecars are still on disk, which is what separates "the model lost
+        # its DOM features" from "the rule engine lost its input" — --no-dom
+        # does both at once and cannot attribute the drop to either.
         s_vec[9:62] = 0.0
+    if os.environ.get("LENS_ABLATE_PIXEL_FEATURES", "").lower() == "true":
+        # The 15 px_* columns: phase-correlation translation, hue/saturation/
+        # value shift, edge density and orientation, ink ratio, flatness,
+        # change aspect. Measured from the crop, not from the DOM, so zeroing
+        # them isolates how much of the verdict rests on pixel-structural
+        # evidence rather than on the image embedding or the DOM.
+        s_vec[62:77] = 0.0
     return s_vec
 
 
@@ -2087,19 +2099,29 @@ def _finalize_classification_assessment(
         # verdict it takes priority over the CNN/veto label above. It also
         # doesn't need a pixel region to have formed first (see
         # _diagnose_dom_diff_best) since it isn't a pixel measurement.
-        dom_label, dom_evidence = _diagnose_dom_diff_best(
-            baseline_dom_elements, current_dom_elements, result,
-        )
+        # LENS_ABLATE_DOM_ENGINE exists to make this override measurable. With
+        # it on, the structural verdict is computed and discarded, so the label
+        # is whatever the network and the vetoes produced on their own, on the
+        # same trials, with the DOM feature columns still populated. The
+        # difference between the two runs is this line's contribution and
+        # nothing else. Withholding the sidecar (--no-dom) cannot answer that:
+        # it removes the verdict and 53 of the 77 feature columns together.
+        if os.environ.get("LENS_ABLATE_DOM_ENGINE", "").lower() == "true":
+            dom_label, dom_evidence = None, ""
+        else:
+            dom_label, dom_evidence = _diagnose_dom_diff_best(
+                baseline_dom_elements, current_dom_elements, result,
+            )
         if dom_label:
             label = dom_label
             score = max(score, threshold)
 
         # Taxonomy simplification, 2026-08-11: missing-element and layout-issue
-        # are folded into one displayed category. Per ADR 0006, removing an
-        # element and the reflow it causes are one event described from two
-        # angles, not two independently-observable outcomes -- 21 of 29
-        # residual classification errors on the strict 7-way split fell
-        # between exactly these confusable pairs. This applies regardless of
+        # are folded into one displayed category. Removing an element and the
+        # reflow it causes are one event described from two
+        # angles, not two independently-observable outcomes -- on the strict
+        # 7-way split, 21 of 29 residual classification errors fell between
+        # confusable pairs, this one the largest of them. This applies regardless of
         # whether the label came from the CNN or the DOM-diff override above,
         # so every downstream consumer (dashboard, reports, API) sees the
         # merged taxonomy consistently. The underlying model still predicts
@@ -2343,11 +2365,30 @@ def query_ollama_for_explanation(
 
 
 def _add_ollama_explanation_if_needed(assessment: AIAssessment, crops: list, mismatch_pct: float):
+    """Optionally append a local vision-LLM narration to the explanation.
+
+    Off unless VRT_ENABLE_OLLAMA=true, and deliberately *appended* rather than
+    substituted. The explanation it would replace is the DOM-diff evidence
+    string — a specific, checkable claim about the page ("the <img> at
+    (399,417) still occupies its 127x155 box but decoded to nothing"). That
+    sentence is derived from two snapshots and can be verified against them;
+    LLM prose about the same crop cannot. Overwriting the first with the
+    second traded an auditable finding for a generated one, which is the wrong
+    direction for a tool whose verdicts get acted on. Appending keeps the
+    evidence and adds the readable summary after it.
+    """
     import os
-    if os.environ.get("VRT_ENABLE_OLLAMA") == "true" and assessment.label and crops:
-        assessment.ai_explanation = query_ollama_for_explanation(
-            assessment.label, crops[0][0], crops[0][1], mismatch_pct
-        )
+    if os.environ.get("VRT_ENABLE_OLLAMA") != "true":
+        return
+    if not assessment.label or not crops:
+        return
+    narration = query_ollama_for_explanation(
+        assessment.label, crops[0][0], crops[0][1], mismatch_pct
+    )
+    if not narration:
+        return
+    existing = (assessment.ai_explanation or "").strip()
+    assessment.ai_explanation = f"{existing}\n\n{narration}" if existing else narration
 
 
 

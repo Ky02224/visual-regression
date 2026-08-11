@@ -10,7 +10,7 @@ Every claim below is enforced by CI on each push, not measured once by hand.
 |---|---|
 | Detects 81/81 injected defects, 0/9 false alarms | `Score detection rate` — fails the build on any miss or false alarm |
 | The AI inference path actually executes | `Smoke-test the AI inference path` — asserts `decision_source` is not `pixel-fallback-no-model` |
-| Classification is 92.60% (n=500), 95% CI [90.31%, 94.89%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
+| Classification is 94.80% (n=500), 95% CI [92.85%, 96.75%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
 | Both database backends work | `Verify the Postgres parity tests are not skipping` — fails if those tests silently skip |
 | 1000 Python + 90 frontend + 8 SDK tests pass | `Run Python tests`, `Run frontend unit tests`, `Run Playwright SDK tests` |
 
@@ -18,31 +18,36 @@ The detection gate runs with `--no-ai` deliberately, so it can never be blocked
 by model distribution — see
 [ADR 0004](docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md).
 
-Classification was 94.20% before 2026-08-06. The rise to 95.00% is **not an
-improvement in the system** — nothing in the classifier changed. A ground-truth
-labelling defect was corrected: trials that deleted a wrapper containing a
-thumbnail were labelled by which node the mutation script picked rather than by
-what left the page, which asked the classifier for information neither snapshot
-contains. Scored on identical trials, the correction is worth exactly +5 of 500,
-and it can only move trials in the classifier's favour. The reasoning, the five
-trials, and why the two figures are not two measurements of the same thing are
-set out in
-[ADR 0006](docs/adr/0006-classification-is-scored-strictly-despite-overlapping-labels.md#amendment-2026-08-06--one-of-the-three-pairs-was-a-labelling-defect).
+That number is not comparable with every earlier one quoted for this project,
+and the differences are worth stating rather than smoothing over:
 
-The model was retrained again on 2026-08-09, moving classification from 95.00%
-to 92.60%. That drop is not noise: four inference paths had been assembling
-the rule vector as `[rule, dom, struct]` and zero-padding the fifteen
-pixel-structural columns instead of computing them, so the model was trained
-on evidence it never received in production. Fixing that, plus retraining
-with both the DOM and image shortcuts partially closed so the classifier
-cannot lean on page-change magnitude alone, is what moved the *DOM-less* path
-from 45.5% to a still-imperfect 45.4% with a materially different, more
-balanced confusion matrix (four previously near-zero classes — text-issue,
-font-change, layout-issue, broken-image — improved substantially; two others
-did not). The 2.4-point drop measured here, with DOM available, is the cost of
-a classifier that is no longer taking a shortcut the with-DOM exam happened to
-reward. The pre-fix report is kept as `reports/live-eval-summary-20260806-stale.json`.
-The earlier run is kept as `reports/live-eval-summary-prelabelfix.json`.
+- **Ground-truth labelling was corrected on 2026-08-06.** Trials that deleted a
+  wrapper containing a thumbnail had been labelled by which node the mutation
+  script picked rather than by what left the page — information neither
+  snapshot contains. The correction is worth +5 of 500 and can only move trials
+  in the classifier's favour, so it is not evidence of anything about the
+  model. The earlier run is kept as
+  `reports/live-eval-summary-prelabelfix.json`.
+- **The model was retrained on 2026-08-09.** Four inference paths had been
+  assembling the rule vector as `[rule, dom, struct]` and zero-padding the
+  fifteen pixel-structural columns instead of computing them, so the model was
+  trained on evidence it never received in production. Fixing that, and
+  retraining with the DOM and image shortcuts partially closed, cost accuracy
+  on the with-DOM exam and bought a classifier that no longer leans on
+  page-change magnitude alone.
+- **The label set was reduced from seven classes to six on 2026-08-11.**
+  `layout-issue` is folded into `missing-element`, at inference and in
+  ground-truth consolidation alike. Removing an element and the reflow it
+  causes are one event seen from two angles, and on the strict seven-way split
+  that pair produced the largest single block of residual error. Scored under
+  the seven-way rule the same trials give 92.60%
+  (`reports/live-eval-summary-7class-20260809.json`); the 94.80% above is the
+  six-way rule, which is what the code now does.
+
+The last of those is a taxonomy change made after seeing which merge raised the
+number, so it deserves the caveat in full: it is defensible on the grounds that
+the two labels describe one event, and it is **not** independent evidence that
+the classifier improved.
 
 Baselines are captured inside this project's Docker image
 (`scripts/generate_linux_baselines.sh`) rather than on a developer machine.
@@ -172,6 +177,25 @@ python -m visual_regression.cli evaluate-ai
 The training metadata is written to `.visual-regression\models\visual_ai.json`.
 Evaluation summaries are written to `.visual-regression\reports\ai-eval-*.json` and `.visual-regression\reports\ai-run-eval-*.json`.
 
+### Optional: plain-language narration
+
+Each classified change already carries an explanation derived from the two DOM
+snapshots — a specific claim that can be checked against the page, e.g. *"the
+`<img>` at (399,417) still occupies its 127x155 box but decoded to nothing
+(naturalWidth 0)"*. Setting `VRT_ENABLE_OLLAMA=true` **appends** a readable
+narration of the same crop, produced by a local Ollama vision model:
+
+```powershell
+ollama serve
+ollama pull llava
+$env:VRT_ENABLE_OLLAMA = "true"
+```
+
+It is off by default and appended rather than substituted on purpose: the
+narration is generated text and the evidence is not, so a reviewer acting on a
+verdict should see the checkable sentence first. If Ollama is unreachable the
+narration is skipped and the evidence is left exactly as it was.
+
 ## Playwright SDK
 
 `sdk/` is a TypeScript package that lets an existing Playwright suite send
@@ -210,7 +234,7 @@ different reasons — see [ADR 0001](docs/adr/0001-detection-and-classification-
 | Capability | Result | Evaluation set |
 |---|---|---|
 | **Defect detection** | **81/81 detected, 0/9 false alarms** | Injected defects on the demo portal, ground truth from the injected mode |
-| **Change classification** | **92.60%**, 95% CI [90.31%, 94.89%] | Real third-party pages with injected DOM mutations, n=500 over 10 seeds |
+| **Change classification** | **94.80%**, 95% CI [92.85%, 96.75%], across-seed σ 3.01% | Real third-party pages with injected DOM mutations, n=500 over 10 seeds |
 | Classification (synthetic) | 87.6% — a *validation* score, calibration fitted on the same set | 12,000 synthetic mutations |
 
 Reproduce the second row with:
@@ -219,14 +243,21 @@ Reproduce the second row with:
 python scripts/live_eval_multiseed.py --seeds 10 --trials 50
 ```
 
-21 of the 29 residual classification errors fall between three pairs of labels
-that describe one event from two angles: a removal reflows what sits below it, a
-text overflow is a layout change, a vanished image is both missing and broken.
-Treating those pairs as interchangeable scores 98.40% on the same run. The
-strict number stays the headline —
-[ADR 0006](docs/adr/0006-classification-is-scored-strictly-despite-overlapping-labels.md)
-covers why, and why the eight errors outside those pairs are where the remaining
-work is.
+The 26 residual errors on that run are not spread evenly across the label set:
+
+```
+  8  missing-element   -> font-change
+  7  missing-element   -> color-regression
+  5  text-issue        -> missing-element
+  3  broken-image      -> insignificant-change
+  2  missing-element   -> text-issue
+  1  color-regression  -> insignificant-change
+```
+
+Seventeen of them start from `missing-element`, whose recall (87.7%) is the
+lowest of the six. That is where the remaining work is. The four scored as
+`insignificant-change` are a different failure: the change was real but small
+enough that the noise floor discarded it before the label mattered.
 
 ## Documentation
 

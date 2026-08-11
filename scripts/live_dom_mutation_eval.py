@@ -107,12 +107,20 @@ _LEAF_CHECK_JS = """
 """
 
 _COUNT_JS = """
-([tags, requireBlock, requireLeaf]) => {
+([tags, requireBlock, requireLeaf, minArea]) => {
     """ + _VISIBLE_CHECK_JS + _LEAF_CHECK_JS + """
     const els = Array.from(document.querySelectorAll(tags.join(',')));
     const candidates = els.filter(el => {
         const r = el.getBoundingClientRect();
         if (!(r.width > 40 && r.height > 12 && r.top >= 0 && r.top < 700 && r.left >= 0)) return false;
+        // A floor on painted area, used by the DOM-blind set. Those mutations
+        // repaint an element in place rather than removing or reflowing it, so
+        // the pixels they disturb are bounded by the element itself: strike a
+        // 60x14 link and 0.02% of the page changes, which the noise floor
+        // discards before any classifier is consulted. That measures how large
+        // the element was, not whether the change could be recognised. The
+        // DOM-visible set leaves this at 0 and keeps its original behaviour.
+        if (minArea && (r.width * r.height) < minArea) return false;
         // scrollWidth/clientWidth are always 0 on display:inline elements
         // (a browser-level rule, not a capture bug) — and CSS truncation
         // (text-overflow/overflow/white-space) is a no-op on inline
@@ -138,12 +146,13 @@ _COUNT_JS = """
 """
 
 _PICK_AT_INDEX_JS = """
-([tags, index, requireBlock, requireLeaf]) => {
+([tags, index, requireBlock, requireLeaf, minArea]) => {
     """ + _VISIBLE_CHECK_JS + _LEAF_CHECK_JS + """
     const els = Array.from(document.querySelectorAll(tags.join(',')));
     const candidates = els.filter(el => {
         const r = el.getBoundingClientRect();
         if (!(r.width > 40 && r.height > 12 && r.top >= 0 && r.top < 700 && r.left >= 0)) return false;
+        if (minArea && (r.width * r.height) < minArea) return false;
         if (requireBlock && getComputedStyle(el).display === 'inline') return false;
         if (requireBlock && r.height > 40) return false;
         if (requireLeaf && !ownsItsText(el)) return false;
@@ -366,6 +375,147 @@ PICK_TAGS = {
 }
 
 
+# ── DOM-blind mutations ──────────────────────────────────────────────────────
+#
+# Every mutation above is something the DOM snapshot can see: a node leaves the
+# tree, a recorded computed style changes, an <img> stops decoding. The rule
+# engine therefore answers 81% of those trials, and the accuracy they produce
+# says nothing about whether the visual stream contributes anything — it was
+# never the deciding channel.
+#
+# These six change what the page looks like while leaving every field
+# _CAPTURE_DOM_SNAPSHOT_JS records byte-identical. Cross-checked against that
+# function, which stores per element: tag, x/y/w/h, id, class; naturalWidth /
+# naturalHeight / complete for <img>; and fontFamily, color, backgroundColor
+# and overflow state for text tags only.
+#
+#   font-weight        not recorded (only fontFamily is)
+#   CSS filter         not recorded at all
+#   visibility:hidden  keeps layout, so x/y/w/h are unchanged, and
+#                      getComputedStyle still reports the original colour
+#   background on div  colour is recorded for text tags only; div/section are
+#                      not text tags
+#   text-decoration    not recorded, and does not reflow
+#
+# So on these trials struct_* and dom_* are flat and diagnose_from_dom_diff has
+# nothing to match on. Whatever accuracy survives is the visual stream's own.
+BLIND_CATEGORIES = [
+    "blind-font-weight",
+    "blind-text-decoration",
+    "blind-img-filter",
+    "blind-img-hidden",
+    "blind-block-bg",
+    "blind-text-hidden",
+]
+
+# What a reviewer would call each one, in the deployed label set.
+BLIND_TO_LABEL = {
+    "blind-font-weight": "font-change",
+    "blind-text-decoration": "text-issue",
+    "blind-img-filter": "color-regression",
+    "blind-img-hidden": "broken-image",
+    "blind-block-bg": "color-regression",
+    "blind-text-hidden": "missing-element",
+}
+
+BLIND_PICK_TAGS = {
+    "blind-font-weight": ['p', 'span', 'a', 'h1', 'h2', 'h3', 'li'],
+    "blind-text-decoration": ['p', 'span', 'a', 'h1', 'h2', 'h3', 'li'],
+    "blind-img-filter": ['img'],
+    "blind-img-hidden": ['img'],
+    "blind-block-bg": ['div', 'section'],
+    "blind-text-hidden": ['p', 'span', 'a', 'h1', 'h2', 'h3', 'li'],
+}
+
+BLIND_MUTATION_JS = {
+    # Weight is a font property the snapshot does not read — it stores
+    # fontFamily only — and 900 against a body weight of 400 is a change a
+    # reader notices immediately.
+    "blind-font-weight": """
+        () => {
+            const el = document.querySelector('[data-vrt-mutated]');
+            if (!el) return null;
+            const before = getComputedStyle(el).fontWeight;
+            el.style.setProperty('font-weight', '900', 'important');
+            if (getComputedStyle(el).fontWeight === before) return null;  // already bold
+            return {tag: el.tagName, from: before, to: '900'};
+        }
+    """,
+    # Text rendered transparent: every glyph stops being painted, the box does
+    # not move, and getComputedStyle(el).color — the one colour the snapshot
+    # stores — still reports the original value, because -webkit-text-fill-color
+    # overrides the paint without touching `color`. The visible outcome is text
+    # a reader cannot read, which is what the text-issue label covers.
+    #
+    # This replaced a line-through, which was correctly invisible to the DOM but
+    # also nearly invisible in pixels: struck through a 60x14 link it moved
+    # 0.022% of the page, under the noise floor, so the trial tested the
+    # detector's sensitivity rather than the classifier's judgement.
+    "blind-text-decoration": """
+        () => {
+            const el = document.querySelector('[data-vrt-mutated]');
+            if (!el) return null;
+            const before = getComputedStyle(el).color;
+            el.style.setProperty('-webkit-text-fill-color', 'transparent', 'important');
+            // If the paint did not actually change, this element renders no
+            // text of its own and the trial would carry a label nothing on the
+            // page supports.
+            if (getComputedStyle(el).webkitTextFillColor === before) return null;
+            return {tag: el.tagName, colorStillReports: before};
+        }
+    """,
+    # Repaints every pixel of the image while naturalWidth, naturalHeight and
+    # complete — all properties of the decoded resource — stay as they were.
+    #
+    # invert() rather than the hue-rotate/saturate pair this started as: hue
+    # and saturation are both undefined on a greyscale image, so on a
+    # black-and-white photo or a monochrome logo that mutation produced a
+    # measured 0.000% pixel difference — a trial labelled "the image changed
+    # colour" in which nothing changed. Inversion is defined for every pixel.
+    "blind-img-filter": """
+        () => {
+            const el = document.querySelector('[data-vrt-mutated]');
+            if (!el) return null;
+            el.style.setProperty('filter', 'invert(1) hue-rotate(140deg)', 'important');
+            return {tag: el.tagName};
+        }
+    """,
+    # visibility:hidden is the one removal that leaves the box in place: the
+    # image stops being painted, nothing reflows, and the snapshot still
+    # records the same rect and the same successfully-decoded resource.
+    "blind-img-hidden": """
+        () => {
+            const el = document.querySelector('[data-vrt-mutated]');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            el.style.setProperty('visibility', 'hidden', 'important');
+            return {tag: el.tagName, w: r.width, h: r.height};
+        }
+    """,
+    # Colour is captured for text tags only. A div or section repainted in a
+    # strong colour is a large, obvious visual change with no DOM trace.
+    "blind-block-bg": """
+        () => {
+            const el = document.querySelector('[data-vrt-mutated]');
+            if (!el) return null;
+            el.style.setProperty('background-color', 'rgb(255, 235, 59)', 'important');
+            return {tag: el.tagName};
+        }
+    """,
+    # The text stops being painted while its box, its colour and its font all
+    # still read exactly as before.
+    "blind-text-hidden": """
+        () => {
+            const el = document.querySelector('[data-vrt-mutated]');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            el.style.setProperty('visibility', 'hidden', 'important');
+            return {tag: el.tagName, w: r.width, h: r.height};
+        }
+    """,
+}
+
+
 def to_consolidated(name: str) -> str:
     if name in {"benign", "no-change", ""}:
         name = "insignificant-change"
@@ -401,10 +551,19 @@ def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, 
 
     mutated_info = None
     if category != "benign":
-        tags = PICK_TAGS.get(category, ['p', 'span', 'a'])
-        require_block = category == "text-issue"
-        require_leaf = category in ("color-regression", "font-change")
-        count = page.evaluate(_COUNT_JS, [tags, require_block, require_leaf])
+        is_blind = category in BLIND_MUTATION_JS
+        mutation_js = BLIND_MUTATION_JS[category] if is_blind else MUTATION_JS[category]
+        tags = (BLIND_PICK_TAGS if is_blind else PICK_TAGS).get(category, ['p', 'span', 'a'])
+        # The blind mutations repaint an element in place, so they need a
+        # visible element and nothing more — none of them reflows, clips, or
+        # depends on the element owning its own text node.
+        require_block = (not is_blind) and category == "text-issue"
+        require_leaf = (not is_blind) and category in ("color-regression", "font-change")
+        # ~1.4% of a 1280x900 viewport. Large enough that repainting the
+        # element clears the noise floor on every site in SITES, small enough
+        # that ordinary paragraphs, images and cards still qualify.
+        min_area = 16000 if is_blind else 0
+        count = page.evaluate(_COUNT_JS, [tags, require_block, require_leaf, min_area])
         if not count:
             return None  # no suitable element on this page for this category; skip trial
         # A mutation may decline the element it was given — layout-issue does
@@ -415,10 +574,10 @@ def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, 
         # touched on refusal, which is what makes retrying on the same page safe.
         for _attempt in range(8):
             index = rng.randrange(count)  # seeded by --seed, unlike the JS-side Math.random() this replaces
-            picked = page.evaluate(_PICK_AT_INDEX_JS, [tags, index, require_block, require_leaf])
+            picked = page.evaluate(_PICK_AT_INDEX_JS, [tags, index, require_block, require_leaf, min_area])
             if not picked:
                 continue
-            mutated_info = page.evaluate(MUTATION_JS[category])
+            mutated_info = page.evaluate(mutation_js)
             if mutated_info is not None:
                 break
         if mutated_info is None:
@@ -519,6 +678,16 @@ def main():
                              "large majority of trials. The mutation choice and the "
                              "ground truth are unaffected, so a seed produces the same "
                              "trials either way and the two runs compare directly.")
+    parser.add_argument("--blind", action="store_true",
+                        help="Draw mutations from the DOM-blind set instead: six "
+                             "changes that repaint the page while leaving every field "
+                             "the DOM snapshot records identical (font-weight, CSS "
+                             "filter, visibility, background on a non-text block, "
+                             "text-decoration). The rule engine has nothing to match "
+                             "on, so whatever accuracy survives belongs to the visual "
+                             "stream. This is the measurement the default mutation set "
+                             "cannot make, since every mutation in it is DOM-visible "
+                             "by construction.")
     args = parser.parse_args()
 
     seed = args.seed if args.seed is not None else int(time.time() * 1000) % (2**31)
@@ -529,6 +698,7 @@ def main():
     model_path = Path(args.model_path) if args.model_path else paths.models_dir / "visual_ai.pt"
     print(f"Model: {model_path}")
     print(f"DOM sidecars: {'withheld (screenshot-only)' if args.no_dom else 'written'}")
+    print(f"Mutation set: {'DOM-blind (structure unchanged)' if args.blind else 'default (DOM-visible)'}")
 
     # Per-process, because the file names inside are fixed (baseline_0.png and
     # so on). Two evaluations running at once — comparing two models, or a
@@ -543,12 +713,17 @@ def main():
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
 
+        # "benign" stays in the blind pool: without unchanged pages in the mix
+        # the run cannot tell a classifier that reads the page from one that
+        # answers with a defect every time.
+        category_pool = (["benign"] + BLIND_CATEGORIES) if args.blind else CATEGORIES
+
         i = 0
         attempts = 0
         while i < args.trials and attempts < args.trials * 3:
             attempts += 1
             url = rng.choice(SITES)
-            category = rng.choice(CATEGORIES)
+            category = rng.choice(category_pool)
             try:
                 out = run_trial(page, url, category, rng, tmp_dir, i,
                                 write_dom=not args.no_dom)
@@ -572,10 +747,14 @@ def main():
             # snapshots record; calling it "missing-element" because the script
             # deleted an <a> asked the classifier for information no comparison
             # of before and after contains. Six of 29 residual errors were this
-            # one mismatch — see ADR 0006.
+            # one mismatch.
             expected_category = category
             if category == "missing-element" and (mutated_info or {}).get("tookMedia"):
                 expected_category = "broken-image"
+            # A blind mutation is named for the mechanism that hides it from the
+            # DOM, not for what a reviewer sees, so it is scored against the
+            # deployed label its visible outcome belongs to.
+            expected_category = BLIND_TO_LABEL.get(expected_category, expected_category)
             expected_c = to_consolidated(expected_category)
             pred_c = to_consolidated(pred_label)
             correct = expected_c == pred_c

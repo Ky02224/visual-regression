@@ -39,6 +39,10 @@ def main() -> int:
     parser.add_argument("--no-dom", action="store_true",
                         help="Withhold the DOM sidecars from every seed — the "
                              "screenshot-only measurement. See live_dom_mutation_eval.py.")
+    parser.add_argument("--blind", action="store_true",
+                        help="Use the DOM-blind mutation set for every seed — changes "
+                             "that repaint the page while leaving the DOM snapshot "
+                             "identical. See live_dom_mutation_eval.py.")
     args = parser.parse_args()
 
     out_dir = ROOT / args.out_dir
@@ -60,6 +64,8 @@ def main() -> int:
             cmd += ["--model-path", args.model_path]
         if args.no_dom:
             cmd += ["--no-dom"]
+        if args.blind:
+            cmd += ["--blind"]
         proc = subprocess.run(
             cmd,
             cwd=str(ROOT),
