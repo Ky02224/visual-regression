@@ -2063,12 +2063,18 @@ def _finalize_classification_assessment(
         score = float(probabilities[1])
         label = "meaningful-change" if score >= threshold else ""
         raw_model_score = score
+        raw_model_label = label
     else:
         top_index = int(np.argmax(probabilities))
         score = float(probabilities[top_index])
         raw_model_score = score
         class_names = list(loaded["class_names"])
         label = class_names[top_index] if top_index < len(class_names) else ""
+        # Kept before anything downstream can replace it. See
+        # AIAssessment.raw_model_label for why: without it, an ablation cannot
+        # separate what the network got wrong from what the suppression rules
+        # threw away.
+        raw_model_label = label
         if label == "insignificant-change":
             label = ""
         # Only use demo signature / heuristic when AI is not confident.
@@ -2137,6 +2143,7 @@ def _finalize_classification_assessment(
     assessment = _build_ai_assessment(raw_model_score, label, threshold, model_path.name)
     assessment.__dict__.update(calib)
     assessment.dom_confirmed = bool(dom_label) and bool(label)
+    assessment.raw_model_label = raw_model_label
     if dom_evidence and label:
         assessment.ai_explanation = dom_evidence
     _add_ollama_explanation_if_needed(assessment, crops, result.mismatch_pct)

@@ -45,9 +45,6 @@ reports/*
 # The same 500 trials scored under the seven-class rule, kept so the 92.60% the
 # README quotes for that taxonomy can be checked rather than taken on trust.
 !reports/live-eval-summary-7class-20260809.json
-# The DOM-blind measurement: mutations that repaint the page while leaving the
-# DOM snapshot identical, which is the only run where the visual stream decides.
-!reports/live-eval-summary-blind.json
 # finetune_on_live_pairs.py trains inside its own workspace root so it can never
 # write over the deployed model. Those roots hold materialised run dirs and
 # multi-hundred-MB checkpoints — generated output, same as .visual-regression/*.

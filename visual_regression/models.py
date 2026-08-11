@@ -66,6 +66,22 @@ class AIAssessment:
     # decide_pass_fail's hybrid-mode branch for why this distinction matters
     # for pass/fail decisions specifically.
     dom_confirmed: bool = False
+    # The network's own argmax, before the heuristic fallback, the hard-feature
+    # veto, the DOM refinement, the structural override and the noise
+    # suppression have had a chance to replace it.
+    #
+    # Recorded because without it the model's contribution is not measurable.
+    # An ablation that withholds the structural verdict reports the accuracy of
+    # the network *and* the suppression rules together: a low-delta change like
+    # a recoloured heading (median 0.007% mismatch) forms no diff region, and
+    # the rule that then discards unconfident verdicts erases it before the
+    # label is ever compared. A replay recorded in _should_suppress_ai_label's
+    # comment found the raw argmax correct on 40/40 colour-regression pairs
+    # that had all been thrown away. Carrying the pre-suppression label makes
+    # that difference a measurement rather than an anecdote.
+    #
+    # Diagnostic only — nothing branches on it.
+    raw_model_label: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

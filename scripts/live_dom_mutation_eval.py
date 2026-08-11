@@ -771,6 +771,16 @@ def main():
                 "mismatch_pct": result.mismatch_pct,
                 "regions": len(result.regions),
                 "ai_score": assessment.score,
+                # The network's argmax before the vetoes, the structural
+                # override and the noise suppression could replace it. Scoring
+                # this column against `expected_consolidated` separates what
+                # the model got wrong from what the pipeline discarded — the
+                # ablation runs cannot tell those apart without it.
+                "raw_model_label": assessment.raw_model_label,
+                "raw_model_consolidated": to_consolidated(assessment.raw_model_label or "benign"),
+                "raw_model_correct": (
+                    to_consolidated(assessment.raw_model_label or "benign") == expected_c
+                ),
                 "ai_explanation": assessment.ai_explanation,
                 "mutated": mutated_info,
             }
