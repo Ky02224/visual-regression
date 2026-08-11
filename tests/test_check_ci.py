@@ -86,7 +86,13 @@ def test_failed_status_blocks_even_with_medium_severity(paths):
 
 
 def test_severity_from_a_different_build_is_ignored(paths):
-    _write_run(paths, "old-run", build_id="build-OLD", severity_label="high")
-    _write_run(paths, "new-run", build_id="build-NEW", severity_label="low")
+    # Names carry the ordering, as they do in production: a run directory is
+    # <UTC timestamp>_<case>. This test used to call them "old-run" and
+    # "new-run" and rely on the gate sorting by mtime, which sorted "old"
+    # after "new" the moment the gate switched to sorting by name — and the
+    # gate had to switch, because mtime ties on a filesystem storing whole
+    # seconds and made the choice of build non-deterministic.
+    _write_run(paths, "20260101-000001_old-run", build_id="build-OLD", severity_label="high")
+    _write_run(paths, "20260101-000002_new-run", build_id="build-NEW", severity_label="low")
 
     assert cmd_check_ci(_args(), paths) == 0
