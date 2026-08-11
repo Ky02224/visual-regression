@@ -47,8 +47,13 @@ def _result(mismatch=0.0, regions=()):
 
 class TestConsolidateLabel:
     @pytest.mark.parametrize("raw", ["layout-shift", "misaligned-fields", "overlay-obstruction", "z-index-issue"])
-    def test_layout_family_folds_to_layout_issue(self, raw):
-        assert _consolidate_label(raw) == "layout-issue"
+    def test_layout_family_folds_to_missing_element(self, raw):
+        # Taxonomy simplification, 2026-08-11: layout-issue is folded into
+        # missing-element (see _consolidate_label's docstring comment).
+        assert _consolidate_label(raw) == "missing-element"
+
+    def test_layout_issue_itself_folds_to_missing_element(self):
+        assert _consolidate_label("layout-issue") == "missing-element"
 
     @pytest.mark.parametrize("raw", ["text-truncation", "unreadable-text"])
     def test_text_family_folds_to_text_issue(self, raw):

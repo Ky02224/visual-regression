@@ -42,8 +42,11 @@ def test_perfect_predictions_score_as_perfect(paths):
     fix, this could still show near-zero precision/recall for several
     classes purely from the index-space mismatch."""
     samples = [
-        _fake_sample("layout-issue"),
-        _fake_sample("layout-issue"),
+        # Not layout-issue: that label was folded into missing-element on
+        # 2026-08-11 (see _consolidate_label), so it can no longer appear as
+        # its own bucket in the per-class breakdown this test inspects.
+        _fake_sample("broken-image"),
+        _fake_sample("broken-image"),
         _fake_sample("insignificant-change"),
         _fake_sample("text-issue"),
     ]
@@ -68,7 +71,7 @@ def test_perfect_predictions_score_as_perfect(paths):
     # Every ground-truth label present was also the (correct) prediction —
     # precision and recall for those classes must be 1.0, not scattered
     # across the wrong indices.
-    assert per_class["layout-issue"]["precision"] == 1.0
-    assert per_class["layout-issue"]["recall"] == 1.0
+    assert per_class["broken-image"]["precision"] == 1.0
+    assert per_class["broken-image"]["recall"] == 1.0
     assert per_class["insignificant-change"]["recall"] == 1.0
     assert per_class["text-issue"]["recall"] == 1.0

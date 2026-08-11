@@ -217,8 +217,16 @@ CONSOLIDATED_CLASS_NAMES = [
 def _consolidate_label(label_name: str) -> str:
     if label_name in {BENIGN_LABEL_NAME, "insignificant-change"}:
         return "insignificant-change"
-    if label_name in {"layout-shift", "misaligned-fields", "overlay-obstruction", "z-index-issue"}:
-        return "layout-issue"
+    # Taxonomy simplification, 2026-08-11 (see comment in
+    # _finalize_classification_assessment, and ADR 0006's original reasoning
+    # on why these were confusable in the first place): layout-issue is
+    # folded into missing-element here too, so ground-truth labelling and
+    # scoring agree with what the model now actually outputs. Consolidating
+    # only at inference time and not here would make every layout-issue
+    # ground-truth trial unscorable, since the model can no longer produce
+    # that label at all.
+    if label_name in {"layout-issue", "layout-shift", "misaligned-fields", "overlay-obstruction", "z-index-issue"}:
+        return "missing-element"
     if label_name in {"text-truncation", "unreadable-text"}:
         return "text-issue"
     if label_name == "missing-element":
@@ -2085,6 +2093,20 @@ def _finalize_classification_assessment(
         if dom_label:
             label = dom_label
             score = max(score, threshold)
+
+        # Taxonomy simplification, 2026-08-11: missing-element and layout-issue
+        # are folded into one displayed category. Per ADR 0006, removing an
+        # element and the reflow it causes are one event described from two
+        # angles, not two independently-observable outcomes -- 21 of 29
+        # residual classification errors on the strict 7-way split fell
+        # between exactly these confusable pairs. This applies regardless of
+        # whether the label came from the CNN or the DOM-diff override above,
+        # so every downstream consumer (dashboard, reports, API) sees the
+        # merged taxonomy consistently. The underlying model still predicts
+        # across its original 7 trained classes; only the displayed/reported
+        # label is collapsed here.
+        if label == "layout-issue":
+            label = "missing-element"
 
     if _should_suppress_ai_label(result, label, score, threshold, dom_confirmed=bool(dom_label),
                                  noise_override=loaded.get("noise_override_confidence")):
