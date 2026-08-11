@@ -289,10 +289,34 @@ structural verdict, recall by class is:
   font-change             0.0%   ( 0/13)
 ```
 
-Three classes go to zero. All three are changes to *text*: its colour, its
-overflow, its typeface. The network is not failing at colour in general — see
-the next section, where it reads a repainted block at 89% and an inverted image
-at 100% — it is failing at colour on glyphs.
+Three classes go to zero, and all three are changes to *text*: its colour, its
+overflow, its typeface. It is worth being exact about what happens to them,
+because "the network cannot classify these" is the wrong reading.
+
+All three are inherently low-delta. Recolouring the text of a heading repaints
+a few hundred glyph pixels: across those 28 colour-regression trials the median
+mismatch is **0.007%** and the maximum 0.024%, which does not clear
+`min_region_area`, so `result.regions` comes back empty. `_should_suppress_ai_label`
+then discards any verdict under `mismatch_pct < 0.2` that the model is not
+confident about — and none of the 41 trials reached the 0.80 confidence needed
+to survive it. Of the 24 text-issue trials, 14 were erased to
+`insignificant-change` and 9 were misclassified as `broken-image`; the erasures
+are the larger share.
+
+That rule is not firing by accident. It exists so anti-aliasing does not raise
+alarms, and the detection gate it protects requires 0 false alarms out of 9. A
+DOM verdict is exempt from it — `dom_confirmed` short-circuits the pixel-noise
+heuristics — precisely because a structural fact is not a pixel measurement.
+Remove the verdict and the exemption goes with it.
+
+So the 56 points are not all classifier capability. Part is the rule engine
+answering questions the network answered wrongly; part is the rule engine
+*licensing* answers the network had already got right, which the noise floor
+would otherwise have thrown away. The comment on that function records an
+earlier replay finding the raw argmax correct on 40/40 colour-regression pairs
+that had all been discarded. Separating those two contributions cleanly would
+need the pre-suppression argmax logged per trial, which this harness does not
+currently record.
 
 ### Capability boundary
 
@@ -338,11 +362,15 @@ CSS property to different elements and score 100% against 4.2%. A ResNet50
 downsamples by a factor of two in its first 7x7 convolution, and stroke-weight
 evidence does not survive that.
 
-The two experiments agree, which is what makes the boundary worth stating. The
-ablation above found the network at 0% on `color-regression` — a mutation that
-recolours *text*. This one finds it at 86% on a repainted `div` and 100% on an
-inverted image. Same channel, same colour dimension, opposite results,
-separated by the scale of the region that changed.
+The two experiments agree, and between them they separate two things the
+ablation alone could not. There, an unlicensed verdict on recoloured *text*
+scored 0% — but at a median mismatch of 0.007%, so the noise floor is a
+sufficient explanation and the network's own judgement was never tested. Here
+the colour change covers a whole `div` or a whole image: the delta is large,
+the noise floor is not in play, and the visual stream is left to answer on its
+own. It gets 86% and 100%. So the earlier zero is about scale, not about
+colour — the same channel reads colour well once the region is big enough to
+survive the detector.
 
 Which gives each channel a domain the other cannot enter. Colour and region
 changes on non-text elements are invisible to the DOM comparison — no colour is
