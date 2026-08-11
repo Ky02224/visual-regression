@@ -10,6 +10,7 @@ actually live.
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import cv2
@@ -252,6 +253,33 @@ class TestCheckCi:
         })
 
         assert cmd_check_ci(_args(max_severity="high"), paths) == 1
+
+    def test_picks_the_newest_build_when_mtimes_tie(self, paths):
+        """Two runs sharing an mtime must still order by name.
+
+        The gate used to sort on st_mtime. A suite writes its run directories
+        milliseconds apart, and on a filesystem that stores whole seconds --
+        ext4 on the CI runner -- those become equal keys, so which build looked
+        newest depended on directory order. It failed intermittently there and
+        never on Windows, whose 100ns timestamps never tie. Setting both mtimes
+        to the same value reproduces the CI condition on any platform.
+
+        Getting this wrong blocks a green build on a previous build's failure,
+        which is the expensive direction to be wrong in.
+        """
+        old = _write_run(paths, "20260101-000001_old", {
+            "build_id": "b0", "status": "FAIL", "case_name": "stale",
+            "severity": {"label": "high"},
+        })
+        new = _write_run(paths, "20260101-000002_new", {
+            "build_id": "b1", "status": "PASS", "case_name": "home",
+            "severity": {"label": "low"},
+        })
+        shared = 1_700_000_000
+        for d in (old, new):
+            os.utime(d, (shared, shared))
+
+        assert cmd_check_ci(_args(max_severity="high"), paths) == 0
 
     def test_ignores_runs_from_a_different_build(self, paths):
         _write_run(paths, "20260101-000001_old", {

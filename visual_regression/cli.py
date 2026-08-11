@@ -2224,7 +2224,18 @@ def cmd_check_ci(args: argparse.Namespace, paths: WorkspacePaths) -> int:
         print("[CI Gatekeeper] No test runs directory found. Passing CI check (0).", flush=True)
         return 0
 
-    run_dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+    # Ordered by name, not mtime. Run directories are named
+    # <UTC timestamp>_<case>, so the name already carries the ordering, and it
+    # carries it at a resolution the filesystem does not have to agree with.
+    # Sorting by st_mtime made the gate non-deterministic wherever two runs
+    # landed in the same filesystem tick: ext4 on the CI runner reports whole
+    # seconds for files a suite writes milliseconds apart, so ties broke in
+    # directory order and the newest build was sometimes not the one picked.
+    # Observed as an intermittent failure of
+    # test_ignores_runs_from_a_different_build, which passes on Windows (100ns
+    # timestamps, no ties) and failed on Linux — the gate reading a stale
+    # build's FAIL and blocking a build that was green.
+    run_dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
     if not run_dirs:
         print("[CI Gatekeeper] No test runs recorded. Passing CI check (0).", flush=True)
         return 0
