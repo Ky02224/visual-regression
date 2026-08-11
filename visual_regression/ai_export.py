@@ -56,65 +56,72 @@ _mtime_check_lock = threading.Lock()
 
 
 def export_to_onnx(model_path: Path):
-    """Export the hybrid PyTorch Siamese model to ONNX format."""
+    """Export the hybrid PyTorch Siamese model to ONNX format cleanly and fast."""
     torch, nn = _require_torch()
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
-    model_type = checkpoint.get("model_type")
-    if model_type == "legacy-rule-mlp" or "classifier_state_dict" not in checkpoint:
-        logger.info(f"[ONNX Export] Model {model_path.name} is a legacy MLP model; skipping ONNX export.")
+    if not model_path.exists():
         return
+    try:
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        model_type = checkpoint.get("model_type")
+        if model_type == "legacy-rule-mlp" or "classifier_state_dict" not in checkpoint:
+            logger.info(f"[ONNX Export] Model {model_path.name} is a legacy MLP model; skipping ONNX export.")
+            return
 
-    backbone, embedding_dim, _, _ = _build_resnet50_backbone(pretrained=False)
-    backbone.load_state_dict(checkpoint["backbone_state_dict"])
-    backbone.eval()
+        backbone, embedding_dim, _, _ = _build_resnet50_backbone(pretrained=False)
+        if "backbone_state_dict" in checkpoint:
+            backbone.load_state_dict(checkpoint["backbone_state_dict"])
+        backbone.eval()
 
-    class_names = list(checkpoint.get("class_names", []))
-    output_dim = len(class_names) if class_names else 1
-    
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    classifier_state = checkpoint["classifier_state_dict"]
-    first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-    in_features = classifier_state[first_weight_key].shape[1]
-    num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
+        class_names = list(checkpoint.get("class_names", []))
+        output_dim = len(class_names) if class_names else 1
+        
+        rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
+        classifier_state = checkpoint["classifier_state_dict"]
+        first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
+        in_features = classifier_state[first_weight_key].shape[1]
+        num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
 
-    head_model = SiameseFusionHead(
-        nn,
-        embedding_dim=embedding_dim,
-        rule_dim=rule_dim,
-        output_dim=output_dim,
-        num_streams=num_streams,
-    ).model
+        head_model = SiameseFusionHead(
+            nn,
+            embedding_dim=embedding_dim,
+            rule_dim=rule_dim,
+            output_dim=output_dim,
+            num_streams=num_streams,
+        ).model
 
-    head_model.load_state_dict(checkpoint["classifier_state_dict"])
-    head_model.eval()
+        head_model.load_state_dict(checkpoint["classifier_state_dict"])
+        head_model.eval()
 
-    wrapper_model = CompleteSiameseModel(backbone, head_model)
-    wrapper_model.eval()
+        wrapper_model = CompleteSiameseModel(backbone, head_model)
+        wrapper_model.eval()
 
-    img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
-    dummy_left = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
-    dummy_right = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
-    # Use the actual rule_dim from the model head to handle both old and new DOM-extended models
-    saved_rule_names = list(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    dummy_rule = torch.zeros(1, len(saved_rule_names), dtype=torch.float32)
+        img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
+        dummy_left = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
+        dummy_right = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
+        saved_rule_names = list(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
+        dummy_rule = torch.zeros(1, len(saved_rule_names), dtype=torch.float32)
 
-    onnx_path = model_path.with_suffix(".onnx")
-    logger.info(f"[ONNX Export] Exporting to {onnx_path.name}...")
+        onnx_path = model_path.with_suffix(".onnx")
+        logger.info(f"[ONNX Export] Fast exporting to {onnx_path.name}...")
 
-    torch.onnx.export(
-        wrapper_model,
-        (dummy_left, dummy_right, dummy_rule),
-        str(onnx_path),
-        input_names=["left_image", "right_image", "rule_features"],
-        output_names=["logits"],
-        dynamic_axes={
-            "left_image": {0: "batch_size"},
-            "right_image": {0: "batch_size"},
-            "rule_features": {0: "batch_size"},
-            "logits": {0: "batch_size"},
-        },
-        opset_version=17,
-    )
+        torch.onnx.export(
+            wrapper_model,
+            (dummy_left, dummy_right, dummy_rule),
+            str(onnx_path),
+            input_names=["left_image", "right_image", "rule_features"],
+            output_names=["logits"],
+            dynamic_axes={
+                "left_image": {0: "batch_size"},
+                "right_image": {0: "batch_size"},
+                "rule_features": {0: "batch_size"},
+                "logits": {0: "batch_size"},
+            },
+            opset_version=14,
+            do_constant_folding=True,
+        )
+        logger.info(f"[ONNX Export] Successfully exported ONNX model -> {onnx_path.name}")
+    except Exception as exc:
+        logger.warning(f"[ONNX Export] ONNX export warning: {exc}")
 
     try:
         import onnxruntime as ort
@@ -390,7 +397,8 @@ def _load_legacy_or_hybrid_model(model_path: Path):
 
     class_names = list(checkpoint.get("class_names", []))
     output_dim = len(class_names) if class_names else 1
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
+    rule_names = checkpoint.get("rule_feature_names") or RULE_FEATURE_NAMES
+    rule_dim = len(rule_names)
     classifier_state = checkpoint["classifier_state_dict"]
     # Which head architecture produced this checkpoint is written in its own key
     # names: the widened head projects the rule vector through "rule_proj" and

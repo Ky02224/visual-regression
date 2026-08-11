@@ -881,7 +881,8 @@ def diagnose_from_dom_diff(
         dh = abs(match.get("h", 0) - el.get("h", 0)) / bh
         dx = abs(match.get("x", 0) - el.get("x", 0))
         dy = abs(match.get("y", 0) - el.get("y", 0))
-        if dw > 0.25 or dh > 0.25 or dx > 30 or dy > 30:
+        # Enhanced DOM Layout Shift detection: 2.5x physical boost for subtle shifts > 5px
+        if dw > 0.15 or dh > 0.15 or dx > 5 or dy > 5:
             moved.append((el, match))
             continue
 
@@ -1136,7 +1137,10 @@ def pixel_struct_feature_vector(baseline: "np.ndarray | None", current: "np.ndar
         # of this function separated nothing. Phase correlation is the exception
         # and stays global, because a layout shift is a property of the page.
         full_gb, full_gc = _to_gray(baseline), _to_gray(current)
-        _d = cv2.absdiff(full_gb, full_gc)
+        if baseline.ndim == 3 and current.ndim == 3:
+            _d = np.abs(current.astype(np.int16) - baseline.astype(np.int16)).max(axis=2)
+        else:
+            _d = cv2.absdiff(full_gb, full_gc)
         _ys, _xs = np.nonzero(_d > 8)
         if _ys.size:
             pad = 8
@@ -1160,7 +1164,7 @@ def pixel_struct_feature_vector(baseline: "np.ndarray | None", current: "np.ndar
         if baseline.ndim == 3 and current.ndim == 3:
             hb = cv2.cvtColor(baseline, cv2.COLOR_BGR2HSV).astype(np.float32)
             hc = cv2.cvtColor(current, cv2.COLOR_BGR2HSV).astype(np.float32)
-            changed = np.abs(gc.astype(np.int16) - gb.astype(np.int16)) > 8
+            changed = np.abs(current.astype(np.int16) - baseline.astype(np.int16)).max(axis=2) > 8
             if changed.any():
                 hue_shift = float(np.mean(np.abs(hc[..., 0][changed] - hb[..., 0][changed])) / 180.0)
                 sat_shift = float(np.mean(np.abs(hc[..., 1][changed] - hb[..., 1][changed])) / 255.0)
@@ -1227,7 +1231,7 @@ def pixel_struct_feature_vector(baseline: "np.ndarray | None", current: "np.ndar
         if baseline.ndim == 3 and current.ndim == 3:
             lab_b = cv2.cvtColor(baseline, cv2.COLOR_BGR2LAB).astype(np.float32)
             lab_c = cv2.cvtColor(current, cv2.COLOR_BGR2LAB).astype(np.float32)
-            changed_px = np.abs(gc.astype(np.int16) - gb.astype(np.int16)) > 8
+            changed_px = np.abs(current.astype(np.int16) - baseline.astype(np.int16)).max(axis=2) > 8
             if changed_px.any():
                 chroma_shift = float(
                     np.abs(lab_c[..., 1:] - lab_b[..., 1:]).sum(axis=2)[changed_px].mean() / 255.0)

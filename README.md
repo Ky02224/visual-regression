@@ -10,7 +10,7 @@ Every claim below is enforced by CI on each push, not measured once by hand.
 |---|---|
 | Detects 81/81 injected defects, 0/9 false alarms | `Score detection rate` — fails the build on any miss or false alarm |
 | The AI inference path actually executes | `Smoke-test the AI inference path` — asserts `decision_source` is not `pixel-fallback-no-model` |
-| Classification is 95.00% (n=500), 95% CI [93.09%, 96.91%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
+| Classification is 92.60% (n=500), 95% CI [90.31%, 94.89%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
 | Both database backends work | `Verify the Postgres parity tests are not skipping` — fails if those tests silently skip |
 | 1000 Python + 90 frontend + 8 SDK tests pass | `Run Python tests`, `Run frontend unit tests`, `Run Playwright SDK tests` |
 
@@ -28,6 +28,20 @@ and it can only move trials in the classifier's favour. The reasoning, the five
 trials, and why the two figures are not two measurements of the same thing are
 set out in
 [ADR 0006](docs/adr/0006-classification-is-scored-strictly-despite-overlapping-labels.md#amendment-2026-08-06--one-of-the-three-pairs-was-a-labelling-defect).
+
+The model was retrained again on 2026-08-09, moving classification from 95.00%
+to 92.60%. That drop is not noise: four inference paths had been assembling
+the rule vector as `[rule, dom, struct]` and zero-padding the fifteen
+pixel-structural columns instead of computing them, so the model was trained
+on evidence it never received in production. Fixing that, plus retraining
+with both the DOM and image shortcuts partially closed so the classifier
+cannot lean on page-change magnitude alone, is what moved the *DOM-less* path
+from 45.5% to a still-imperfect 45.4% with a materially different, more
+balanced confusion matrix (four previously near-zero classes — text-issue,
+font-change, layout-issue, broken-image — improved substantially; two others
+did not). The 2.4-point drop measured here, with DOM available, is the cost of
+a classifier that is no longer taking a shortcut the with-DOM exam happened to
+reward. The pre-fix report is kept as `reports/live-eval-summary-20260806-stale.json`.
 The earlier run is kept as `reports/live-eval-summary-prelabelfix.json`.
 
 Baselines are captured inside this project's Docker image
@@ -196,7 +210,7 @@ different reasons — see [ADR 0001](docs/adr/0001-detection-and-classification-
 | Capability | Result | Evaluation set |
 |---|---|---|
 | **Defect detection** | **81/81 detected, 0/9 false alarms** | Injected defects on the demo portal, ground truth from the injected mode |
-| **Change classification** | **94.20%**, 95% CI [92.15%, 96.25%], across-seed σ 2.39% | Real third-party pages with injected DOM mutations, n=500 over 10 seeds |
+| **Change classification** | **92.60%**, 95% CI [90.31%, 94.89%] | Real third-party pages with injected DOM mutations, n=500 over 10 seeds |
 | Classification (synthetic) | 87.6% — a *validation* score, calibration fitted on the same set | 12,000 synthetic mutations |
 
 Reproduce the second row with:

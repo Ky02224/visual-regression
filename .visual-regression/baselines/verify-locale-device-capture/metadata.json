@@ -1,0 +1,169 @@
+{
+  "name": "verify-locale-device-capture",
+  "created_at": "2026-08-09T04:00:52.747862+00:00",
+  "updated_at": "2026-08-09T04:00:52.747862+00:00",
+  "capture": {
+    "name": "verify-locale-device-capture",
+    "url": "https://books.toscrape.com/",
+    "browser": "chromium",
+    "device": "iPhone 13",
+    "viewport": [
+      1440,
+      900
+    ],
+    "wait_ms": 1200,
+    "wait_until": "load",
+    "navigation_timeout_ms": 15000,
+    "full_page": true,
+    "disable_animations": true,
+    "locale": "zh-CN",
+    "timezone_id": null,
+    "color_scheme": "light",
+    "extra_headers": {},
+    "hide_selectors": [],
+    "wait_for_selector": null,
+    "mock_routes": {},
+    "login_url": null,
+    "login_username": null,
+    "login_password": null,
+    "username_selector": null,
+    "password_selector": null,
+    "submit_selector": null,
+    "updated_by": "admin",
+    "source": "website-capture"
+  },
+  "system": {
+    "platform": "Windows",
+    "release": "11"
+  },
+  "history": [
+    {
+      "timestamp": "2026-08-09T04:00:52.747862+00:00",
+      "actor": "admin",
+      "source": "website-capture",
+      "url": "https://books.toscrape.com/"
+    }
+  ],
+  "ignore_regions": [
+    {
+      "x": 60,
+      "y": 1842,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 1842,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 2252,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 2252,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 2662,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 2662,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 3072,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 3072,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 3482,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 3482,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 3892,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 3892,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 4302,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 4302,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 4712,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 4712,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 5122,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 5122,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 60,
+      "y": 5532,
+      "width": 128,
+      "height": 30
+    },
+    {
+      "x": 218,
+      "y": 5532,
+      "width": 128,
+      "height": 30
+    }
+  ]
+}

@@ -270,14 +270,15 @@ class SiameseFusionHead:
 
     def __call__(self, left_embedding, right_embedding, rule_features):
         distance = (left_embedding - right_embedding).abs()
-        combined = self._concat(left_embedding, right_embedding, distance, rule_features)
+        product = left_embedding * right_embedding
+        combined = self._concat(left_embedding, right_embedding, distance, product, rule_features)
         return self.model(combined)
 
     @staticmethod
-    def _concat(left_embedding, right_embedding, distance, rule_features):
+    def _concat(left_embedding, right_embedding, distance, product, rule_features):
         import torch
 
-        return torch.cat([left_embedding, right_embedding, distance, rule_features], dim=1)
+        return torch.cat([left_embedding, right_embedding, distance, product, rule_features], dim=1)
 class FocalLoss:
     def __init__(self, torch_module, weight=None, gamma=2.0, ignore_index=-1):
         self.torch = torch_module

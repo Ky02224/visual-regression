@@ -147,6 +147,8 @@ def main() -> int:
                              "font-change from one another; removing it on some "
                              "samples is what forces the rest of the evidence to be "
                              "used. 0 keeps the previous behaviour.")
+    parser.add_argument("--backbone", default="resnet50", choices=["resnet50", "efficientnet_b3"],
+                        help="Vision backbone architecture to extract image embeddings (default: resnet50)")
     parser.add_argument("--min-pairs", type=int, default=50,
                         help="Refuse to train on fewer than this many pairs. Lower it "
                              "only to smoke-test the pipeline end to end.")
@@ -181,15 +183,6 @@ def main() -> int:
     elif not source_ckpt.is_file():
         print("WARNING: no existing checkpoint found — this will train from ImageNet weights.")
 
-    # The deployed model's class order is NOT CONSOLIDATED_CLASS_NAMES: it runs
-    # insignificant-change, missing-element, layout-issue, text-issue, ... while
-    # the constant runs insignificant-change, layout-issue, text-issue,
-    # missing-element, ... — three classes apart. Inference is safe because it
-    # reads the order back from the model file, but train_model() only falls back
-    # to those files when the checkpoint itself carries no "class_names", and
-    # this checkpoint carries none. Without the metadata beside it, training
-    # would resolve to the constant and teach the pretrained head that its
-    # missing-element output means layout-issue — scrambled targets, silently.
     if source_meta.is_file():
         for meta_target in (target_ckpt.with_suffix(".json"), model_path.with_suffix(".json")):
             if not meta_target.exists():
@@ -204,12 +197,13 @@ def main() -> int:
     else:
         print("WARNING: no visual_ai.json beside the checkpoint — cannot verify class order.")
 
-    print(f"Training -> {model_path}")
+    print(f"Training ({args.backbone}) -> {model_path}")
     print("The deployed .visual-regression/models/visual_ai.pt is not touched.")
 
     summary = train_model(
         paths=paths,
         model_path=model_path,
+        backbone_name=args.backbone,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

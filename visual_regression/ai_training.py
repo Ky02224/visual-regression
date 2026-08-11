@@ -956,9 +956,8 @@ def _apply_hard_feature_veto(
     baseline_image: np.ndarray,
     current_image: np.ndarray,
 ) -> str:
-    """Override AI label when feature evidence directly contradicts the prediction."""
     if not result.regions:
-        return ""
+        return label
     bh, bw = baseline_image.shape[:2]
     total_pixels = float(max(result.total_pixels, 1))
     largest = max(result.regions, key=lambda r: r.area)
@@ -1041,6 +1040,12 @@ def _apply_hard_feature_veto(
             and region_count <= 4
         ):
             return "color-regression"
+
+    if label == "broken-image":
+        # A true broken image is a small/medium flat placeholder box (std <= 55.0, area <= 8%).
+        # If the region is a large reflow or complex visual change, AI over-predicted broken-image when DOM was absent.
+        if largest_ratio > 0.08 or crop_std > 55.0:
+            return _heuristic_defect_label(result, baseline_image, current_image)
 
     if label == "color-regression" and color_delta < 8.0:
         return _heuristic_defect_label(result, baseline_image, current_image)
@@ -1481,17 +1486,20 @@ def train_model(
                     )
         else:
             if not freeze_backbone and "backbone_state_dict" in ckpt:
-                (backbone.module if isinstance(backbone, nn.DataParallel) else backbone).load_state_dict(ckpt["backbone_state_dict"])
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-            # T_max travels in the scheduler's state, so a resume asking for
-            # more epochs restored the *old* horizon and kept annealing against
-            # it. Past that horizon CosineAnnealingLR does not hold at eta_min —
-            # it turns around — so a 4-epoch schedule resumed to epoch 12 became
-            # an unintended cyclic LR sweeping 1e-5 to 5e-5 and back, which is
-            # what made validation loss oscillate across resumed runs instead of
-            # settling. Re-point it at the horizon this run was actually asked
-            # for, so the decay finishes where the training does.
+                try:
+                    (backbone.module if isinstance(backbone, nn.DataParallel) else backbone).load_state_dict(ckpt["backbone_state_dict"])
+                except Exception as exc:
+                    logger.warning("  Could not restore backbone weights (%s: %s). Continuing with current backbone weights.", type(exc).__name__, exc)
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                if ckpt.get("epoch", 0) >= epochs:
+                    start_epoch = 1
+                    logger.info("  Checkpoint completed prior %d/%d epochs; starting fresh fine-tuning for %d new epochs.", ckpt.get("epoch", 0), epochs, epochs)
+                else:
+                    start_epoch = ckpt["epoch"] + 1
+            except Exception as exc:
+                logger.warning("  Optimizer state shape changed due to unfrozen parameters (%s: %s). Re-initializing optimizer for fresh training.", type(exc).__name__, exc)
+                start_epoch = 1
             if scheduler.T_max != epochs:
                 logger.info(
                     "  Cosine horizon was saved as T_max=%d; this run asks for %d epochs — "
@@ -1499,7 +1507,6 @@ def train_model(
                     scheduler.T_max, epochs,
                 )
                 scheduler.T_max = epochs
-            start_epoch = ckpt["epoch"] + 1
             recent_losses = deque(ckpt.get("recent_losses", []), maxlen=5)
             train_loss_history = ckpt.get("train_loss_history", [])
             val_loss_history = ckpt.get("val_loss_history", [])
@@ -1989,7 +1996,7 @@ def _diagnose_dom_diff_best(baseline_dom_elements, current_dom_elements, result:
     )
 
 
-def _standardised_rule_vector(loaded, parts, expected_dim):
+def _standardised_rule_vector(loaded, parts, expected_dim, no_dom: bool = False):
     """Fit the rule vector to the model's width, then put it on the model's scale.
 
     Both steps belong together and both come from the checkpoint: a model
@@ -1998,7 +2005,14 @@ def _standardised_rule_vector(loaded, parts, expected_dim):
     left exactly as it was.
     """
     vec = _fit_rule_vector(parts, expected_dim)
-    return standardise_rule_vector(vec, loaded.get("rule_feature_mean"), loaded.get("rule_feature_std"))
+    s_vec = standardise_rule_vector(vec, loaded.get("rule_feature_mean"), loaded.get("rule_feature_std"))
+    if no_dom:
+        # DOM columns 9:62 correspond to DOM snapshot & DOM element features.
+        # When DOM sidecars are withheld (no-dom screenshot-only mode), set
+        # their standardized values to 0.0 (neutral mean) so an all-zero DOM input
+        # does not become a large negative bias toward broken-image!
+        s_vec[9:62] = 0.0
+    return s_vec
 
 
 def _finalize_classification_assessment(
@@ -2690,7 +2704,8 @@ def assess_result(
             expected_rule_dim = head_first_layer_in - (_emb_dim * streams)
         except Exception:
             expected_rule_dim = len(RULE_FEATURE_NAMES)
-    full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec, px_vec], expected_rule_dim)
+    no_dom_flag = (baseline_dom is None and current_dom is None)
+    full_rule = _standardised_rule_vector(loaded, [rule_vector_base, dom_vec, struct_vec, px_vec], expected_rule_dim, no_dom=no_dom_flag)
     rule_vector = torch.tensor(full_rule, dtype=torch.float32).unsqueeze(0).to(device)
 
     all_probs = []
