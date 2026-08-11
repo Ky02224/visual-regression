@@ -38,6 +38,18 @@ else {
     & $venvPython -m playwright install
 }
 
+# serve-dashboard falls back to building the frontend itself when dist/ is
+# missing, but that fallback needs node_modules already installed -- on a
+# machine that has never run npm here, it fails outright instead (confirmed
+# by extracting a clean copy of this repo and starting the server: backend
+# came up, but / returned 404 because dashboard_frontend/dist was never
+# produced). Doing it here means the first `serve-dashboard` run just works.
+Write-Host "Installing frontend dependencies and building dashboard_frontend..."
+Push-Location (Join-Path $projectRoot "dashboard_frontend")
+npm install
+npm run build
+Pop-Location
+
 Write-Host ""
 Write-Host "Setup completed."
 Write-Host "Activate the environment with:"
