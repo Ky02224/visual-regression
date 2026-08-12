@@ -32,7 +32,6 @@ storage.db
 # Development & IDE files
 .vscode/
 .idea/
-.claude/
 .tmp_*/
 *.log
 

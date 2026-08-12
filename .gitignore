@@ -80,8 +80,5 @@ storage.db-wal
 .idea/
 # Presentation material lives outside the repo; keep any local copy untracked.
 poster/
-# Per-machine Claude Code overrides — permissions granted for a one-off cleanup,
-# a local model choice. The committed .claude/ files (launch.json, and
-# settings.json if one is added) stay shared; this one is personal by design and
-# was being tracked, so every local permission change showed up as a repo diff.
-.claude/settings.local.json
+# Per-machine editor/tooling state; nothing here is part of the project.
+.claude/
