@@ -267,12 +267,26 @@ class BaselineManager:
             "S3StorageBackend" if _is_s3 else "LocalStorageBackend",
         )
 
+    # A baseline name becomes a directory name, and every artifact written for
+    # it extends that path further -- versions/<timestamp>/baseline.webp adds
+    # ~40 characters on its own. Windows rejects the whole path over 260
+    # characters by default, and the failure surfaces as OSError(22, 'Invalid
+    # argument') from deep inside a capture, long after the name was accepted.
+    # 120 leaves room for the longest suffix the manager appends while still
+    # being far more than a descriptive name needs.
+    MAX_NAME_LENGTH = 120
+
     @staticmethod
     def normalize_name(name: str) -> str:
         safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", name.strip())
         safe = safe.strip("_.")
         if not safe:
             raise ValueError("Invalid baseline name. Use letters, numbers, dot, dash, underscore.")
+        if len(safe) > BaselineManager.MAX_NAME_LENGTH:
+            raise ValueError(
+                f"Baseline name is too long ({len(safe)} characters after normalisation; "
+                f"the limit is {BaselineManager.MAX_NAME_LENGTH})."
+            )
         return safe
 
     def baseline_dir(self, name: str) -> Path:
