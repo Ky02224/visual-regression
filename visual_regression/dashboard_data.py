@@ -53,6 +53,40 @@ class _DashboardCache:
                 cls._caches.clear()
 
 
+def _baseline_image_href(
+    paths: WorkspacePaths,
+    baseline_details: Dict[str, Any] | None,
+    run_id: str,
+) -> str | None:
+    """Where the run detail view should load its "before" image from.
+
+    Prefers the copy inside the run's own directory. Every capture writes
+    baseline.png there, and that file is the image the comparison was actually
+    made against - the mismatch percentage, the diff regions and the AI label
+    all describe *it*.
+
+    The baseline record used to be the only source, which made a historical run
+    unviewable the moment its baseline was deleted or renamed: baseline_details
+    came back None, the href with it, and the detail view showed "Screenshot
+    unavailable" while a readable baseline.png sat unused in the run directory.
+    It was also quietly wrong in the ordinary case, since a baseline that has
+    since been updated served its *current* image beside a diff computed
+    against an older one.
+
+    The existence check is what makes the preference safe: handing back a URL
+    for a file that is not there turns "no image" into a broken one, which is
+    worse than the fallback it replaces.
+    """
+    if run_id:
+        run_local = paths.runs_dir / run_id / "baseline.png"
+        try:
+            if run_local.is_file():
+                return f"/artifacts/{run_id}/baseline.png"
+        except OSError:
+            pass
+    return baseline_details.get("current_image_href") if baseline_details else None
+
+
 def _sanitize_ai_label(label: str | None) -> str | None:
     """Drop deprecated / empty labels so UI shows no ChangeTypeBadge."""
     if not label:
@@ -240,7 +274,7 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
                     "device": row.get("device"),
                     "url": row.get("url"),
                     "baseline_name": baseline_name,
-                    "baseline_image_href": baseline_details.get("current_image_href") if baseline_details else None,
+                    "baseline_image_href": _baseline_image_href(paths, baseline_details, run_id),
                     "suite_name": row.get("suite_name"),
                     "build_id": row.get("build_id"),
                     "report_href": row.get("report_href") or f"/artifacts/{run_id}/report.html",
@@ -306,7 +340,7 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
                 "device": capture.get("device"),
                 "url": capture.get("url"),
                 "baseline_name": baseline_name,
-                "baseline_image_href": baseline_details.get("current_image_href") if baseline_details else None,
+                "baseline_image_href": _baseline_image_href(paths, baseline_details, run_dir.name),
                 "suite_name": payload.get("suite_name"),
                 "build_id": payload.get("build_id"),
                 "report_href": f"/artifacts/{run_dir.name}/report.html",

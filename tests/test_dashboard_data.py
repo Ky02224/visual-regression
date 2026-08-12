@@ -75,3 +75,60 @@ def test_build_dashboard_snapshot(tmp_path: Path):
     assert snapshot["baselines"][0]["version_count"] == 1
     assert snapshot["baselines"][0]["device"] == "iPhone 13"
     assert snapshot["recent_summaries"][0]["executed"] == 4
+
+
+def _run_with_deleted_baseline(paths: WorkspacePaths, run_id: str, *, write_baseline_png: bool):
+    """A completed run whose baseline record no longer exists.
+
+    Deleting or renaming a baseline is ordinary housekeeping, and the runs it
+    was compared against stay on disk afterwards.
+    """
+    run_dir = paths.runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if write_baseline_png:
+        (run_dir / "baseline.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (run_dir / "result.json").write_text(
+        json.dumps({
+            "baseline_name": "a baseline that has since been deleted",
+            "status": "FAIL",
+            "result": {"mismatch_pct": 10.22, "regions": []},
+            "capture": {"url": "http://example.test"},
+        }),
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_a_run_shows_its_own_baseline_after_the_baseline_is_deleted(tmp_path: Path):
+    """The detail view used to read the href off the baseline record alone.
+
+    With the record gone it produced None, and the page rendered "Screenshot
+    unavailable" over a readable baseline.png sitting in the run directory —
+    the very image the run's mismatch percentage was computed against.
+    """
+    paths = WorkspacePaths(root=tmp_path / ".visual-regression")
+    paths.ensure()
+    run_id = "20260729-024143-204562_sidecar_chromium_desktop_default"
+    _run_with_deleted_baseline(paths, run_id, write_baseline_png=True)
+
+    snapshot = build_dashboard_snapshot(tmp_path, paths)
+    run = next(r for r in snapshot["runs"] if r["id"] == run_id)
+
+    assert run["baseline_image_href"] == f"/artifacts/{run_id}/baseline.png"
+
+
+def test_no_href_is_offered_when_the_run_kept_no_baseline_copy(tmp_path: Path):
+    """Runs written before per-run baseline copies have nothing to serve.
+
+    Returning the path anyway would turn "no image" into a broken one, which
+    is the worse of the two.
+    """
+    paths = WorkspacePaths(root=tmp_path / ".visual-regression")
+    paths.ensure()
+    run_id = "20260101-000000-000000_ancient_chromium_desktop_default"
+    _run_with_deleted_baseline(paths, run_id, write_baseline_png=False)
+
+    snapshot = build_dashboard_snapshot(tmp_path, paths)
+    run = next(r for r in snapshot["runs"] if r["id"] == run_id)
+
+    assert run["baseline_image_href"] is None
