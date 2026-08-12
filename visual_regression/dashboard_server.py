@@ -1517,6 +1517,20 @@ def post_actions_update_baseline(payload: dict, paths=Depends(get_paths_dep), pr
     _DashboardCache.invalidate(paths)
     return _send_cli_result_helper(result)
 
+def _normalise_device(device: Any) -> Any:
+    """Map the UI's "Desktop" to no device emulation.
+
+    Playwright's registry lists phones and tablets; a plain desktop viewport is
+    the absence of an entry, not an entry called "Desktop". The dashboard's
+    Device select offers "Desktop" as its first and default option, so the name
+    has to be translated rather than passed through, or capture raises
+    ValueError("Unknown device 'Desktop'").
+    """
+    if device is None:
+        return device
+    return "" if str(device).strip().lower() == "desktop" else device
+
+
 def _dispatch_compare_matrix(payload: dict, paths, project_root, port) -> Dict[str, Any]:
     """Build compare-matrix CLI args from a multi-browser/device/locale payload and dispatch it."""
     browsers = payload.get("browsers") or []
@@ -1618,7 +1632,16 @@ def post_actions_compare(payload: dict, paths=Depends(get_paths_dep), project_ro
     if browsers:
         effective_payload["browser"] = browsers[0]
     if devices:
-        effective_payload["device"] = "" if str(devices[0]).strip().lower() == "desktop" else devices[0]
+        effective_payload["device"] = _normalise_device(devices[0])
+    elif "device" in effective_payload:
+        # Same normalisation for the single-capture form, which posts `device`
+        # rather than `devices`. It only ran on the matrix branch before, so
+        # the Actions page's default -- the Device select opens on "Desktop" --
+        # reached Playwright verbatim and every comparison failed with
+        # "Unknown device 'Desktop'" until the user picked a phone. Creating a
+        # baseline worked, because that path already mapped the name to no
+        # device, so the two forms disagreed about the same value.
+        effective_payload["device"] = _normalise_device(effective_payload["device"])
     if locales:
         effective_payload["locale"] = locales[0]
     name = str(effective_payload.get("name", "")).strip()

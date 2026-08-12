@@ -310,3 +310,44 @@ class TestBaseUrl:
         monkeypatch.setattr("visual_regression.api.urls._STARTUP_BASE_URL", {})
         set_startup_base_url("https://proxy.example.com")
         assert _get_base_url_helper(9999) == "https://proxy.example.com"
+
+
+class TestNormaliseDevice:
+    """The Device select's default must not be rejected by capture.
+
+    Playwright's device registry holds phones and tablets; a plain desktop
+    viewport is the absence of an entry, not an entry named "Desktop". The
+    dashboard offers "Desktop" as the Device select's first and default option,
+    so the compare endpoint has to translate it.
+
+    It did, but only on the matrix branch, which reads `devices` (plural). The
+    single-capture form posts `device`, missed the normalisation, and every
+    comparison a user ran without first changing the dropdown failed with
+    ValueError("Unknown device 'Desktop'"). Creating a baseline worked, because
+    that path already mapped the name to no device -- so the two forms
+    disagreed about the same value and the default path was the broken one.
+    """
+
+    def test_the_ui_default_becomes_no_device_emulation(self):
+        from visual_regression.dashboard_server import _normalise_device
+
+        assert _normalise_device("Desktop") == ""
+
+    @pytest.mark.parametrize("raw", ["desktop", "DESKTOP", "  Desktop  "])
+    def test_case_and_padding_do_not_matter(self, raw):
+        from visual_regression.dashboard_server import _normalise_device
+
+        assert _normalise_device(raw) == ""
+
+    @pytest.mark.parametrize("device", ["iPhone 13", "Pixel 5", "iPad Mini"])
+    def test_real_playwright_devices_pass_through(self, device):
+        """These name actual registry entries and must reach capture intact."""
+        from visual_regression.dashboard_server import _normalise_device
+
+        assert _normalise_device(device) == device
+
+    def test_none_is_left_alone(self):
+        """A payload that omits the field must not gain an empty string."""
+        from visual_regression.dashboard_server import _normalise_device
+
+        assert _normalise_device(None) is None
