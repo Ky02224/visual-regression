@@ -259,7 +259,7 @@ def quantize_onnx_model(
     """Run static INT8 quantization on the exported ONNX model."""
     try:
         import onnx
-        from onnxruntime.quantization import quantize_static, QuantType, QuantFormat, CalibrationDataReader
+        from onnxruntime.quantization import quantize_static, QuantType, QuantFormat, CalibrationDataReader, CalibrationMethod
         from .ai_features import standardise_rule_vector
 
         class ONNXCalibrationDataReader(CalibrationDataReader):
@@ -370,7 +370,7 @@ def quantize_onnx_model(
         rule_dim = len(checkpoint.get("rule_feature_names", FULL_FEATURE_NAMES))
         rule_mean = rule_feature_mean if rule_feature_mean is not None else checkpoint.get("rule_feature_mean")
         rule_std = rule_feature_std if rule_feature_std is not None else checkpoint.get("rule_feature_std")
-        reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size, rule_dim, rule_mean, rule_std)
+        reader = ONNXCalibrationDataReader(calibration_samples, img_size, rule_dim, rule_mean, rule_std)
 
         logger.info("[ONNX Quantization] Starting static INT8 quantization...")
         # quant_format=0 (QuantFormat.QOperator) fuses quantization directly
@@ -389,9 +389,10 @@ def quantize_onnx_model(
             model_output=str(output_path),
             calibration_data_reader=reader,
             quant_format=QuantFormat.QDQ,
-            activation_type=QuantType.QInt8,
+            activation_type=QuantType.QUInt8,
             weight_type=QuantType.QInt8,
             per_channel=True,
+            calibrate_method=CalibrationMethod.Percentile,
         )
         logger.info(f"[ONNX Quantization] Saved quantized model to {output_path.name}")
 
