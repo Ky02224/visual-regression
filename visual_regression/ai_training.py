@@ -388,30 +388,45 @@ def _load_run_pair_samples(
         if decision_status == "approved":
             label_name = BENIGN_LABEL_NAME
         elif decision_status == "rejected":
-            label_name = str(payload.get("ai_assessment", {}).get("label") or "")
-            if not _is_known_defect_label(label_name):
-                try:
-                    from .models import CompareResult
-                    res_dict = payload.get("result", {})
-                    comp_res = CompareResult(
-                        baseline_size=res_dict.get("baseline_size", [baseline_image.shape[1], baseline_image.shape[0]]),
-                        current_size=res_dict.get("current_size", [current_image.shape[1], current_image.shape[0]]),
-                        diff_pixels=res_dict.get("diff_pixels", 0),
-                        total_pixels=res_dict.get("total_pixels", 1),
-                        mismatch_pct=res_dict.get("mismatch_pct", 0.0),
-                        ssim_score=res_dict.get("ssim_score"),
-                        regions=[],
-                    )
-                    label_name = _heuristic_defect_label(comp_res, baseline_image, current_image) or DEFECT_LABELS[0]
-                except Exception:
-                    label_name = DEFECT_LABELS[0]
+            # A reviewer confirmed this is a real defect but the review UI has
+            # no category picker, so most rejections never record which one.
+            # The geometry-only heuristic below is tried first specifically
+            # because it does not depend on this model: falling back to
+            # ai_assessment.label here would train the model partly on its
+            # own prior predictions for the exact runs a human only half-
+            # labelled, reinforcing whatever bias it already has instead of
+            # correcting it.
+            label_name = ""
+            try:
+                from .models import CompareResult
+                res_dict = payload.get("result", {})
+                comp_res = CompareResult(
+                    baseline_size=res_dict.get("baseline_size", [baseline_image.shape[1], baseline_image.shape[0]]),
+                    current_size=res_dict.get("current_size", [current_image.shape[1], current_image.shape[0]]),
+                    diff_pixels=res_dict.get("diff_pixels", 0),
+                    total_pixels=res_dict.get("total_pixels", 1),
+                    mismatch_pct=res_dict.get("mismatch_pct", 0.0),
+                    ssim_score=res_dict.get("ssim_score"),
+                    regions=[],
+                )
+                label_name = _heuristic_defect_label(comp_res, baseline_image, current_image)
+            except Exception:
+                label_name = ""
+            if not label_name:
+                ai_label = str(payload.get("ai_assessment", {}).get("label") or "")
+                label_name = ai_label if _is_known_defect_label(ai_label) else DEFECT_LABELS[0]
+        elif status == "PASS":
+            # PASS is a deterministic pixel-threshold outcome, not an AI
+            # opinion, so it carries no self-training risk even without an
+            # explicit human decision.
+            label_name = BENIGN_LABEL_NAME
         else:
-            if status == "PASS":
-                label_name = BENIGN_LABEL_NAME
-            else:
-                label_name = str(payload.get("ai_assessment", {}).get("label") or "")
-                if not _is_known_defect_label(label_name):
-                    continue
+            # FAIL with no approve/reject decision: no human has confirmed
+            # anything about this run. Training on ai_assessment.label here
+            # would mean the model's own unreviewed guess becomes its own
+            # ground truth for runs nobody has verified — a stronger, less
+            # defensible version of the same self-training loop as above.
+            continue
 
         pair = _build_pair_sample(
             baseline=baseline_image,
