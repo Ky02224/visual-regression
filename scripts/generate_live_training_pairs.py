@@ -69,12 +69,15 @@ from live_dom_mutation_eval import CATEGORIES, run_trial  # noqa: E402
 #     say from the pixels. Site accuracy measured at 36.8% (7/19) purely from
 #     this, versus 90-100% on the plain static sites sampled the same run.
 #   - gimp.org (text-issue mutation), krita.org (broken-image mutation),
-#     books.toscrape.com (broken-image mutation): the specific mutation
-#     produces a real DOM change but 0.0000% pixel difference on these pages
-#     every time -- some interaction between the picked element and the
-#     page's own CSS makes the edit invisible. Not reproducible in isolation
-#     (20 attempts, 2026-08-13), so left as a labelled site+category
-#     combination to avoid rather than a code fix.
+#     books.toscrape.com (broken-image mutation), 11ty.dev (broken-image
+#     mutation): the specific mutation produces a real DOM change but
+#     0.0000% pixel difference on these pages every time -- some interaction
+#     between the picked element and the page's own CSS makes the edit
+#     invisible. Not reproducible in isolation (20 attempts, 2026-08-13), so
+#     left as a labelled site+category combination to avoid rather than a
+#     code fix. 11ty.dev's other categories are fine (its eval batch scored
+#     100% on missing-element/font-change/text-issue, 2026-08-15) -- this is
+#     specific to one category on one page, the same as the other three.
 #   - freepascal.org, inkscape.org, calibre-ebook.com, olive.foundation:
 #     frequent Page.goto timeouts (25s) during trials -- flaky enough that a
 #     meaningful fraction of any batch drawing from them silently loses
