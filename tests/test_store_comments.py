@@ -71,3 +71,35 @@ class TestGetComment:
         store.add_comment("c2", "run-1", 0.0, 0.0, "c@d.com", "second")
         assert store.get_comment("c2")["content"] == "second"
         assert store.get_comment("c1")["content"] == "first"
+
+
+class TestCountCommentsByRun:
+    """Backs the comment badge in the run lists.
+
+    Before it existed the dashboard had no idea a run had been commented on,
+    so a pinned question was only ever seen by someone who opened that exact
+    report.
+    """
+
+    def test_counts_per_run(self, store):
+        store.upsert_run_index({
+            "run_id": "run-2", "case_name": "home", "baseline_name": "home",
+            "status": "FAIL", "created_at": 2,
+        })
+        store.add_comment("c1", "run-1", 0.0, 0.0, "a@b.com", "one")
+        store.add_comment("c2", "run-1", 0.0, 0.0, "a@b.com", "two")
+        store.add_comment("c3", "run-2", 0.0, 0.0, "a@b.com", "three")
+
+        assert store.count_comments_by_run() == {"run-1": 2, "run-2": 1}
+
+    def test_runs_without_comments_are_absent_rather_than_zero(self, store):
+        """Callers read it with .get(run_id, 0); listing every run would make
+        the query grow with the run table instead of the comment table."""
+        assert store.count_comments_by_run() == {}
+
+    def test_reflects_a_deletion(self, store):
+        store.add_comment("c1", "run-1", 0.0, 0.0, "a@b.com", "one")
+        store.add_comment("c2", "run-1", 0.0, 0.0, "a@b.com", "two")
+        store.delete_comment("c1")
+
+        assert store.count_comments_by_run() == {"run-1": 1}

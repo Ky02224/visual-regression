@@ -88,8 +88,42 @@ def _is_discord_url(url: str) -> bool:
     return "discord.com/api/webhooks" in url or "discordapp.com/api/webhooks" in url
 
 
+def _comment_summary(payload: Dict[str, Any]) -> tuple[str, str, str]:
+    """(title, body, link) for a comment.added payload."""
+    author = payload.get("author") or "someone"
+    case_name = payload.get("case_name") or payload.get("run_id") or "a run"
+    content = (payload.get("content") or "").strip()
+    if len(content) > 300:
+        content = content[:297] + "..."
+    return (
+        "💬 New review comment",
+        f"**{author}** commented on **{case_name}**:\n> {content}",
+        payload.get("dashboard_link", ""),
+    )
+
+
 def _to_teams_adaptive_card(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Convert regression payload to Teams Adaptive Card format."""
+    if payload.get("event") == "comment.added":
+        title, text, link = _comment_summary(payload)
+        card: Dict[str, Any] = {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "body": [
+                {"type": "TextBlock", "size": "Large", "weight": "Bolder", "text": title},
+                {"type": "TextBlock", "text": text, "wrap": True},
+            ],
+        }
+        if link:
+            card["actions"] = [{"type": "Action.OpenUrl", "title": "View in Dashboard", "url": link}]
+        return {
+            "type": "message",
+            "attachments": [
+                {"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}
+            ],
+        }
+
     case_name = payload.get("case_name", "Unknown")
     mismatch = payload.get("mismatch_pct", 0)
     run_id = payload.get("run_id", "")
@@ -161,6 +195,12 @@ def _to_slack_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     event = payload.get("event", "regression.detected")
     if event == "test_ping":
         return {"text": f"🔔 *Visual Regression Workbench Test Webhook*: {payload.get('message', 'Ping!')}"}
+    if event == "comment.added":
+        title, text, link = _comment_summary(payload)
+        message = f"*{title}*\n{text}"
+        if link:
+            message += f"\n<{link}|View in Dashboard>"
+        return {"text": message}
 
     case_name = payload.get("case_name", "Unknown")
     mismatch = payload.get("mismatch_pct", 0)
@@ -193,6 +233,12 @@ def _to_discord_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
             ]
         }
+    if event == "comment.added":
+        title, text, link = _comment_summary(payload)
+        embed: Dict[str, Any] = {"title": title, "description": text, "color": 3447003}
+        if link:
+            embed["url"] = link
+        return {"embeds": [embed]}
 
     case_name = payload.get("case_name", "Unknown")
     mismatch = payload.get("mismatch_pct", 0)
@@ -290,6 +336,30 @@ def trigger_webhook_detailed(url: str, payload: Dict[str, Any]) -> Dict[str, Any
 
 def trigger_webhook(url: str, payload: Dict[str, Any]) -> bool:
     return bool(trigger_webhook_detailed(url, payload).get("ok"))
+
+def format_comment_added_payload(
+    run_id: str,
+    case_name: str,
+    author: str,
+    content: str,
+    dashboard_url: str,
+) -> Dict[str, Any]:
+    """Payload for a reviewer leaving a comment on a run.
+
+    A pinned comment is a question aimed at someone; before this it lived only
+    inside the run's report page, where the person being asked had no reason to
+    look.
+    """
+    return {
+        "event": "comment.added",
+        "run_id": run_id,
+        "case_name": case_name,
+        "author": author,
+        "content": content,
+        "dashboard_link": f"{dashboard_url}/report/{run_id}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
 
 def format_regression_detected_payload(
     run_id: str,

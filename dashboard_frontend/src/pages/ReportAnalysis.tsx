@@ -139,13 +139,17 @@ export function ReportAnalysis() {
 
   // AI suggestions state and callbacks
   const [aiSuggestions, setAiSuggestions] = React.useState<any[]>([]);
+  const [skippedRegions, setSkippedRegions] = React.useState<any[]>([]);
+  const [selectedSuggestions, setSelectedSuggestions] = React.useState<number[]>([]);
 
   const fetchSuggestions = React.useCallback(async () => {
     if (!data?.baseline_name || !id) return;
     try {
-      const payload = await api.get<{ ok: boolean; suggestions?: any[] }>(`/api/ai-suggestions?baseline_name=${data.baseline_name}&run_id=${id}`);
+      const payload = await api.get<{ ok: boolean; suggestions?: any[]; skipped?: any[] }>(`/api/ai-suggestions?baseline_name=${data.baseline_name}&run_id=${id}`);
       if (payload.ok) {
         setAiSuggestions(payload.suggestions || []);
+        setSkippedRegions(payload.skipped || []);
+        setSelectedSuggestions([]);
       }
     } catch (err) {
       console.error("Failed to fetch suggestions", err);
@@ -158,26 +162,47 @@ export function ReportAnalysis() {
     }
   }, [data, fetchSuggestions]);
 
+  const toggleSuggestion = (idx: number) => {
+    setSelectedSuggestions(prev => prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]);
+  };
+
+  // Applies only what the reviewer ticked. An ignore region silences that area
+  // for every future run of this baseline, so nothing gets masked without
+  // someone having looked at the box it covers.
   const applyAiSuggestions = () => {
-    const formatted = aiSuggestions.map(s => ({
-      x: s.x,
-      y: s.y,
-      width: s.width,
-      height: s.height
-    }));
-    
+    const chosen = selectedSuggestions.map(i => aiSuggestions[i]).filter(Boolean);
+    if (chosen.length === 0) return;
+
     const merged = [...localIgnoreRegions];
-    formatted.forEach(f => {
+    chosen.forEach(s => {
+      const f = { x: s.x, y: s.y, width: s.width, height: s.height };
       const exists = merged.some(m => m.x === f.x && m.y === f.y && m.width === f.width && m.height === f.height);
       if (!exists) {
         merged.push(f);
       }
     });
-    
+
     setLocalIgnoreRegions(merged);
     saveIgnoreRegionsOnBackend(merged);
-    setAiSuggestions([]);
+    setAiSuggestions(prev => prev.filter((_, i) => !selectedSuggestions.includes(i)));
+    setSelectedSuggestions([]);
   };
+
+  // Pins only exist in the overlay view, so reaching a comment from anywhere
+  // else means switching there first, then scrolling the pin into the pane —
+  // an image zoomed past the viewport can leave a pin well off screen.
+  const jumpToFirstComment = React.useCallback(() => {
+    const first = comments[0];
+    if (!first) return;
+    setViewMode('overlay');
+    setMainView('compare');
+    setActiveCommentId(first.id);
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-comment-pin="${first.id}"]`)
+        ?.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+    });
+  }, [comments]);
 
   const handleImageClickForComment = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -391,10 +416,6 @@ export function ReportAnalysis() {
     return Array.from(new Set(relatedRuns.map((r: any) => r.browser).filter(Boolean)));
   }, [relatedRuns]);
 
-  const uniqueDevices = React.useMemo(() => {
-    return Array.from(new Set(relatedRuns.map((r: any) => r.device || 'desktop').filter(Boolean)));
-  }, [relatedRuns]);
-
   const submitReview = React.useCallback(async (decision: 'approved' | 'rejected') => {
     if (!id) return;
     setIsExecuting(true);
@@ -544,17 +565,53 @@ export function ReportAnalysis() {
               {aiSuggestions.length > 0 && can('manage_baselines') && (
                 <div className="p-3 bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/30 rounded-lg space-y-2">
                   <p className="text-[10px] font-bold text-indigo-700 dark:text-indigo-400 flex items-center gap-1">
-                    ✨ AI Suggestion ({aiSuggestions.length})
+                    ✨ Dynamic content detected ({aiSuggestions.length})
                   </p>
                   <p className="text-[10px] text-indigo-600 dark:text-indigo-500 leading-normal font-normal">
-                    AI detected repeating dynamic changes in {aiSuggestions[0].frequency}/{aiSuggestions[0].total_runs_analyzed} past runs.
+                    These areas changed in nearly every recent run <em>and</em> showed different content each time — ads, clocks, carousels. Tick the ones to mask.
                   </p>
+                  <ul className="space-y-1.5">
+                    {aiSuggestions.map((s, idx) => (
+                      <li key={idx}>
+                        <label className="flex gap-2 items-start cursor-pointer bg-white/70 dark:bg-zinc-900/40 rounded px-2 py-1.5">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 accent-indigo-600 cursor-pointer"
+                            checked={selectedSuggestions.includes(idx)}
+                            onChange={() => toggleSuggestion(idx)}
+                          />
+                          <span className="min-w-0">
+                            <span className="block text-[10px] font-mono text-[var(--on-surface)]">
+                              [{s.x}, {s.y}] · {s.width}×{s.height}px
+                            </span>
+                            <span className="block text-[10px] text-indigo-600 dark:text-indigo-500 font-normal leading-normal">
+                              Changed in {s.frequency}/{s.total_runs_analyzed} runs, different content each time
+                              {typeof s.variability === 'number' && ` (variability ${(s.variability * 100).toFixed(1)}%)`}
+                            </span>
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
                   <button
                     onClick={applyAiSuggestions}
-                    className="w-full py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-bold cursor-pointer transition-colors"
+                    disabled={selectedSuggestions.length === 0}
+                    className="w-full py-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded text-[10px] font-bold cursor-pointer transition-colors"
                   >
-                    Auto-Apply AI Ignore Regions
+                    Apply {selectedSuggestions.length > 0 ? `${selectedSuggestions.length} selected` : 'selected'} region{selectedSuggestions.length === 1 ? '' : 's'}
                   </button>
+                </div>
+              )}
+              {skippedRegions.length > 0 && can('manage_baselines') && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/30 rounded-lg space-y-1.5">
+                  <p className="text-[10px] font-bold text-amber-700 dark:text-amber-400">
+                    ⚠ Repeats, but not masked ({skippedRegions.length})
+                  </p>
+                  {skippedRegions.map((s, idx) => (
+                    <p key={idx} className="text-[10px] text-amber-700 dark:text-amber-500 font-normal leading-normal">
+                      <span className="font-mono">[{s.x}, {s.y}] · {s.width}×{s.height}px</span> — {s.detail}
+                    </p>
+                  ))}
                 </div>
               )}
               {localIgnoreRegions.length > 0 ? (
@@ -796,7 +853,9 @@ export function ReportAnalysis() {
           </div>
         </div>
         
-        {relatedRuns.length > 1 && (
+        {/* Device is chosen when the capture is configured (Actions / Baselines),
+            so a viewport switcher here only duplicated it. */}
+        {relatedRuns.length > 1 && uniqueBrowsers.length > 1 && (
           <div className="shrink-0 flex items-center gap-4 px-4 py-2 bg-stone-50 dark:bg-zinc-900 border-b border-[var(--outline)] text-xs flex-wrap">
             {uniqueBrowsers.length > 1 && (
               <div className="flex items-center gap-1.5">
@@ -820,28 +879,6 @@ export function ReportAnalysis() {
                 </div>
               </div>
             )}
-            {uniqueDevices.length > 1 && (
-              <div className="flex items-center gap-1.5">
-                <span className="font-semibold text-stone-400">Viewport:</span>
-                <div className="flex rounded-md overflow-hidden border border-[var(--outline)] bg-[var(--surface)]">
-                  {uniqueDevices.map((d: any) => (
-                    <button
-                      key={d}
-                      onClick={() => {
-                        const target = relatedRuns.find((r: any) => r.browser === data.browser && (r.device || 'desktop') === d);
-                        if (target) navigate(`/report/${target.id}`, { state: navState });
-                      }}
-                      className={cn(
-                        "px-2.5 py-1 font-medium border-r last:border-r-0 border-[var(--outline)] hover:bg-stone-100 dark:hover:bg-zinc-800",
-                        (data.device || 'desktop') === d ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400 font-bold" : "text-stone-500"
-                      )}
-                    >
-                      {d}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -854,6 +891,8 @@ export function ReportAnalysis() {
             hasDiff={hasBinaryDiff}
             zoom={zoom}
             onZoomChange={setZoom}
+            commentCount={comments.length}
+            onJumpToComments={jumpToFirstComment}
           />
         )}
         {actionError && (
@@ -947,9 +986,19 @@ export function ReportAnalysis() {
                   <span className="text-[10px] text-indigo-500 font-mono">D to toggle diff · Click image to {isCommenting ? "drop comment pin" : "toggle diff"}</span>
                 </div>
               </div>
-              <div className="flex-1 min-h-0 relative flex items-center justify-center p-4 bg-stone-100 dark:bg-zinc-900/50 overflow-auto">
-                <div 
-                  className={cn("relative inline-block max-w-full", isCommenting ? "cursor-chat" : "cursor-pointer")}
+              <div className="flex-1 min-h-0 relative flex p-4 bg-stone-100 dark:bg-zinc-900/50 overflow-auto">
+                {/* m-auto rather than justify-center: auto margins collapse to 0 once the
+                    zoomed image overflows, so its top-left stays scrollable. The wrapper
+                    takes its size from the image alone — comment pins are positioned in
+                    percentages of this box. */}
+                <div
+                  className={cn(
+                    "relative m-auto shrink-0",
+                    // Bounded by the pane while fitting; uncapped once zoomed in, so the
+                    // enlarged image is not squeezed back to the pane width.
+                    zoom === 'fit' || zoom === 1 ? "max-w-full" : "max-w-none",
+                    isCommenting ? "cursor-chat" : "cursor-pointer",
+                  )}
                   onClick={(e) => {
                     if (isCommenting) {
                       handleImageClickForComment(e);
@@ -971,7 +1020,11 @@ export function ReportAnalysis() {
                   {comments.map((c: any) => (
                     <div
                       key={c.id}
-                      className="absolute w-6 h-6 bg-indigo-600 border-2 border-white text-white rounded-full flex items-center justify-center text-[10px] font-bold shadow-lg transform -translate-x-1/2 -translate-y-1/2 cursor-pointer hover:scale-110 hover:bg-indigo-700 transition-all z-20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                      data-comment-pin={c.id}
+                      className={cn(
+                        "absolute w-6 h-6 bg-indigo-600 border-2 border-white text-white rounded-full flex items-center justify-center text-[10px] font-bold shadow-lg transform -translate-x-1/2 -translate-y-1/2 cursor-pointer hover:scale-110 hover:bg-indigo-700 transition-all z-20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white",
+                        activeCommentId === c.id && "ring-2 ring-indigo-400 ring-offset-2 scale-110",
+                      )}
                       style={{ left: `${c.x_pct}%`, top: `${c.y_pct}%` }}
                       title={`${c.author}: ${c.content}`}
                       onClick={(e) => {

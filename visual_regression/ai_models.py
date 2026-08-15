@@ -99,6 +99,100 @@ def _build_resnet50_backbone(pretrained: bool):
     if freeze_backbone:
         backbone.eval()
     return backbone, feature_dim, weights_source, freeze_backbone
+class MultiScaleResNet50Backbone(_ModuleBase):
+    """ResNet50 feature extractor that pools and concatenates all four
+    residual stages, instead of only the last.
+
+    The single-scale backbone (`_build_resnet50_backbone`) already runs every
+    stage — layer1 through layer4 are computed sequentially regardless, each
+    one depends on the last — but only layer4's output, globally pooled down
+    to a 7x7 map and averaged into one 2048-dim vector, ever reaches the
+    classifier. Every stride-2 downsample along the way (224 -> 112 -> 56 ->
+    28 -> 7) throws away spatial precision, and by layer4 a small localized
+    change — a paragraph's text recoloured, one word's font swapped — has
+    been averaged into a handful of pixels' worth of signal. That tracks: a
+    single scalar (raw pixel mismatch magnitude) reproduces 83% of this
+    project's deployed CNN's predictions, and its two weakest classes by a
+    wide margin are exactly color-regression and font-change — the two
+    defect types that are inherently small, localized, low-level, and have
+    the least in common with the high-level, whole-image "what object is
+    this" abstraction layer4 is built for.
+
+    Pooling layer1 (256ch, 56x56), layer2 (512ch, 28x28) and layer3 (1024ch,
+    14x14) too, and concatenating all four (256+512+1024+2048 = 3840-dim)
+    gives the classifier the coarser, higher-resolution signal those earlier
+    stages still carry, alongside the same layer4 semantics as before. This
+    is the standard fix for perceptual-similarity tasks that need to notice
+    small localized differences (LPIPS and similar work the same way, for
+    the same reason) — the failure mode isn't under-trained weights, it's
+    that the information such a paragraph's original colour was never
+    forwarded to a place the classifier could use.
+
+    Keeps the same freeze policy as the single-scale backbone (only layer4
+    trainable) so a comparison against it isolates one variable — whether
+    exposing the earlier stages helps at all — rather than also changing how
+    much of the network is being fine-tuned.
+    """
+
+    def __init__(self, resnet_model):
+        super().__init__()
+        self.stem = nn.Sequential(
+            resnet_model.conv1, resnet_model.bn1, resnet_model.relu, resnet_model.maxpool
+        )
+        self.layer1 = resnet_model.layer1
+        self.layer2 = resnet_model.layer2
+        self.layer3 = resnet_model.layer3
+        self.layer4 = resnet_model.layer4
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        x = self.stem(x)
+        f1 = self.layer1(x)
+        f2 = self.layer2(f1)
+        f3 = self.layer3(f2)
+        f4 = self.layer4(f3)
+        pooled = [self.pool(f).flatten(1) for f in (f1, f2, f3, f4)]
+        return torch.cat(pooled, dim=1)
+
+
+def _build_resnet50_backbone_multiscale(pretrained: bool):
+    """Same weights and freeze policy as `_build_resnet50_backbone`, wrapped
+    so all four stages reach the classifier instead of only layer4. See
+    `MultiScaleResNet50Backbone` for why."""
+    _, nn = _require_torch()
+    resnet50, ResNet50_Weights = _require_torchvision()
+
+    weights = None
+    weights_source = "random-init"
+    if pretrained:
+        try:
+            weights = ResNet50_Weights.DEFAULT
+            weights_source = "imagenet-default"
+        except Exception:
+            weights = None
+
+    try:
+        model = resnet50(weights=weights)
+    except Exception:
+        model = resnet50(weights=None)
+        weights_source = "random-init"
+
+    feature_dim = 256 + 512 + 1024 + 2048  # layer1 + layer2 + layer3 + layer4
+    backbone = MultiScaleResNet50Backbone(model)
+    freeze_backbone = weights_source == "imagenet-default"
+    for name, parameter in backbone.named_parameters():
+        if "layer4" in name:
+            parameter.requires_grad = True
+        else:
+            parameter.requires_grad = not freeze_backbone
+
+    any_backbone_trainable = any(p.requires_grad for p in backbone.parameters())
+    freeze_backbone = not any_backbone_trainable
+    if freeze_backbone:
+        backbone.eval()
+    return backbone, feature_dim, weights_source, freeze_backbone
+
+
 def _build_backbone(backbone_name: str, pretrained: bool):
     _, nn = _require_torch()
     if backbone_name == "efficientnet_b3":
@@ -125,7 +219,10 @@ def _build_backbone(backbone_name: str, pretrained: bool):
             return backbone, feature_dim, weights_source, freeze_backbone
         except Exception as exc:
             logger.warning("Failed to load EfficientNet-B3 backbone (%s). Falling back to ResNet50.", exc)
-            
+
+    if backbone_name == "resnet50_multiscale":
+        return _build_resnet50_backbone_multiscale(pretrained=pretrained)
+
     return _build_resnet50_backbone(pretrained=pretrained)
 class LegacyRuleMLP:  # pragma: no cover - only used for older checkpoints
     def __init__(self, torch_module, nn_module, checkpoint: Dict[str, object]):

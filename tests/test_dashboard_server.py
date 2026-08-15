@@ -417,75 +417,50 @@ def test_ai_suggestions_api(test_server):
 
     assert cookie_val != ""
 
-    # Create 3 failed runs for a baseline in the database and disk
+    # Two past runs whose diff lands in the same place. What separates a widget
+    # worth masking from a defect worth keeping is whether the pixels there
+    # differ between runs, so the screenshots have to be real images.
+    import cv2
+    import numpy as np
 
-    # Run 1
-    dummy_run_1 = {
-        "run": "run-f1",
-        "case_name": "Case Auto",
-        "baseline_name": "baseline-auto",
-        "suite_name": "suite.auto",
-        "status": "FAIL",
-        "mismatch_pct": 2.5,
-        "diff_regions": 1,
-        "browser": "chromium",
-        "device": "desktop",
-        "locale": "en-US",
-        "url": "http://example.com",
-        "report_href": "/report1",
-    }
-    store.upsert_run_index(dummy_run_1)
-    # Save payload to disk
-    run_dir_1 = paths.runs_dir / "run-f1"
-    run_dir_1.mkdir(parents=True, exist_ok=True)
-    payload_1 = {
-        "id": "run-f1",
-        "baseline_name": "baseline-auto",
-        "case_name": "Case Auto",
-        "status": "FAIL",
-        "result": {
+    def add_run(run_id: str, box, seed: int):
+        store.upsert_run_index({
+            "run": run_id,
+            "case_name": "Case Auto",
+            "baseline_name": "baseline-auto",
+            "suite_name": "suite.auto",
+            "status": "FAIL",
             "mismatch_pct": 2.5,
-            "regions": [
-                {"x": 100, "y": 200, "width": 50, "height": 30, "mean_delta": 60.0}
-            ]
+            "diff_regions": 1,
+            "browser": "chromium",
+            "device": "desktop",
+            "locale": "en-US",
+            "url": "http://example.com",
+            "report_href": f"/{run_id}",
+        })
+        run_dir = paths.runs_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "id": run_id,
+            "baseline_name": "baseline-auto",
+            "case_name": "Case Auto",
+            "status": "FAIL",
+            "result": {
+                "mismatch_pct": 2.5,
+                "current_size": [400, 300],
+                "regions": [{"x": box[0], "y": box[1], "width": box[2], "height": box[3], "mean_delta": 60.0}],
+            },
         }
-    }
-    with open(run_dir_1 / "result.json", "w") as f:
-        json.dump(payload_1, f)
+        with open(run_dir / "result.json", "w") as f:
+            json.dump(payload, f)
+        image = np.full((300, 400, 3), 240, dtype=np.uint8)
+        rng = np.random.default_rng(seed)
+        x, y, w, h = box
+        image[y:y + h, x:x + w] = rng.integers(0, 255, size=(h, w, 3), dtype=np.uint8)
+        cv2.imwrite(str(run_dir / "current.png"), image)
 
-    # Run 2
-    dummy_run_2 = {
-        "run": "run-f2",
-        "case_name": "Case Auto",
-        "baseline_name": "baseline-auto",
-        "suite_name": "suite.auto",
-        "status": "FAIL",
-        "mismatch_pct": 3.0,
-        "diff_regions": 1,
-        "browser": "chromium",
-        "device": "desktop",
-        "locale": "en-US",
-        "url": "http://example.com",
-        "report_href": "/report2",
-    }
-    store.upsert_run_index(dummy_run_2)
-    # Save payload to disk (overlaps with run 1 region [100, 200, 50, 30])
-    run_dir_2 = paths.runs_dir / "run-f2"
-    run_dir_2.mkdir(parents=True, exist_ok=True)
-    payload_2 = {
-        "id": "run-f2",
-        "baseline_name": "baseline-auto",
-        "case_name": "Case Auto",
-        "status": "FAIL",
-        "result": {
-            "mismatch_pct": 3.0,
-            "regions": [
-                {"x": 102, "y": 198, "width": 48, "height": 32, "mean_delta": 55.0}
-            ]
-        }
-    }
-    with open(run_dir_2 / "result.json", "w") as f:
-        json.dump(payload_2, f)
+    add_run("run-f1", (100, 200, 50, 30), seed=1)
+    add_run("run-f2", (102, 198, 48, 32), seed=2)
 
     # Request AI suggestions for a new run
     req = urllib.request.Request(
@@ -498,16 +473,15 @@ def test_ai_suggestions_api(test_server):
         assert data["ok"] is True
         suggestions = data["suggestions"]
         assert len(suggestions) == 1
-        # The suggestion should envelop both overlapping boxes
-        # min_x = min(100, 102) = 100
-        # min_y = min(200, 198) = 198
-        # max_r = max(150, 150) = 150 => width = 150 - 100 = 50
-        # max_b = max(230, 230) = 230 => height = 230 - 198 = 32
-        assert suggestions[0]["x"] == 100
-        assert suggestions[0]["y"] == 198
+        # The representative box is the median of the members, not their union:
+        # a suggestion may not grow past the thing it describes.
+        assert suggestions[0]["x"] == 102
+        assert suggestions[0]["y"] == 200
         assert suggestions[0]["width"] == 50
         assert suggestions[0]["height"] == 32
         assert suggestions[0]["frequency"] == 2
+        assert suggestions[0]["reason"] == "dynamic-content"
+        assert data["skipped"] == []
 
 
 def test_review_action_updates_runs_index(test_server):

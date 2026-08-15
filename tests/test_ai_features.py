@@ -201,6 +201,37 @@ def test_dom_diff_ignores_transparent_color_noise():
     assert label is None
 
 
+def test_dom_diff_detects_contrast_collapse_with_no_own_background():
+    """Most elements report a transparent own background (inherited from an
+    ancestor the snapshot doesn't capture), which used to make the contrast
+    check untestable on the common case: confirmed on a captured pair where
+    near-black text turned near-white against a transparent background on
+    both sides, and the real readability collapse fell through to a plain
+    color-regression verdict instead of text-issue."""
+    baseline = [{"tag": "h1", "x": 110, "y": 110, "w": 200, "h": 40,
+                 "color": "rgb(22, 32, 49)", "bg": "rgba(0, 0, 0, 0)"}]
+    current = [{"tag": "h1", "x": 111, "y": 110, "w": 200, "h": 40,
+                "color": "rgb(242, 245, 248)", "bg": "rgba(0, 0, 0, 0)"}]
+    label, evidence = diagnose_from_dom_diff(baseline, current, _region())
+    assert label == "text-issue"
+    assert "contrast" in evidence
+
+
+def test_dom_diff_recolor_on_a_dark_theme_is_not_flagged_as_text_issue():
+    """On a genuinely dark-themed page, text is light-on-transparent already
+    in the baseline, so the light-page contrast hypothesis correctly finds
+    the baseline itself already low-contrast under that assumption and never
+    fires — a plain recolor between two similarly light shades should still
+    just be color-regression, not a false readability alarm."""
+    baseline = [{"tag": "p", "x": 110, "y": 110, "w": 200, "h": 30,
+                 "color": "rgb(230, 230, 235)", "bg": "rgba(0, 0, 0, 0)"}]
+    current = [{"tag": "p", "x": 111, "y": 110, "w": 200, "h": 30,
+                "color": "rgb(190, 195, 210)", "bg": "rgba(0, 0, 0, 0)"}]
+    label, evidence = diagnose_from_dom_diff(baseline, current, _region())
+    assert label == "color-regression"
+    assert "contrast" not in evidence
+
+
 def test_dom_diff_returns_none_when_elements_match_closely():
     baseline = [{"tag": "p", "x": 110, "y": 110, "w": 100, "h": 30, "font": "Arial"}]
     current = [{"tag": "p", "x": 111, "y": 110, "w": 100, "h": 30, "font": "Arial"}]
@@ -249,3 +280,61 @@ def test_dom_diff_broken_image_not_masked_by_reflowed_sibling():
     label, evidence = diagnose_from_dom_diff(baseline, current, _region(x=44, y=90, w=200, h=110))
     assert label == "broken-image"
     assert "img" in evidence
+
+
+def test_dom_diff_geometry_fallback_does_not_trust_font_across_unrelated_elements():
+    """Reproduces a real miss found on docs.python.org: a genuine layout-issue
+    mutation reflowed the page, and a 4-character section-number span ("3.1.",
+    too short for identity matching) landed near an unrelated syntax-
+    highlighting span ("spam", a different element entirely). The geometry
+    fallback paired them purely on proximity, and their fonts differing
+    (because they are different elements, not because either one's font
+    changed) was reported as a font-change verdict that outranked the real
+    layout-issue on the element that actually moved.
+
+    The two elements carry different element classes ('section-number' vs
+    'n') — that is the signal that should stop the fallback from trusting
+    their font difference, while the real moved element (identity-matched
+    via its own text, or geometry-matched with a compatible/absent class on
+    both sides) still reports correctly.
+    """
+    baseline = [
+        # The genuinely mutated element: an 8+ char paragraph, so it identity-
+        # matches itself in `current` regardless of the reflow distance.
+        {"tag": "p", "x": 355, "y": 364, "w": 800, "h": 129, "txt": "This paragraph is the one the mutation actually grew."},
+        # Too short for identity matching (< 8 chars) — must fall back to geometry.
+        {"tag": "span", "x": 355, "y": 660, "w": 46, "h": 34, "ecls": "section-number", "font": "-apple-system", "txt": "3.1."},
+    ]
+    current = [
+        {"tag": "p", "x": 355, "y": 364, "w": 800, "h": 232, "txt": "This paragraph is the one the mutation actually grew."},
+        # A different element (a Pygments syntax token) that merely ended up
+        # nearby post-reflow — no relation to the section-number span above.
+        {"tag": "span", "x": 361, "y": 678, "w": 34, "h": 18, "ecls": "n", "font": "Menlo", "txt": "spam"},
+    ]
+    label, evidence = diagnose_from_dom_diff(baseline, current, _region(x=300, y=300, w=900, h=450))
+    # diagnose_from_dom_diff's own output is "layout-issue" (consolidated to
+    # missing-element for display/scoring by a caller further up the stack,
+    # same as every other test in this file that checks the raw label).
+    assert label == "layout-issue"
+    assert "font" not in evidence
+    assert "800x232" in evidence or "129" in evidence
+
+
+def test_dom_diff_geometry_fallback_still_trusts_font_when_classes_match():
+    """The class check must not block legitimate geometry-fallback font
+    detection when both elements plausibly are the same kind of thing (same
+    class, or neither carries one at all)."""
+    baseline = [{"tag": "span", "x": 110, "y": 110, "w": 60, "h": 20, "ecls": "label"}]
+    current = [{"tag": "span", "x": 111, "y": 110, "w": 60, "h": 20, "ecls": "label", "font": "Courier New"}]
+    baseline[0]["font"] = "Arial"
+    label, evidence = diagnose_from_dom_diff(baseline, current, _region())
+    assert label == "font-change"
+
+
+def test_dom_diff_geometry_fallback_blocks_font_when_only_one_side_has_a_class():
+    """One side carrying a class the other doesn't is itself evidence they
+    are different kinds of element, even at a close geometry distance."""
+    baseline = [{"tag": "span", "x": 110, "y": 110, "w": 60, "h": 20, "font": "Arial"}]
+    current = [{"tag": "span", "x": 111, "y": 110, "w": 60, "h": 20, "ecls": "token", "font": "Courier New"}]
+    label, evidence = diagnose_from_dom_diff(baseline, current, _region())
+    assert label != "font-change"

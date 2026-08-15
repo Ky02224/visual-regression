@@ -95,6 +95,37 @@
     }
   });
 
+  // ?dynamic=1 turns on the things a visual test should learn to ignore: a
+  // rotating ad creative and a wall clock. Both differ on every capture, which
+  // is what separates them from a regression that renders the same each run.
+  if (params.get("dynamic")) {
+    const strip = document.querySelector("[data-dynamic-strip]");
+    const adSlot = document.querySelector("[data-ad-slot]");
+    const clock = document.querySelector("[data-clock]");
+    if (strip) {
+      strip.hidden = false;
+    }
+    if (adSlot) {
+      const creatives = [
+        { text: "Ship faster with Northstar Cloud", color: "#c2410c" },
+        { text: "Try Northstar AI — 30 days free", color: "#1d4ed8" },
+        { text: "Webinar: Release engineering at scale", color: "#15803d" },
+        { text: "Now hiring: platform engineers", color: "#7e22ce" },
+        { text: "Case study: 40% fewer rollbacks", color: "#b91c1c" },
+      ];
+      const pick = creatives[Math.floor(Math.random() * creatives.length)];
+      adSlot.textContent = pick.text;
+      adSlot.style.background = pick.color;
+    }
+    if (clock) {
+      const render = function () {
+        clock.textContent = new Date().toLocaleTimeString(lang, { hour12: false });
+      };
+      render();
+      setInterval(render, 1000);
+    }
+  }
+
   if (defect) {
     document.body.classList.add(defect);
     const defectBox = document.querySelector("[data-defect-banner]");

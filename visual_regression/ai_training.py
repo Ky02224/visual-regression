@@ -1355,6 +1355,23 @@ def train_model(
     class_weights = class_counts.sum() / class_counts
     class_weights = class_weights / class_weights.mean()
 
+    # A class whose target label is unreachable (e.g. layout-issue: the
+    # taxonomy consolidation in _consolidate_label maps every "layout-issue"
+    # sample onto "missing-element", so this class receives ~0 true examples
+    # however large the raw corpus is) gets a near-zero class_count, and
+    # inverse-frequency weighting divides by that -- one such class measured
+    # at 6.93x the mean while all six others were floored to 0.01x, drowning
+    # their gradient entirely. MAX_WEIGHT_RATIO bounds how far any single
+    # class's weight can drift from the mean, so a structurally-starved or
+    # merely rare class gets upweighted without silencing the rest.
+    # Renormalizing to mean=1 again after the clip would undo it: with six
+    # classes floored to 1/MAX_WEIGHT_RATIO and one ceiled at MAX_WEIGHT_RATIO,
+    # the new mean drops below 1 and dividing by it stretches the ceiled class
+    # back past the cap. The clipped values already sit relative to the mean=1
+    # baseline above, so they are used as-is.
+    MAX_WEIGHT_RATIO = 4.0
+    class_weights = np.clip(class_weights, 1.0 / MAX_WEIGHT_RATIO, MAX_WEIGHT_RATIO)
+
     # Inverse-frequency weighting assumes the hard classes are the rare ones.
     # Here they are not: the capture is deliberately balanced (every class 13-16%
     # of the corpus), so these weights come out near-identical and the loss ends
@@ -1375,7 +1392,7 @@ def train_model(
             else:
                 logger.warning("  class_difficulty names %r, which this model does not have.", name)
         class_weights = class_weights * extra
-        class_weights = class_weights / class_weights.mean()
+        class_weights = np.clip(class_weights, 1.0 / MAX_WEIGHT_RATIO, MAX_WEIGHT_RATIO)
         logger.info("  Class weights after difficulty adjustment: %s",
                     {n: round(float(w), 2) for n, w in zip(names, class_weights)})
     
@@ -2121,6 +2138,27 @@ def _finalize_classification_assessment(
         if dom_label:
             label = dom_label
             score = max(score, threshold)
+        elif (
+            label == "missing-element"
+            and baseline_dom_elements and current_dom_elements
+            and len(baseline_dom_elements) == len(current_dom_elements)
+        ):
+            # The CNN's own guess claims something vanished, but the DOM-diff
+            # engine (just above) found nothing to confirm it, and the raw
+            # element count is identical between the two captures -- direct
+            # counter-evidence to "missing", since removing a node removes it
+            # from this list too. On JS-hydrated pages (React/Vue) a
+            # page-to-page revisit can produce real pixel drift (a fraction of
+            # a percent) from the framework's own re-render with nothing
+            # structurally different, and on that kind of ambiguous, DOM-
+            # unconfirmed crop the CNN defaults to "missing-element" more
+            # than any other label. Measured: docusaurus.io, two captures 1.5s
+            # apart with zero mutation applied, 0.77% pixel mismatch, 302/302
+            # elements both times, model still called missing-element. This
+            # only fires for the one label whose entire claim the element
+            # count directly contradicts -- it doesn't touch the calibrated
+            # noise thresholds every other label still goes through below.
+            label = ""
 
         # Taxonomy simplification, 2026-08-11: missing-element and layout-issue
         # are folded into one displayed category. Removing an element and the
@@ -3289,7 +3327,11 @@ def adopt_model_if_gate_passes(
         stamp = _time.strftime("%Y%m%dT%H%M%S")
         for staged in list(staging_model_path.parent.glob(f"{staging_model_path.stem}.*")):
             suffix_chain = staged.name[len(staging_model_path.stem):]
-            target_file = staged.with_name(f"{target_model_path.stem}{suffix_chain}")
+            # `with_name` only replaces the filename, not the directory, so it
+            # silently renamed files in place instead of moving them across
+            # workspaces the one time staging and target lived in different
+            # directories -- the adoption reported success and moved nothing.
+            target_file = target_model_path.parent / f"{target_model_path.stem}{suffix_chain}"
             if target_file.exists():
                 shutil.move(str(target_file), str(target_file.with_name(f"{target_file.name}.bak-{stamp}")))
             shutil.move(str(staged), str(target_file))

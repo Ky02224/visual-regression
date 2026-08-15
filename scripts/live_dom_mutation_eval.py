@@ -40,7 +40,7 @@ import cv2
 import numpy as np
 from playwright.sync_api import sync_playwright
 
-from visual_regression.browser import _CAPTURE_DOM_SNAPSHOT_JS
+from visual_regression.browser import _CAPTURE_DOM_SNAPSHOT_JS, _DISABLE_ANIMATION_CSS, _PREPARE_PAGE_JS
 from visual_regression.config import WorkspacePaths
 from visual_regression.image_compare import compare_arrays
 from visual_regression.ai_training import assess_result, _consolidate_label
@@ -60,6 +60,18 @@ SITES = [
 # (17.8082%) despite one being a "benign" (unmutated) trial. That's a false
 # positive baked into the site choice, not a model error, so it inflates
 # the error count without measuring anything real.
+#
+# Known category-specific quirk, not a reason to drop the site: on
+# books.toscrape.com specifically, the broken-image mutation lands at
+# 0.0000% pixel difference every time (confirmed non-reproducible in
+# isolation, 2026-08-13) — every other category works fine here. If you're
+# building a new eval batch and see a site's broken-image or text-issue
+# accuracy craters while everything else is fine, check whether the
+# mutation actually changed any pixels before blaming the model; see
+# generate_live_training_pairs.py's longer avoid-list for other sites with
+# the same failure mode (gimp.org/text-issue, krita.org/broken-image) and
+# for sites that are simply too flaky to sample from (frequent Page.goto
+# timeouts) rather than mutation-broken.
 
 CATEGORIES = [
     "benign",
@@ -525,6 +537,19 @@ def to_consolidated(name: str) -> str:
 def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, idx: int,
               write_dom: bool = True):
     page.goto(url, wait_until="networkidle", timeout=25000)
+    # This harness had its own hand-rolled capture, skipping every safeguard
+    # browser.py's real capture_website() applies before a production
+    # comparison: animations/transitions disabled, videos frozen, cookie/
+    # consent banners hidden. A JS-hydrated page (React, Vue, ...) redraws
+    # itself slightly between any two loads regardless of mutation, and a
+    # cookie banner that appears on one capture and not the other is exactly
+    # the same kind of false diff — measured directly: docusaurus.io,
+    # gitbook.com and 11ty.dev all went from 0.7-1.8% mismatch with ZERO
+    # mutation applied down to 0.0000% once these three lines ran, no other
+    # change. Skipping them was testing this project against a harder
+    # problem than production actually has to solve.
+    page.add_style_tag(content=_DISABLE_ANIMATION_CSS)
+    page.evaluate(_PREPARE_PAGE_JS)
     # A custom webfont that finishes loading between the baseline and
     # current capture changes text metrics (fallback-font width vs
     # final-font width) for elements nowhere near the actual mutation —
@@ -618,6 +643,12 @@ def run_trial(page, url: str, category: str, rng: random.Random, tmp_dir: Path, 
         page.evaluate("() => document.fonts.ready")
     except Exception:
         pass
+    # Re-applied for the same reason production re-runs it on every capture,
+    # not just the first: a cookie/consent banner some sites show only after
+    # a delay, or only on the Nth page view, would otherwise reappear for
+    # current and register as a page-wide diff having nothing to do with
+    # the mutation.
+    page.evaluate(_PREPARE_PAGE_JS)
     baseline_arr = cv2.imdecode(np.frombuffer(baseline_png, np.uint8), cv2.IMREAD_COLOR)
     current_png = None
     for _attempt in range(4):

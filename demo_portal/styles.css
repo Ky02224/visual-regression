@@ -419,6 +419,48 @@ body {
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
 }
 
+/* Dynamic content (?dynamic=1): an ad slot and a clock, both different on
+   every capture. */
+.dynamic-strip {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+  align-items: stretch;
+}
+
+/* An author `display` rule outranks the UA stylesheet's display:none for
+   [hidden], so without this the strip still occupies its row when it is meant
+   to be off — which shifted every element below it and failed all twelve demo
+   baselines. */
+.dynamic-strip[hidden] {
+  display: none;
+}
+
+.ad-slot {
+  border-radius: 18px;
+  padding: 22px 24px;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+}
+
+.clock {
+  border-radius: 18px;
+  padding: 22px 24px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  min-width: 140px;
+  justify-content: center;
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;

@@ -996,9 +996,13 @@ def get_baseline(id: str = Query(None), paths=Depends(get_paths_dep), user=Depen
 def get_ai_suggestions(baseline_name: str = Query(None), run_id: str = Query(None), store=Depends(get_store_dep), paths=Depends(get_paths_dep), user=Depends(require_auth)):
     if not baseline_name or not run_id:
         raise HTTPException(status_code=400, detail="Missing baseline_name or run_id parameters")
-    from .ai_auto_ignore import get_auto_ignore_suggestions
-    suggestions = get_auto_ignore_suggestions(store, paths, baseline_name, run_id)
-    return {"ok": True, "suggestions": suggestions}
+    from .ai_auto_ignore import analyze_repeating_regions
+    # `skipped` carries the regions that repeat but were not proposed, with the
+    # reason. A recurring change that renders identically every run is worth
+    # showing a reviewer as a likely unfixed regression — the one thing it must
+    # not be is a masking suggestion.
+    suggestions, skipped = analyze_repeating_regions(store, paths, baseline_name, run_id)
+    return {"ok": True, "suggestions": suggestions, "skipped": skipped}
 
 @app.get("/api/runs/{run_id}/export")
 def get_run_export(run_id: str, paths=Depends(get_paths_dep), user=Depends(require_auth)):
@@ -1240,6 +1244,9 @@ def post_run_delete(payload: dict, paths=Depends(get_paths_dep), store=Depends(g
     # removed it. Written after the delete succeeds: an entry for an attempt
     # that failed would claim a run was destroyed when it was not.
     if store:
+        # The directory is gone; without this the index row survives and the
+        # dashboard keeps listing a run whose images all answer 404.
+        store.delete_run_index(result.get("run") or run_ref)
         store.audit(user.email, user.role, "run.delete", {"run": run_ref})
     _DashboardCache.invalidate(paths)
     return {"ok": True, **result}

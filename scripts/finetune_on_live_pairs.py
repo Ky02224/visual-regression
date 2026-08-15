@@ -147,8 +147,12 @@ def main() -> int:
                              "font-change from one another; removing it on some "
                              "samples is what forces the rest of the evidence to be "
                              "used. 0 keeps the previous behaviour.")
-    parser.add_argument("--backbone", default="resnet50", choices=["resnet50", "efficientnet_b3"],
-                        help="Vision backbone architecture to extract image embeddings (default: resnet50)")
+    parser.add_argument("--backbone", default="resnet50",
+                        choices=["resnet50", "efficientnet_b3", "resnet50_multiscale"],
+                        help="Vision backbone architecture to extract image embeddings (default: resnet50). "
+                             "resnet50_multiscale pools and concatenates all four residual stages instead "
+                             "of only the last, so the classifier sees the higher-resolution signal layer4 "
+                             "alone averages away -- see MultiScaleResNet50Backbone's docstring in ai_models.py.")
     parser.add_argument("--min-pairs", type=int, default=50,
                         help="Refuse to train on fewer than this many pairs. Lower it "
                              "only to smoke-test the pipeline end to end.")

@@ -58,6 +58,30 @@ from live_dom_mutation_eval import CATEGORIES, run_trial  # noqa: E402
 # None of these may appear in live_dom_mutation_eval.SITES. Training on the
 # evaluation's own pages would leak the test set and make every number after it
 # meaningless.
+#
+# Sites tried and deliberately left out, 2026-08-14/15 (two training rounds,
+# ~450 live trials): a real per-class accuracy swing traced to which of these
+# got sampled, not to model quality.
+#   - vuetifyjs.com, and Vue/React/Material component-showcase SPAs like it:
+#     any mutation (color, text, missing-element, ...) cascades through the
+#     framework's own re-render into a ~30% whole-page visual change, so the
+#     ground-truth label stops matching what a reasonable classifier would
+#     say from the pixels. Site accuracy measured at 36.8% (7/19) purely from
+#     this, versus 90-100% on the plain static sites sampled the same run.
+#   - gimp.org (text-issue mutation), krita.org (broken-image mutation),
+#     books.toscrape.com (broken-image mutation): the specific mutation
+#     produces a real DOM change but 0.0000% pixel difference on these pages
+#     every time -- some interaction between the picked element and the
+#     page's own CSS makes the edit invisible. Not reproducible in isolation
+#     (20 attempts, 2026-08-13), so left as a labelled site+category
+#     combination to avoid rather than a code fix.
+#   - freepascal.org, inkscape.org, calibre-ebook.com, olive.foundation:
+#     frequent Page.goto timeouts (25s) during trials -- flaky enough that a
+#     meaningful fraction of any batch drawing from them silently loses
+#     samples or (worse) captures a half-loaded page. freepascal.org's font
+#     rendering may not have settled before capture on a slow load, which
+#     would explain 4/4 misses on that site all mispredicted as
+#     "font-change" in the round-2 eval.
 SITES = [
     # language / framework documentation
     "https://quotes.toscrape.com/",
@@ -216,6 +240,47 @@ SITES = [
     "https://www.usgs.gov/",
     "https://www.census.gov/",
     "https://www.bls.gov/",
+    # added 2026-08-14/15, both rounds verified to actually produce pairs
+    # (not just reachable) -- see the avoid-list above for what got tried
+    # and rejected instead.
+    "https://ant.apache.org/",
+    "https://containerd.io/",
+    "https://gradle.org/",
+    "https://graphql.org/",
+    "https://junit.org/junit5/",
+    "https://maven.apache.org/",
+    "https://neovim.io/",
+    "https://spring.io/",
+    "https://symfony.com/",
+    "https://www.docker.com/",
+    "https://www.electronjs.org/",
+    "https://www.jenkins.io/",
+    "https://www.python.org/",
+    "https://www.rabbitmq.com/",
+    "https://www.vim.org/",
+    "https://airflow.apache.org/",
+    "https://argoproj.github.io/",
+    "https://dbeaver.io/",
+    "https://etcher.balena.io/",
+    "https://filezilla-project.org/",
+    "https://hadoop.apache.org/",
+    "https://httpie.io/",
+    "https://insomnia.rest/",
+    "https://istio.io/",
+    "https://kafka.apache.org/",
+    "https://keras.io/",
+    "https://linkerd.io/",
+    "https://nmap.org/",
+    "https://pytorch.org/",
+    "https://rufus.ie/en/",
+    "https://spark.apache.org/",
+    "https://www.elastic.co/",
+    "https://www.envoyproxy.io/",
+    "https://www.freecadweb.org/",
+    "https://www.metasploit.com/",
+    "https://www.pgadmin.org/",
+    "https://www.tensorflow.org/",
+    "https://www.ventoy.net/en/index.html",
 ]
 
 

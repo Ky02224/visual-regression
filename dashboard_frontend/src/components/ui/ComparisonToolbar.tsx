@@ -1,5 +1,5 @@
 import React from 'react';
-import { Columns2, GitCompare, Layers, ZoomIn, ZoomOut, Maximize2, Eye } from 'lucide-react';
+import { Columns2, GitCompare, Layers, ZoomIn, ZoomOut, Maximize2, Eye, MessageSquare } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 export type ComparisonViewMode = 'side-by-side' | 'slider' | 'overlay';
@@ -7,7 +7,7 @@ export type ZoomLevel = 'fit' | 1 | 1.25 | 1.5 | 2;
 
 const ZOOM_STEPS: ZoomLevel[] = ['fit', 1, 1.25, 1.5, 2];
 
-export function ComparisonToolbar({ viewMode, onViewModeChange, showDiff, onShowDiffChange, hasDiff = true, zoom, onZoomChange }: {
+export function ComparisonToolbar({ viewMode, onViewModeChange, showDiff, onShowDiffChange, hasDiff = true, zoom, onZoomChange, commentCount = 0, onJumpToComments }: {
   viewMode: ComparisonViewMode;
   onViewModeChange: (mode: ComparisonViewMode) => void;
   showDiff: boolean;
@@ -15,6 +15,11 @@ export function ComparisonToolbar({ viewMode, onViewModeChange, showDiff, onShow
   hasDiff?: boolean;
   zoom: ZoomLevel;
   onZoomChange: (zoom: ZoomLevel) => void;
+  /** Comments pinned to this run. Shown here because the pins themselves only
+   *  render in the overlay view, so in the other two a reviewer had no way of
+   *  knowing the discussion existed. */
+  commentCount?: number;
+  onJumpToComments?: () => void;
 }) {
   const idx = ZOOM_STEPS.indexOf(zoom);
   const zoomOut = () => onZoomChange(ZOOM_STEPS[Math.max(0, idx - 1)]);
@@ -41,13 +46,30 @@ export function ComparisonToolbar({ viewMode, onViewModeChange, showDiff, onShow
       <span className="text-xs font-medium text-[var(--on-surface-variant)] min-w-[3rem] text-center">{zoomLabel}</span>
       <ToolbarButton onClick={zoomIn} disabled={idx >= ZOOM_STEPS.length - 1} title="Zoom in"><ZoomIn className="w-4 h-4" /></ToolbarButton>
       <ToolbarButton active={zoom === 'fit'} onClick={() => onZoomChange('fit')} title="Fit to pane"><Maximize2 className="w-4 h-4" /></ToolbarButton>
+      {commentCount > 0 && (
+        <>
+          <div className="w-px h-6 bg-[var(--outline)] mx-1" />
+          <ToolbarButton
+            onClick={() => onJumpToComments?.()}
+            title={viewMode === 'overlay' ? 'Go to the first comment' : 'Comments are pinned in the Overlay view — switch and go to the first one'}
+            ariaLabel={`${commentCount} comment${commentCount === 1 ? '' : 's'}`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>{commentCount}</span>
+            <span className="hidden sm:inline">comment{commentCount === 1 ? '' : 's'}</span>
+          </ToolbarButton>
+          {viewMode !== 'overlay' && (
+            <span className="text-[10px] text-[var(--on-surface-variant)]">pinned in Overlay</span>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-function ToolbarButton({ active, onClick, disabled, title, children }: { active?: boolean; onClick: () => void; disabled?: boolean; title: string; children: React.ReactNode }) {
+function ToolbarButton({ active, onClick, disabled, title, ariaLabel, children }: { active?: boolean; onClick: () => void; disabled?: boolean; title: string; ariaLabel?: string; children: React.ReactNode }) {
   return (
-    <button type="button" title={title} disabled={disabled} onClick={onClick} className={cn(
+    <button type="button" title={title} aria-label={ariaLabel} disabled={disabled} onClick={onClick} className={cn(
       'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors',
       active ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300' : 'text-[var(--on-surface-variant)] hover:bg-stone-100 dark:hover:bg-zinc-800',
       disabled && 'opacity-40 cursor-not-allowed'

@@ -611,10 +611,14 @@ function WebhooksModule() {
         </div>
 
         <div className="rounded-md border border-slate-100 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
-          <p className="text-[11px] font-semibold font-medium text-slate-500">Event</p>
+          <p className="text-[11px] font-semibold font-medium text-slate-500">Events</p>
           <p className="mt-2 text-sm font-bold text-[var(--on-surface)]">regression.detected</p>
-          <p className="mt-2 text-xs font-medium text-[var(--on-surface-variant)]">
-            The platform sends this event only when a compare result or suite case fails against the approved baseline.
+          <p className="mt-1 text-xs font-medium text-[var(--on-surface-variant)]">
+            Sent only when a compare result or suite case fails against the approved baseline.
+          </p>
+          <p className="mt-3 text-sm font-bold text-[var(--on-surface)]">comment.added</p>
+          <p className="mt-1 text-xs font-medium text-[var(--on-surface-variant)]">
+            Sent when a reviewer pins a comment to a run, so a question does not sit unread inside one report.
           </p>
         </div>
       </div>

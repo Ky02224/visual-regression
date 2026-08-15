@@ -11,6 +11,7 @@ import { useApiData } from '../hooks/useApiData';
 import { useGroupedRuns } from '../hooks/useGroupedRuns';
 import { ChangeTypeBadge } from '../components/ui/ChangeTypeBadge';
 import { ReviewStatusBadge } from '../components/ui/ReviewStatusBadge';
+import { CommentCountBadge } from '../components/ui/CommentCountBadge';
 import { normalizeReviewStatus, mismatchPctClass, reviewBorderClass } from '../lib/reviewStatus';
 import { parseUrl, relativeTime } from '../lib/format';
 import { ImageFrame } from '../components/ui/ImageFrame';
@@ -334,6 +335,7 @@ export function BuildDetail() {
                                 <p className={cn("text-sm font-bold font-mono", mismatchPctClass(Number(run.mismatch)))}>{run.mismatch}%</p>
                                 <p className="text-[9px] text-slate-400 uppercase font-bold tracking-tight">Mismatch</p>
                               </div>
+                              <CommentCountBadge count={(run as any).comment_count} />
                               <ReviewStatusBadge status={run.reviewStatus ?? normalizeReviewStatus(run.status)} />
                             </div>
                           </div>

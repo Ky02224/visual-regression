@@ -23,6 +23,7 @@ import { useDebounce } from '../hooks/useDebounce';
 import { useGroupedRuns } from '../hooks/useGroupedRuns';
 import { ChangeTypeBadge } from '../components/ui/ChangeTypeBadge';
 import { ReviewStatusBadge } from '../components/ui/ReviewStatusBadge';
+import { CommentCountBadge } from '../components/ui/CommentCountBadge';
 import { normalizeReviewStatus, mismatchPctClass, reviewBorderClass, type ReviewStatus } from '../lib/reviewStatus';
 import { parseUrl, relativeTime } from '../lib/format';
 import { ImageFrame } from '../components/ui/ImageFrame';
@@ -435,6 +436,7 @@ export function Dashboard() {
                                     </p>
                                     <p className="text-[9px] text-slate-400 uppercase font-bold tracking-tight">Mismatch</p>
                                   </div>
+                                  <CommentCountBadge count={(run as any).comment_count} />
                                   <ReviewStatusBadge status={run.reviewStatus ?? normalizeReviewStatus(run.status)} />
                                 </div>
                               </div>

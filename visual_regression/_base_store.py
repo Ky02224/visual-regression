@@ -320,6 +320,30 @@ class BaseStore:
         return result
 
     # ------------------------------------------------------------------
+    # Runs
+    # ------------------------------------------------------------------
+
+    def delete_run_index(self, run_id: str) -> None:
+        """Forget a run entirely.
+
+        Deleting a run used to remove its directory and leave the index row
+        behind, so the dashboard kept listing a run whose every image answered
+        404 — a broken thumbnail nothing in the product could clear. Comments
+        go first: they carry a foreign key to this row.
+        """
+        self._query("DELETE FROM comments WHERE run_id={p};", (run_id,), commit=True)
+        self._query("DELETE FROM runs_index WHERE run_id={p};", (run_id,), commit=True)
+
+    def get_run_index(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """One row from runs_index, or None.
+
+        The index is the one place a run is guaranteed to be named: its
+        directory may have been pruned, and callers that only need the case
+        name should not have to read result.json off disk to get it.
+        """
+        return self._one("SELECT * FROM runs_index WHERE run_id={p};", (run_id,))
+
+    # ------------------------------------------------------------------
     # Comments
     # ------------------------------------------------------------------
 
@@ -364,6 +388,19 @@ class BaseStore:
             fetch=True,
         )
         return [self._comment_row(row) for row in rows]
+
+    def count_comments_by_run(self) -> Dict[str, int]:
+        """Comment totals for every run that has any, keyed by run id.
+
+        One grouped query rather than a per-run count: the dashboard renders
+        hundreds of rows and needs the badge on all of them.
+        """
+        rows = self._query(
+            "SELECT run_id, COUNT(*) AS total FROM comments GROUP BY run_id;",
+            (),
+            fetch=True,
+        )
+        return {str(row["run_id"]): int(row["total"]) for row in rows}
 
     def get_comment(self, comment_id: str) -> Optional[Dict[str, Any]]:
         """Return one comment, or None.

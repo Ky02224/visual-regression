@@ -55,11 +55,87 @@ _cached_mtime_val = None
 _mtime_check_lock = threading.Lock()
 
 
+def _reconstruct_backbone_and_head(checkpoint: Dict[str, Any]):
+    """Rebuild the backbone + classifier head a checkpoint was actually
+    trained with, from the checkpoint's own recorded shapes.
+
+    export_to_onnx and compile_to_torchscript each carried their own copy of
+    this, both hardcoded to _build_resnet50_backbone and a non-widened head —
+    correct for the model this project shipped with, but resnet50_multiscale
+    (added 2026-08-14, 3840-dim embedding vs. resnet50's 2048) uses a
+    different backbone entirely, and a widened head projects the rule vector
+    through "rule_proj"/"trunk" instead of a bare Sequential. Loading either
+    checkpoint shape through the hardcoded path fails immediately on a
+    state_dict mismatch, or in the widened case, on inferring the wrong
+    in_features and building a head the weights cannot fill. This is the
+    third copy of the fix already applied at the load side
+    (_load_legacy_or_hybrid_model below); pulled out so a fourth callsite
+    doesn't silently regress the same way.
+    """
+    torch, nn = _require_torch()
+    backbone_name = checkpoint.get("backbone_name", "resnet50")
+    backbone, embedding_dim, _, _ = _build_backbone(
+        backbone_name, pretrained=bool(checkpoint.get("pretrained_backbone", True))
+    )
+    backbone = backbone.to("cpu")
+    if checkpoint.get("backbone_state_dict"):
+        backbone.load_state_dict(checkpoint["backbone_state_dict"])
+    backbone.eval()
+
+    class_names = list(checkpoint.get("class_names", []))
+    output_dim = len(class_names) if class_names else 1
+    rule_names = checkpoint.get("rule_feature_names") or RULE_FEATURE_NAMES
+    rule_dim = len(rule_names)
+    classifier_state = checkpoint["classifier_state_dict"]
+    # Which head architecture produced this checkpoint is written in its own key
+    # names: the widened head projects the rule vector through "rule_proj" and
+    # keeps the classifier in "trunk", the flat one is a bare Sequential whose
+    # first layer is "0". Reading the shape off the wrong one silently builds a
+    # head the weights cannot load into.
+    widened = any(k.startswith("rule_proj.") for k in classifier_state)
+    image_projection_dim = None
+    if widened:
+        in_features = classifier_state["trunk.0.weight"].shape[1]
+        projection_dim = classifier_state["rule_proj.3.weight"].shape[0]
+        if "image_proj.0.weight" in classifier_state:
+            # The image side is projected too. Its own layer states both widths,
+            # which the trunk no longer can: trunk.0 now sees 512 columns, not
+            # the 8192 the backbone actually produces, so deriving image_dim by
+            # subtraction would build a head a quarter the right size and the
+            # load would fail on shapes.
+            image_dim = classifier_state["image_proj.0.weight"].shape[1]
+            image_projection_dim = classifier_state["image_proj.0.weight"].shape[0]
+        else:
+            image_dim = in_features - projection_dim
+    else:
+        first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
+        image_dim = classifier_state[first_weight_key].shape[1] - rule_dim
+    num_streams = 3 if image_dim == embedding_dim * 3 else 4
+
+    head = SiameseFusionHead(
+        nn,
+        embedding_dim=embedding_dim,
+        rule_dim=rule_dim,
+        output_dim=output_dim,
+        num_streams=num_streams,
+        widen_rule_features=widened,
+        image_projection_dim=image_projection_dim,
+    ).model
+    head.load_state_dict(classifier_state)
+    head.eval()
+    return backbone, head, embedding_dim, class_names, rule_dim, num_streams
+
+
 def export_to_onnx(model_path: Path):
     """Export the hybrid PyTorch Siamese model to ONNX format cleanly and fast."""
     torch, nn = _require_torch()
     if not model_path.exists():
         return
+    # Set before the try so a failure inside it (e.g. an architecture the
+    # reconstruction can't yet build) reports that failure directly instead
+    # of the validation/metadata blocks below raising an unrelated
+    # UnboundLocalError on onnx_path/img_size when they run anyway.
+    onnx_path = None
     try:
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         model_type = checkpoint.get("model_type")
@@ -67,30 +143,7 @@ def export_to_onnx(model_path: Path):
             logger.info(f"[ONNX Export] Model {model_path.name} is a legacy MLP model; skipping ONNX export.")
             return
 
-        backbone, embedding_dim, _, _ = _build_resnet50_backbone(pretrained=False)
-        if "backbone_state_dict" in checkpoint:
-            backbone.load_state_dict(checkpoint["backbone_state_dict"])
-        backbone.eval()
-
-        class_names = list(checkpoint.get("class_names", []))
-        output_dim = len(class_names) if class_names else 1
-        
-        rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-        classifier_state = checkpoint["classifier_state_dict"]
-        first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-        in_features = classifier_state[first_weight_key].shape[1]
-        num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
-
-        head_model = SiameseFusionHead(
-            nn,
-            embedding_dim=embedding_dim,
-            rule_dim=rule_dim,
-            output_dim=output_dim,
-            num_streams=num_streams,
-        ).model
-
-        head_model.load_state_dict(checkpoint["classifier_state_dict"])
-        head_model.eval()
+        backbone, head_model, embedding_dim, class_names, rule_dim, _num_streams = _reconstruct_backbone_and_head(checkpoint)
 
         wrapper_model = CompleteSiameseModel(backbone, head_model)
         wrapper_model.eval()
@@ -122,6 +175,9 @@ def export_to_onnx(model_path: Path):
         logger.info(f"[ONNX Export] Successfully exported ONNX model -> {onnx_path.name}")
     except Exception as exc:
         logger.warning(f"[ONNX Export] ONNX export warning: {exc}")
+
+    if onnx_path is None:
+        return
 
     try:
         import onnxruntime as ort
@@ -388,55 +444,7 @@ def _load_legacy_or_hybrid_model(model_path: Path):
                 _cached_model_mtime = mtime
         return loaded_dict
 
-    backbone_name = checkpoint.get("backbone_name", "resnet50")
-    backbone, embedding_dim, _, _ = _build_backbone(backbone_name, pretrained=bool(checkpoint.get("pretrained_backbone", True)))
-    backbone = backbone.to("cpu")
-    if checkpoint.get("backbone_state_dict"):
-        backbone.load_state_dict(checkpoint["backbone_state_dict"])
-    backbone.eval()
-
-    class_names = list(checkpoint.get("class_names", []))
-    output_dim = len(class_names) if class_names else 1
-    rule_names = checkpoint.get("rule_feature_names") or RULE_FEATURE_NAMES
-    rule_dim = len(rule_names)
-    classifier_state = checkpoint["classifier_state_dict"]
-    # Which head architecture produced this checkpoint is written in its own key
-    # names: the widened head projects the rule vector through "rule_proj" and
-    # keeps the classifier in "trunk", the flat one is a bare Sequential whose
-    # first layer is "0". Reading the shape off the wrong one silently builds a
-    # head the weights cannot load into.
-    widened = any(k.startswith("rule_proj.") for k in classifier_state)
-    image_projection_dim = None
-    if widened:
-        in_features = classifier_state["trunk.0.weight"].shape[1]
-        projection_dim = classifier_state["rule_proj.3.weight"].shape[0]
-        if "image_proj.0.weight" in classifier_state:
-            # The image side is projected too. Its own layer states both widths,
-            # which the trunk no longer can: trunk.0 now sees 512 columns, not
-            # the 8192 the backbone actually produces, so deriving image_dim by
-            # subtraction would build a head a quarter the right size and the
-            # load would fail on shapes.
-            image_dim = classifier_state["image_proj.0.weight"].shape[1]
-            image_projection_dim = classifier_state["image_proj.0.weight"].shape[0]
-        else:
-            image_dim = in_features - projection_dim
-    else:
-        first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-        image_dim = classifier_state[first_weight_key].shape[1] - rule_dim
-    num_streams = 3 if image_dim == embedding_dim * 3 else 4
-
-    head = SiameseFusionHead(
-        nn,
-        embedding_dim=embedding_dim,
-        rule_dim=rule_dim,
-        output_dim=output_dim,
-        num_streams=num_streams,
-        widen_rule_features=widened,
-        image_projection_dim=image_projection_dim,
-    ).model
-
-    head.load_state_dict(checkpoint["classifier_state_dict"])
-    head.eval()
+    backbone, head, embedding_dim, class_names, rule_dim, num_streams = _reconstruct_backbone_and_head(checkpoint)
 
     loaded_dict = {
         "models_dir": model_path.parent,
@@ -472,6 +480,21 @@ def _load_legacy_or_hybrid_model(model_path: Path):
 def compile_to_torchscript(model_path: Path, output_path: Optional[Path] = None) -> Path:
     """Trace the complete Siamese model with TorchScript and save to a .torchscript.pt file.
 
+    WARNING (2026-08-15): tracing this architecture is unsound, not just
+    unfinished. ai_models.py's forward pass has a data-dependent branch
+    (`if expected_dim >= emb_dim * 4`, flagged by torch's own TracerWarning
+    at trace time), so torch.jit.trace bakes in whichever branch the dummy
+    input happened to take and produces a graph with a fixed linear-layer
+    shape. Verified against the deployed resnet50_multiscale checkpoint: the
+    traced model matched the eager model exactly for inputs shaped like the
+    tracing dummy, then crashed with a real batch of DOM-diff rule features
+    ("mat1 and mat2 shapes cannot be multiplied") the first time production
+    code called it with a different shape. Do not install a .torchscript.pt
+    produced by this function without either switching to torch.jit.script
+    (which handles Python control flow correctly) or removing the
+    data-dependent branch from the forward pass first — a passing numeric
+    match on one input shape is not evidence it's safe for others.
+
     Args:
         model_path: Path to the saved PyTorch checkpoint (.pt file).
         output_path: Destination path for the TorchScript file. Defaults to
@@ -494,29 +517,7 @@ def compile_to_torchscript(model_path: Path, output_path: Optional[Path] = None)
             "[TorchScript] Only hybrid ResNet50-Siamese models can be compiled to TorchScript."
         )
 
-    backbone, embedding_dim, _, _ = _build_resnet50_backbone(pretrained=False)
-    if checkpoint.get("backbone_state_dict"):
-        backbone.load_state_dict(checkpoint["backbone_state_dict"])
-    backbone.eval()
-
-    class_names = list(checkpoint.get("class_names", []))
-    output_dim = len(class_names) if class_names else 1
-    rule_dim = len(checkpoint.get("rule_feature_names", RULE_FEATURE_NAMES))
-    classifier_state = checkpoint["classifier_state_dict"]
-    first_weight_key = "0.weight" if "0.weight" in classifier_state else next(iter(classifier_state))
-    in_features = classifier_state[first_weight_key].shape[1]
-    num_streams = 3 if in_features == (embedding_dim * 3) + rule_dim else 4
-
-    head_model = SiameseFusionHead(
-        nn,
-        embedding_dim=embedding_dim,
-        rule_dim=rule_dim,
-        output_dim=output_dim,
-        num_streams=num_streams,
-    ).model
-
-    head_model.load_state_dict(checkpoint["classifier_state_dict"])
-    head_model.eval()
+    backbone, head_model, embedding_dim, class_names, rule_dim, _num_streams = _reconstruct_backbone_and_head(checkpoint)
 
     wrapper = CompleteSiameseModel(backbone, head_model)
     wrapper.eval()

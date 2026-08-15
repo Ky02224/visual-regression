@@ -646,3 +646,25 @@ def test_concurrent_writes_from_multiple_threads_do_not_lock_or_lose_data(store)
 
     assert errors == []
     assert len(store.list_users()) == 10
+
+
+class TestGetRunIndex:
+    """Names a run without touching the filesystem.
+
+    The comment webhook needs the case name to write a readable message, and a
+    run whose directory has been pruned still has an index row.
+    """
+
+    def test_returns_the_indexed_row(self, store):
+        store.upsert_run_index({
+            "run_id": "run-x", "case_name": "checkout", "baseline_name": "checkout",
+            "status": "FAIL", "created_at": 1,
+        })
+
+        row = store.get_run_index("run-x")
+
+        assert row["run_id"] == "run-x"
+        assert row["case_name"] == "checkout"
+
+    def test_returns_none_for_an_unknown_run(self, store):
+        assert store.get_run_index("nope") is None

@@ -222,12 +222,14 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
     from .database import get_store
     
     rows = []
+    comment_counts: Dict[str, int] = {}
     try:
         store = get_store(paths.db_path)
         rows = store._execute_query(
             "SELECT * FROM runs_index ORDER BY created_at DESC;",
             fetch=True
         )
+        comment_counts = store.count_comments_by_run()
     except Exception as e:
         logger.warning("[Dashboard Data] DB query failed; falling back to folder scan: %s", e)
         rows = []
@@ -264,6 +266,9 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
                     "mismatch_pct": mismatch_pct,
                     "mismatch": mismatch_pct,
                     "diff_regions": row.get("diff_regions") or 0,
+                    # Surfaced in the run lists: a pinned comment used to be
+                    # invisible unless you opened that exact run's report.
+                    "comment_count": comment_counts.get(run_id, 0),
                     "ai_label": ai_label,
                     "ignore_regions": [],
                     "ai_score": row.get("ai_score"),
@@ -330,6 +335,7 @@ def _load_runs(paths: WorkspacePaths, baselines_indexed: Dict[str, Dict[str, Any
                 "mismatch_pct": result.get("mismatch_pct"),
                 "mismatch": result.get("mismatch_pct"),
                 "diff_regions": len(result.get("regions", [])),
+                "comment_count": comment_counts.get(run_dir.name, 0),
                 "ai_label": ai_label,
                 "ignore_regions": payload.get("ignore_regions") or [],
                 "ai_score": ai_assessment.get("score"),

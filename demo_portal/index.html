@@ -24,6 +24,13 @@
           <p data-i18n="homeBody">Monitor releases, UI health, deployment risk and manual approvals across all customer touchpoints.</p>
           <div class="defect-banner" data-defect-banner hidden></div>
         </section>
+        <!-- Content that legitimately differs on every capture: an ad slot and a
+             clock. Hidden unless ?dynamic=1, so the existing baselines of this
+             page keep matching. -->
+        <section class="dynamic-strip" data-dynamic-strip hidden>
+          <div class="ad-slot" data-ad-slot></div>
+          <div class="clock" data-clock></div>
+        </section>
         <section class="kpi-grid cta-box">
           <article class="summary-card">
             <div class="label" data-i18n="users">Active Users</div>

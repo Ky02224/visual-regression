@@ -696,6 +696,18 @@ def diagnose_from_dom_diff(
 
     claimed_matches: set = set()
     resolved: dict[int, dict | None] = {}
+    # Which tier resolved each pairing. Identity pairs (same tag, same exact
+    # text) are close to certain to be the same real element. Geometry
+    # pairs are a guess about what's physically nearest post-reflow, and nothing
+    # more — confirmed on a real page: after a layout-issue mutation reflowed
+    # docs.python.org, a 4-character "3.1." section-number span (too short/
+    # generic for identity matching) landed near an unrelated Pygments
+    # syntax-highlighting span ("spam", class "n"), and the geometry fallback
+    # paired them purely on proximity. Their fonts genuinely differ
+    # (-apple-system vs Menlo) because they are different elements, not
+    # because either one's font changed — the pairing was never comparing the
+    # same content in the first place.
+    identity_matched: dict[int, bool] = {}
     pending: list[dict] = []
     for el in baseline_near:
         available = [c for c in match_candidates if id(c) not in claimed_matches]
@@ -706,6 +718,7 @@ def diagnose_from_dom_diff(
         )
         if status == "found":
             resolved[id(el)] = match
+            identity_matched[id(el)] = True
             claimed_matches.add(id(match))
         elif status == "absent":
             resolved[id(el)] = None
@@ -729,10 +742,12 @@ def diagnose_from_dom_diff(
         if match is not None:
             claimed_matches.add(id(match))
         resolved[id(el)] = match
+        identity_matched[id(el)] = False
 
     for el in baseline_near:
         match = resolved[id(el)]
         tag = el.get("tag", "")
+        is_identity_match = identity_matched.get(id(el), False)
         if match is None:
             has_identity = bool(el.get("eid") or len(el.get("txt") or "") >= 8)
             if not allow_missing and not has_identity:
@@ -837,9 +852,40 @@ def diagnose_from_dom_diff(
         if tag == "img" and el.get("nw") and match.get("cmp") and match.get("nw") == 0:
             failed_to_load.append((el, match))
             continue
+        # Truncation, font and colour all compare a *property* of el against
+        # the same property of match, which only means something if match is
+        # actually el's own counterpart. An identity match (same tag, same
+        # exact text) is close to certain of that. A geometry-fallback match
+        # is just "the nearest unclaimed element", and distance alone doesn't
+        # separate a real one from a false one: confirmed on a real page,
+        # where a big reflow left a 4-character section-number span ("3.1.",
+        # too short/generic for identity matching) at one point 58px and at
+        # another just 19px from an unrelated syntax-highlighting span
+        # ("spam") in a dense code block — a 20px distance floor still passed
+        # the second case, and their fonts differing (because they are
+        # different elements) was reported as that one span's font having
+        # changed both times. Their element class tells them apart directly:
+        # "section-number" vs "n" (a Pygments token class) — two elements
+        # deliberately styled through different classes are different kinds
+        # of thing regardless of how close a reflow happened to land them.
+        # Two elements with no class either side (most plain text) carry no
+        # such signal and are left to the distance the geometry matcher
+        # already required to consider them a candidate at all. Beyond an
+        # untrusted pairing, only the position/size check further below still
+        # means something: "is there something here that wasn't in this
+        # exact spot before" doesn't require knowing it's the same content,
+        # only that el's own former spot is now occupied differently.
+        # (None or '') == (None or '') for two classless elements, which is
+        # the common case for plain text and must stay trusted — only an
+        # actual difference, including one side carrying a class the other
+        # doesn't, counts as incompatible. Confirmed necessary: a Pygments
+        # token (class "n") was matched to a candidate with no class at all
+        # ("both empty" was too permissive when only one side actually was).
+        classes_incompatible = (el.get("ecls") or None) != (match.get("ecls") or None)
+        is_trusted_match = is_identity_match or not classes_incompatible
         b_sw, b_cw = el.get("sw"), el.get("cw")
         c_sw, c_cw = match.get("sw"), match.get("cw")
-        if tag in _TEXT_TAGS and b_sw is not None and b_cw and c_sw is not None and c_cw:
+        if is_trusted_match and tag in _TEXT_TAGS and b_sw is not None and b_cw and c_sw is not None and c_cw:
             baseline_overflowed = b_sw > b_cw * 1.4
             current_overflows = c_sw > c_cw * 1.4
             if current_overflows and not baseline_overflowed:
@@ -850,11 +896,11 @@ def diagnose_from_dom_diff(
         # effect (e.g. a monospace fallback is wider per character), so
         # checking position/size drift first would misattribute the root
         # cause to "layout-issue" instead of the actual font/color edit.
-        if tag in _TEXT_TAGS and el.get("font") and match.get("font") and el.get("font") != match.get("font"):
+        if is_trusted_match and tag in _TEXT_TAGS and el.get("font") and match.get("font") and el.get("font") != match.get("font"):
             font_changed.append((el, match))
             continue
         style_changed = False
-        if tag in _TEXT_TAGS:
+        if is_trusted_match and tag in _TEXT_TAGS:
             for prop, human in (("color", "text color"), ("bg", "background color")):
                 b_color = _parse_css_color(el.get(prop))
                 c_color = _parse_css_color(match.get(prop))
@@ -864,14 +910,43 @@ def diagnose_from_dom_diff(
                     # readability defect, not a cosmetic recolor.
                     b_fg, b_bg = _parse_css_color(el.get("color")), _parse_css_color(el.get("bg"))
                     c_fg, c_bg = _parse_css_color(match.get("color")), _parse_css_color(match.get("bg"))
+                    is_text_issue = False
                     if b_fg and b_bg and c_fg and c_bg:
                         b_ratio = _contrast_ratio(b_fg, b_bg)
                         c_ratio = _contrast_ratio(c_fg, c_bg)
                         if b_ratio >= 4.5 and c_ratio < 3.0:
                             text_issue.append((el, match, f"text contrast dropped from {b_ratio:.1f}:1 to {c_ratio:.1f}:1"))
-                            style_changed = True
-                            break
-                    color_changed.append((el, match, prop, human))
+                            is_text_issue = True
+                    elif b_fg and c_fg:
+                        # Most elements report a transparent own background
+                        # (inherited from an ancestor the snapshot doesn't
+                        # capture), so requiring both bg colors made this
+                        # branch untestable on the common case — confirmed on
+                        # a captured pair where near-black text (rgb(22,32,49))
+                        # turned near-white (rgb(242,245,248)) against a
+                        # transparent background on both sides, and the
+                        # contrast collapse fell through to a plain
+                        # color-regression verdict instead.
+                        #
+                        # Without a real background, check against both a
+                        # light and a dark page default rather than assuming
+                        # one: on a genuinely dark-themed page, text is
+                        # already light-on-transparent in the baseline too, so
+                        # the light-page hypothesis correctly fails its own
+                        # "was readable before" gate and never fires. Firing
+                        # requires the SAME hypothesis to call the baseline
+                        # readable and the current one not, so a page that was
+                        # already low-contrast under a hypothesis cannot
+                        # trigger a false positive from it.
+                        for page_bg in ((245, 245, 245), (20, 20, 20)):
+                            b_ratio = _contrast_ratio(b_fg, page_bg)
+                            c_ratio = _contrast_ratio(c_fg, page_bg)
+                            if b_ratio >= 4.5 and c_ratio < 3.0:
+                                text_issue.append((el, match, f"text contrast dropped from {b_ratio:.1f}:1 to {c_ratio:.1f}:1 (background unavailable; checked against a page default)"))
+                                is_text_issue = True
+                                break
+                    if not is_text_issue:
+                        color_changed.append((el, match, prop, human))
                     style_changed = True
                     break
         if style_changed:
