@@ -10,7 +10,6 @@ Every claim below is enforced by CI on each push, not measured once by hand.
 |---|---|
 | Detects 81/81 injected defects, 0/9 false alarms | `Score detection rate` — fails the build on any miss or false alarm |
 | The AI inference path actually executes | `Smoke-test the AI inference path` — asserts `decision_source` is not `pixel-fallback-no-model` |
-| Classification is 94.80% (n=500), 95% CI [92.85%, 96.75%] | `scripts/live_eval_multiseed.py`, summary committed to `reports/live-eval-summary.json` |
 | Both database backends work | `Verify the Postgres parity tests are not skipping` — fails if those tests silently skip |
 | 1000 Python + 90 frontend + 8 SDK tests pass | `Run Python tests`, `Run frontend unit tests`, `Run Playwright SDK tests` |
 
@@ -18,36 +17,10 @@ The detection gate runs with `--no-ai` deliberately, so it can never be blocked
 by model distribution — see
 [ADR 0004](docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md).
 
-That number is not comparable with every earlier one quoted for this project,
-and the differences are worth stating rather than smoothing over:
-
-- **Ground-truth labelling was corrected on 2026-08-06.** Trials that deleted a
-  wrapper containing a thumbnail had been labelled by which node the mutation
-  script picked rather than by what left the page — information neither
-  snapshot contains. The correction is worth +5 of 500 and can only move trials
-  in the classifier's favour, so it is not evidence of anything about the
-  model. The earlier run is kept as
-  `reports/live-eval-summary-prelabelfix.json`.
-- **The model was retrained on 2026-08-09.** Four inference paths had been
-  assembling the rule vector as `[rule, dom, struct]` and zero-padding the
-  fifteen pixel-structural columns instead of computing them, so the model was
-  trained on evidence it never received in production. Fixing that, and
-  retraining with the DOM and image shortcuts partially closed, cost accuracy
-  on the with-DOM exam and bought a classifier that no longer leans on
-  page-change magnitude alone.
-- **The label set was reduced from seven classes to six on 2026-08-11.**
-  `layout-issue` is folded into `missing-element`, at inference and in
-  ground-truth consolidation alike. Removing an element and the reflow it
-  causes are one event seen from two angles, and on the strict seven-way split
-  that pair produced the largest single block of residual error. Scored under
-  the seven-way rule the same trials give 92.60%
-  (`reports/live-eval-summary-7class-20260809.json`); the 94.80% above is the
-  six-way rule, which is what the code now does.
-
-The last of those is a taxonomy change made after seeing which merge raised the
-number, so it deserves the caveat in full: it is defensible on the grounds that
-the two labels describe one event, and it is **not** independent evidence that
-the classifier improved.
+Classification accuracy is not quoted here: the backbone, training pipeline,
+and label-selection logic have since changed, so prior measurements no longer
+describe the deployed model. Re-run `scripts/live_eval_multiseed.py` against
+the current model for a current number.
 
 Baselines are captured inside this project's Docker image
 (`scripts/generate_linux_baselines.sh`) rather than on a developer machine.
@@ -234,30 +207,17 @@ different reasons — see [ADR 0001](docs/adr/0001-detection-and-classification-
 | Capability | Result | Evaluation set |
 |---|---|---|
 | **Defect detection** | **81/81 detected, 0/9 false alarms** | Injected defects on the demo portal, ground truth from the injected mode |
-| **Change classification** | **94.80%**, 95% CI [92.85%, 96.75%], across-seed σ 3.01% | Real third-party pages with injected DOM mutations, n=500 over 10 seeds |
-| Classification (synthetic) | 87.6% — a *validation* score, calibration fitted on the same set | 12,000 synthetic mutations |
+| **Change classification** | Not quoted — see below | Real third-party pages with injected DOM mutations |
 
-Reproduce the second row with:
+Detection is pixel arithmetic and model-independent, so that number stands on
+its own. Classification accuracy is deliberately not quoted here: the
+backbone, training pipeline, and label-selection logic have changed since it
+was last measured, so an old number would describe a different model. Measure
+the current one with:
 
 ```bash
 python scripts/live_eval_multiseed.py --seeds 10 --trials 50
 ```
-
-The 26 residual errors on that run are not spread evenly across the label set:
-
-```
-  8  missing-element   -> font-change
-  7  missing-element   -> color-regression
-  5  text-issue        -> missing-element
-  3  broken-image      -> insignificant-change
-  2  missing-element   -> text-issue
-  1  color-regression  -> insignificant-change
-```
-
-Seventeen of them start from `missing-element`, whose recall (87.7%) is the
-lowest of the six. That is where the remaining work is. The four scored as
-`insignificant-change` are a different failure: the change was real but small
-enough that the noise floor discarded it before the label mattered.
 
 ## Documentation
 
