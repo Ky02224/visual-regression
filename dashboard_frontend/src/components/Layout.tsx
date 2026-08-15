@@ -52,7 +52,7 @@ function LayoutInner() {
     <div className="min-h-screen bg-[var(--bg-main)] transition-colors duration-200">
       <Sidebar />
       <TopBar />
-      <main className={cn(collapsed ? 'ml-16' : 'ml-64', 'pt-16 relative z-10 transition-all duration-200', isReport ? 'h-screen overflow-hidden' : 'min-h-screen')}>
+      <main className={cn('ml-0', collapsed ? 'md:ml-16' : 'md:ml-64', 'pt-16 relative z-10 transition-all duration-200', isReport ? 'h-screen overflow-hidden' : 'min-h-screen')}>
         <Outlet />
       </main>
 

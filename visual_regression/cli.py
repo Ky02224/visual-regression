@@ -223,6 +223,18 @@ def _copy_baseline_into_run(baseline_path: Path, run_dir: Path) -> Path:
     # .png baseline under a .webp name would mislabel them.
     target = run_dir / f"baseline{baseline_path.suffix}"
     shutil.copy2(baseline_path, target)
+
+    # Without this, any re-assessment that reads baseline DOM from the run
+    # directory (e.g. handle_ignore_regions_update, which resolves images via
+    # resolve_image_path(run_dir, "baseline") rather than the canonical
+    # baselines/<name>/ path) silently gets an empty baseline_dom_elements
+    # list and falls back to pixel-only classification -- producing a
+    # different label from the one recorded at capture time for the exact
+    # same pixel diff.
+    dom_sidecar = baseline_path.with_suffix(".dom.json")
+    if dom_sidecar.exists():
+        shutil.copy2(dom_sidecar, target.with_suffix(".dom.json"))
+
     return target
 
 

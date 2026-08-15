@@ -9,6 +9,10 @@ const SidebarContext = React.createContext<SidebarContextValue>({ collapsed: fal
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = React.useState(() => {
+    // Below md, `collapsed` means "drawer closed" rather than "icon-only" —
+    // a saved desktop preference of "expanded" would otherwise open the
+    // drawer (plus its backdrop) over the very first mobile page load.
+    if (typeof window !== 'undefined' && window.innerWidth < 768) return true;
     try { return localStorage.getItem('sidebar-collapsed') === 'true'; } catch { return false; }
   });
 

@@ -82,7 +82,7 @@ export function TopBar() {
   const isReport = location.pathname.startsWith('/report/');
 
   return (
-    <header className={cn('h-16 fixed top-0 right-0 z-30 transition-all duration-200 bg-[var(--surface)] border-b border-[var(--outline)] flex items-center justify-between px-4', collapsed ? 'left-16' : 'left-64', isReport && 'border-b')}>
+    <header className={cn('h-16 fixed top-0 right-0 left-0 z-30 transition-all duration-200 bg-[var(--surface)] border-b border-[var(--outline)] flex items-center justify-between px-4', collapsed ? 'md:left-16' : 'md:left-64', isReport && 'border-b')}>
       <div className="flex items-center gap-3 min-w-0">
         <button onClick={toggle} className="w-9 h-9 rounded-md flex items-center justify-center text-[var(--on-surface-variant)] hover:bg-stone-100 dark:hover:bg-zinc-800" title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
           <Menu className="w-5 h-5" />

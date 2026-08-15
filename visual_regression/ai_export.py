@@ -34,7 +34,6 @@ from .ai_models import (
     PairSample,
     SiameseFusionHead,
     _build_backbone,
-    _build_resnet50_backbone,
     _require_torch,
 )
 

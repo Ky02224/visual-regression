@@ -22,10 +22,25 @@ const ROLE_COLOR: Record<string, string> = {
 
 export function Sidebar() {
   const { role, userEmail, userName, logout } = useRole();
-  const { collapsed } = useSidebar();
+  const { collapsed, toggle } = useSidebar();
 
   return (
-    <aside className={cn('h-screen fixed left-0 top-0 flex flex-col bg-[var(--sidebar-bg)] border-r border-[var(--outline)] z-40 transition-all duration-200', collapsed ? 'w-16' : 'w-64')}>
+    <>
+      {/* Below md, `collapsed` means "off-canvas" rather than "icon-only" —
+          the sidebar has no room to sit permanently at any width, so it
+          becomes a full-width overlay drawer instead. This backdrop is what
+          makes it dismissible by tapping outside it, same as any drawer. */}
+      {!collapsed && (
+        <div
+          className="fixed inset-0 bg-black/40 z-30 md:hidden"
+          onClick={toggle}
+          aria-hidden="true"
+        />
+      )}
+      <aside className={cn(
+        'h-screen fixed left-0 top-0 flex flex-col bg-[var(--sidebar-bg)] border-r border-[var(--outline)] z-40 transition-all duration-200 w-64',
+        collapsed ? '-translate-x-full md:translate-x-0 md:w-16' : 'translate-x-0 md:w-64'
+      )}>
       <div className={cn('flex items-center', collapsed ? 'p-3 justify-center' : 'p-5 gap-3')}>
         <div className="w-9 h-9 rounded-md bg-indigo-600 flex items-center justify-center text-white shrink-0"><Layers className="w-5 h-5" /></div>
         {!collapsed && (
@@ -80,5 +95,6 @@ export function Sidebar() {
         </button>
       </div>
     </aside>
+    </>
   );
 }

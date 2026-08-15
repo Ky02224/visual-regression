@@ -633,13 +633,13 @@ export function Dashboard() {
 
 function FilterSelect({ label, options, value, onChange }: { label: string, options: string[], value: string, onChange: (val: string) => void }) {
   return (
-    <div className="flex gap-2 items-center px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm">
-      <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{label}:</span>
+    <div className="flex gap-2 items-center px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm min-w-0">
+      <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 shrink-0">{label}:</span>
       <select
         aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="border-none bg-transparent focus:ring-0 text-primary cursor-pointer p-0 pr-6 text-xs font-bold outline-none"
+        className="border-none bg-transparent focus:ring-0 text-primary cursor-pointer p-0 pr-6 text-xs font-bold outline-none min-w-0 max-w-[45vw] sm:max-w-[160px] truncate"
       >
         {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
       </select>

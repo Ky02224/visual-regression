@@ -264,7 +264,7 @@ function GitHubConnectionModule() {
               Set <code className="font-mono">GITHUB_OAUTH_CLIENT_ID</code> and <code className="font-mono">GITHUB_OAUTH_CLIENT_SECRET</code> before using this feature.
             </p>
             <p className="text-xs font-medium text-[var(--on-surface-variant)]">
-              Redirect URI: <code className="font-mono">{status?.redirect_uri || 'http://127.0.0.1:8130/api/integrations/github/callback'}</code>
+              Redirect URI: <code className="font-mono break-all">{status?.redirect_uri || 'http://127.0.0.1:8130/api/integrations/github/callback'}</code>
             </p>
           </div>
         ) : status.connected ? (
