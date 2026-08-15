@@ -238,47 +238,6 @@ def _copy_baseline_into_run(baseline_path: Path, run_dir: Path) -> Path:
     return target
 
 
-def capture_website_remotely(agent_url: str, cfg: CaptureConfig, output_path: Path) -> None:
-    import urllib.request
-    import json
-    data = {
-        "name": cfg.name,
-        "url": cfg.url,
-        "browser": cfg.browser,
-        "device": cfg.device,
-        "viewport": list(cfg.viewport),
-        "wait_ms": cfg.wait_ms,
-        "wait_until": cfg.wait_until,
-        "navigation_timeout_ms": cfg.navigation_timeout_ms,
-        "full_page": cfg.full_page,
-        "disable_animations": cfg.disable_animations,
-        "locale": cfg.locale,
-        "timezone_id": cfg.timezone_id,
-        "color_scheme": cfg.color_scheme,
-        "extra_headers": cfg.extra_headers,
-        "hide_selectors": cfg.hide_selectors,
-        "wait_for_selector": cfg.wait_for_selector,
-        "mock_routes": cfg.mock_routes,
-    }
-    url = agent_url.rstrip("/") + "/capture"
-    headers = {"Content-Type": "application/json"}
-    agent_token = os.environ.get("VRT_AGENT_TOKEN")
-    if agent_token:
-        headers["X-Agent-Token"] = agent_token
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(data).encode("utf-8"),
-        headers=headers,
-        method="POST"
-    )
-    print(f"[Agent Capture] Delegating capture of '{cfg.name}' to remote agent: {agent_url}", flush=True)
-    with urllib.request.urlopen(req, timeout=60) as response:
-        if response.status == 200:
-            output_path.write_bytes(response.read())
-        else:
-            raise Exception(f"Agent returned status code {response.status}")
-
-
 def _capture_and_save_baseline(
     manager: BaselineManager,
     paths: WorkspacePaths,
@@ -287,16 +246,11 @@ def _capture_and_save_baseline(
     capture_meta: Dict[str, Any],
     playwright_instance: Any = None,
     browser_instance: Any = None,
-    agent_node: str | None = None,
 ) -> None:
     from .browser import capture_website
 
     temp_path = paths.root / "tmp" / f"{manager.normalize_name(name)}-{now_stamp()}.png"
-    if agent_node:
-        capture_website_remotely(agent_node, capture_cfg, temp_path)
-        regions = None
-    else:
-        regions = capture_website(capture_cfg, temp_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
+    regions = capture_website(capture_cfg, temp_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
     manager.save_from_image(name=name, source_image_path=temp_path, capture_meta=capture_meta, ignore_regions=regions)
     temp_path.unlink(missing_ok=True)
     temp_path.with_suffix(".dom.json").unlink(missing_ok=True)
@@ -350,7 +304,6 @@ def _run_compare(
     playwright_instance: Any = None,
     browser_instance: Any = None,
     build_id: str | None = None,
-    agent_node: str | None = None,
 ) -> tuple[bool, Path, Dict[str, Any]]:
     from .browser import capture_website
     from .decision import decide_pass_fail
@@ -380,10 +333,7 @@ def _run_compare(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     current_path = run_dir / "current.webp"
-    if agent_node:
-        capture_website_remotely(agent_node, capture_cfg, current_path)
-    else:
-        capture_website(capture_cfg, current_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
+    capture_website(capture_cfg, current_path, playwright_instance=playwright_instance, browser_instance=browser_instance)
 
     baseline_image_path = manager.resolve_baseline_image_path(case_name)
     result, diff_overlay, binary_diff = compare_images(
@@ -933,38 +883,6 @@ def _capture_config_from_case(case: Any, args, for_baseline: bool = False) -> Ca
     )
 
 
-def _run_suite_case(
-    case: Any,
-    args,
-    manager: BaselineManager,
-    paths: WorkspacePaths,
-    ai_model_path: Path | None,
-    playwright_instance: Any = None,
-    browser_instance: Any = None,
-    build_id: str | None = None,
-    agent_node: str | None = None,
-) -> tuple[bool, Dict[str, Any]]:
-    capture_cfg = _capture_config_from_case(case, args)
-    passed, _, details = _run_compare(
-        manager=manager,
-        paths=paths,
-        case_name=case.name,
-        capture_cfg=capture_cfg,
-        threshold_pct=case.threshold_pct,
-        pixel_threshold=case.pixel_threshold,
-        min_region_area=case.min_region_area,
-        ignore_regions=case.ignore_regions,
-        ai_model_path=ai_model_path,
-        suite_name=getattr(args, "suite", None),
-        comparison_mode=case.comparison_mode,
-        playwright_instance=playwright_instance,
-        browser_instance=browser_instance,
-        build_id=build_id,
-        agent_node=agent_node,
-    )
-    return passed, details
-
-
 def cmd_create_suite_baselines(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
     from .suite_runner import load_suite
 
@@ -1055,7 +973,6 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
     from .ci_reporter import write_junit_xml
     from .reporter import write_json
     from .suite_runner import load_suite
-    from concurrent.futures import ThreadPoolExecutor
 
     cases = load_suite(Path(args.suite))
     pass_count = 0
@@ -1072,16 +989,23 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
     build_id = _create_suite_build_record(args, paths, write_json)
     build_meta_dir = paths.builds_dir / build_id
 
-    agent_nodes = getattr(args, "agent_node", []) or []
-    case_agents = {}
-    if agent_nodes:
-        for idx, case in enumerate(cases):
-            case_agents[case.name] = agent_nodes[idx % len(agent_nodes)]
+    # --- Parallel async capture ---
+    from .browser import capture_websites_parallel
 
-    def process_case(case) -> Dict[str, Any]:
-        nonlocal failed_any
+    # Separate cases that need baseline creation (must be done first, sequentially)
+    # from cases that just need capture+compare.
+    # For simplicity: collect all (cfg, current_path) pairs for compare, run in parallel,
+    # then feed results into the compare pipeline.
+
+    # First pass: handle missing baselines / skip logic sequentially
+    pre_rows: dict[str, Dict[str, Any]] = {}  # case.name -> pre-filled row (SKIP/ERROR)
+    pending_cases = []  # cases that still need capture+compare
+    pending_paths: list[Path] = []
+    pending_cfgs: list[CaptureConfig] = []
+
+    for case in cases:
         if failed_any and getattr(args, "fail_fast", False):
-            return {
+            pre_rows[case.name] = {
                 "name": case.name,
                 "status": "SKIP",
                 "message": "Skipped due to fail-fast",
@@ -1095,428 +1019,281 @@ def cmd_run_suite(args, manager: BaselineManager, paths: WorkspacePaths) -> int:
                 "severity": None,
                 "ai_explanation": None,
             }
-
-        case_started = time.perf_counter()
-        row: Dict[str, Any] = {
-            "name": case.name,
-            "status": "ERROR",
-            "message": "",
-            "mismatch_pct": None,
-            "threshold_pct": case.threshold_pct,
-            "report": "",
-            "duration_seconds": 0.0,
-            "decision_status": None,
-            "ai_label": None,
-            "ai_score": None,
-            "severity": None,
-            "ai_explanation": None,
-        }
-
-        agent_url = case_agents.get(case.name) if agent_nodes else None
+            continue
 
         try:
-            if agent_url:
-                if not manager.exists(case.name):
-                    if not getattr(args, "create_missing_baseline", False):
-                        row["status"] = "SKIP"
-                        row["message"] = "Missing baseline. Use --create-missing-baseline."
-                        print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
-                        failed_any = True
-                        return row
+            from .dashboard_server import get_shared_browser
+            playwright_inst, browser_inst = get_shared_browser(getattr(case, "browser", "chromium"))
 
-                    capture_cfg = _capture_config_from_case(case, args)
+            if not manager.exists(case.name):
+                if not getattr(args, "create_missing_baseline", False):
+                    pre_rows[case.name] = {
+                        "name": case.name,
+                        "status": "SKIP",
+                        "message": "Missing baseline. Use --create-missing-baseline.",
+                        "mismatch_pct": None,
+                        "threshold_pct": case.threshold_pct,
+                        "report": "",
+                        "duration_seconds": 0.0,
+                        "decision_status": None,
+                        "ai_label": None,
+                        "ai_score": None,
+                        "severity": None,
+                        "ai_explanation": None,
+                    }
+                    failed_any = True
+                    print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
+                    continue
+
+                cap_cfg = _capture_config_from_case(case, args)
+                try:
                     _capture_and_save_baseline(
                         manager=manager,
                         paths=paths,
                         name=case.name,
-                        capture_cfg=capture_cfg,
-                        capture_meta={**build_capture_metadata(capture_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
-                        agent_node=agent_url,
+                        capture_cfg=cap_cfg,
+                        capture_meta={**build_capture_metadata(cap_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
+                        playwright_instance=playwright_inst,
+                        browser_instance=browser_inst,
                     )
-                    print(f"[BASELINE CREATED] {case.name} via Agent {agent_url}")
-
-                passed, details = _run_suite_case(
-                    case, args, manager, paths, ai_model_path,
-                    build_id=build_id,
-                    agent_node=agent_url,
-                )
-                row["status"] = "PASS" if passed else "FAIL"
-                row["mismatch_pct"] = details.get("mismatch_pct")
-                row["threshold_pct"] = details.get("threshold_pct")
-                row["report"] = details.get("report", "")
-                row["decision_status"] = details.get("decision_status")
-                row["ai_label"] = details.get("ai_label")
-                row["ai_score"] = details.get("ai_score")
-                row["severity"] = details.get("severity")
-                row["ai_explanation"] = details.get("ai_explanation")
-                if not passed:
+                    print(f"[BASELINE CREATED] {case.name}")
+                except Exception as exc:
+                    pre_rows[case.name] = {
+                        "name": case.name,
+                        "status": "ERROR",
+                        "message": str(exc),
+                        "mismatch_pct": None,
+                        "threshold_pct": case.threshold_pct,
+                        "report": "",
+                        "duration_seconds": 0.0,
+                        "decision_status": None,
+                        "ai_label": None,
+                        "ai_score": None,
+                        "severity": None,
+                        "ai_explanation": None,
+                    }
                     failed_any = True
+                    print(f"[ERROR] {case.name}: {exc}")
+                    continue
+
+            cap_cfg = _capture_config_from_case(case, args)
+            run_dir = paths.runs_dir / _run_name_for_capture(case.name, cap_cfg)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            current_path = run_dir / "current.webp"
+            pending_cases.append(case)
+            pending_paths.append(current_path)
+            pending_cfgs.append(cap_cfg)
+        except Exception as exc:
+            pre_rows[case.name] = {
+                "name": case.name,
+                "status": "ERROR",
+                "message": str(exc),
+                "mismatch_pct": None,
+                "threshold_pct": case.threshold_pct,
+                "report": "",
+                "duration_seconds": 0.0,
+                "decision_status": None,
+                "ai_label": None,
+                "ai_score": None,
+                "severity": None,
+                "ai_explanation": None,
+            }
+            failed_any = True
+            print(f"[ERROR] {case.name}: {exc}")
+
+    # Parallel async capture for all pending cases
+    if pending_cases:
+        parallel_results = capture_websites_parallel(
+            list(zip(pending_cfgs, pending_paths)),
+            max_concurrency=getattr(args, "workers", 4),
+        )
+        # parallel_results[i] = (output_path, dynamic_regions, error_or_None)
+        for i, (case, cap_cfg, current_path) in enumerate(zip(pending_cases, pending_cfgs, pending_paths)):
+            _out_path, _dyn_regions, _exc = parallel_results[i]
+            case_started = time.perf_counter()
+            row: Dict[str, Any] = {
+                "name": case.name,
+                "status": "ERROR",
+                "message": "",
+                "mismatch_pct": None,
+                "threshold_pct": case.threshold_pct,
+                "report": "",
+                "duration_seconds": 0.0,
+                "decision_status": None,
+                "ai_label": None,
+                "ai_score": None,
+                "severity": None,
+                "ai_explanation": None,
+            }
+            if _exc is not None:
+                row["message"] = str(_exc)
+                failed_any = True
+                print(f"[ERROR] {case.name} capture failed: {_exc}")
             else:
                 try:
-                    from .dashboard_server import get_shared_browser
-                    playwright, browser = get_shared_browser(getattr(case, "browser", "chromium"))
+                    from .ai_training import assess_result
+                    from .decision import decide_pass_fail
+                    from .image_compare import compare_images
+                    from .reporter import generate_html_report, save_image, write_json
 
-                    if not manager.exists(case.name):
-                        if not getattr(args, "create_missing_baseline", False):
-                            row["status"] = "SKIP"
-                            row["message"] = "Missing baseline. Use --create-missing-baseline."
-                            print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
-                            failed_any = True
-                            return row
+                    active_ignore = list(case.ignore_regions)
+                    try:
+                        meta = manager.load_metadata(case.name)
+                        if "custom_threshold_pct" in meta:
+                            case_threshold = float(meta["custom_threshold_pct"])
+                        else:
+                            case_threshold = case.threshold_pct
+                        if not active_ignore:
+                            for r in meta.get("ignore_regions", []):
+                                if isinstance(r, dict):
+                                    active_ignore.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
+                                elif isinstance(r, (list, tuple)) and len(r) == 4:
+                                    active_ignore.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
+                    except Exception:
+                        case_threshold = case.threshold_pct
 
-                        capture_cfg = _capture_config_from_case(case, args)
-                        _capture_and_save_baseline(
-                            manager=manager,
-                            paths=paths,
-                            name=case.name,
-                            capture_cfg=capture_cfg,
-                            capture_meta={**build_capture_metadata(capture_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
-                            playwright_instance=playwright,
-                            browser_instance=browser,
-                        )
-                        print(f"[BASELINE CREATED] {case.name}")
-
-                    passed, details = _run_suite_case(
-                        case, args, manager, paths, ai_model_path,
-                        playwright_instance=playwright,
-                        browser_instance=browser,
-                        build_id=build_id,
+                    run_dir = current_path.parent
+                    baseline_image_path = manager.resolve_baseline_image_path(case.name)
+                    result, diff_overlay, binary_diff = compare_images(
+                        baseline_path=baseline_image_path,
+                        current_path=current_path,
+                        pixel_threshold=case.pixel_threshold,
+                        min_region_area=case.min_region_area,
+                        ignore_regions=active_ignore,
                     )
+
+                    baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
+                    diff_overlay_path = run_dir / "diff_overlay.webp"
+                    binary_diff_path = run_dir / "binary_diff.webp"
+                    report_path = run_dir / "report.html"
+                    json_path = run_dir / "result.json"
+
+                    save_image(diff_overlay_path, diff_overlay)
+                    save_image(binary_diff_path, binary_diff)
+
+                    ai_assessment: Dict[str, Any] = {}
+                    ai_error = False
+                    ai_model_available = ai_model_is_available(ai_model_path)
+                    if ai_model_available:
+                        try:
+                            ai_assessment = assess_result(
+                                result=result,
+                                model_path=ai_model_path,
+                                baseline_image_path=baseline_image_path,
+                                current_image_path=current_path,
+                            ).to_dict()
+                        except Exception as ai_exc:
+                            ai_error = True
+                            print(f"[WARN] AI assessment failed for {case.name} ({ai_exc}); falling back to pixel-only decision")
+
+                    passed, comparison_decision = decide_pass_fail(
+                        comparison_mode=case.comparison_mode,
+                        mismatch_pct=result.mismatch_pct,
+                        threshold_pct=case_threshold,
+                        ai_assessment=ai_assessment,
+                        ai_model_available=ai_model_available,
+                        ai_error=ai_error,
+                    )
+                    decision = _initial_decision_status(passed)
+                    severity = summarize_severity(
+                        result.mismatch_pct,
+                        len(result.regions),
+                        ai_assessment.get("score"),
+                        ai_assessment.get("label"),
+                    )
+                    ai_explanation = build_ai_explanation(result, ai_assessment)
+
+                    output_payload = {
+                        "case_name": case.name,
+                        "baseline_name": case.name,
+                        "suite_name": getattr(args, "suite", None),
+                        "build_id": build_id,
+                        "status": "PASS" if passed else "FAIL",
+                        "threshold_pct": case_threshold,
+                        "comparison_decision": comparison_decision,
+                        "ignore_regions": [list(item) for item in active_ignore],
+                        "capture": build_capture_metadata(cap_cfg),
+                        "result": result.to_dict(),
+                        "decision": decision,
+                        "ai_assessment": ai_assessment,
+                        "ai_explanation": ai_explanation,
+                        "severity": severity,
+                        "artifacts": {
+                            "baseline": str(baseline_for_report),
+                            "current": str(current_path),
+                            "diff_overlay": str(diff_overlay_path),
+                            "binary_diff": str(binary_diff_path),
+                            "report": str(report_path),
+                        },
+                    }
+                    write_json(json_path, output_payload)
+                    _upsert_run_to_database(
+                        paths=paths, run_dir=run_dir, case_name=case.name,
+                        suite_name=getattr(args, "suite", None), passed=passed,
+                        result=result, decision=decision, severity=severity,
+                        ai_assessment=ai_assessment, capture_cfg=cap_cfg, build_id=build_id,
+                    )
+                    generate_html_report(
+                        report_path=report_path,
+                        test_name=case.name,
+                        baseline_image=Path("baseline.webp"),
+                        current_image=Path("current.webp"),
+                        diff_image=Path("diff_overlay.webp"),
+                        binary_image=Path("binary_diff.webp"),
+                        result=result,
+                        threshold_pct=case_threshold,
+                        ignore_regions=case.ignore_regions,
+                        capture=build_capture_metadata(cap_cfg),
+                        review=decision,
+                        decision_history=[decision],
+                        ai_assessment=ai_assessment,
+                        ai_explanation=ai_explanation,
+                        severity=severity,
+                        status=output_payload["status"],
+                    )
+
+                    print(f"[{'PASS' if passed else 'FAIL'}] {case.name}")
+                    print(f"Mismatch: {result.mismatch_pct:.4f}% (threshold {case_threshold:.4f}%)")
+                    print(f"Diff regions: {len(result.regions)}")
+                    if ai_assessment:
+                        print(f"AI assessment: {ai_assessment.get('label') or 'no meaningful change'}")
+                    print(f"Severity: {severity['label']}")
+                    print(f"Report: {report_path}")
+                    print("")
+
                     row["status"] = "PASS" if passed else "FAIL"
-                    row["mismatch_pct"] = details.get("mismatch_pct")
-                    row["threshold_pct"] = details.get("threshold_pct")
-                    row["report"] = details.get("report", "")
-                    row["decision_status"] = details.get("decision_status")
-                    row["ai_label"] = details.get("ai_label")
-                    row["ai_score"] = details.get("ai_score")
-                    row["severity"] = details.get("severity")
-                    row["ai_explanation"] = details.get("ai_explanation")
+                    row["mismatch_pct"] = result.mismatch_pct
+                    row["threshold_pct"] = case_threshold
+                    row["report"] = str(report_path)
+                    row["decision_status"] = decision["status"]
+                    row["ai_label"] = ai_assessment.get("label")
+                    row["ai_score"] = ai_assessment.get("score")
+                    row["severity"] = severity.get("label")
+                    row["ai_explanation"] = ai_explanation
                     if not passed:
                         failed_any = True
                 except Exception as exc:
-                    row["status"] = "ERROR"
                     row["message"] = str(exc)
                     failed_any = True
                     print(f"[ERROR] {case.name}: {exc}")
-        except Exception as exc:
-            row["status"] = "ERROR"
-            row["message"] = str(exc)
-            failed_any = True
-            print(f"[ERROR] {case.name}: {exc}")
-        finally:
             row["duration_seconds"] = round(time.perf_counter() - case_started, 4)
-        return row
+            pre_rows[case.name] = row
 
-    if agent_nodes:
-        max_workers = 4
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            case_rows = list(executor.map(process_case, cases))
-    else:
-        # --- Parallel async capture for non-agent cases ---
-        from .browser import capture_websites_parallel
-
-        # Separate cases that need baseline creation (must be done first, sequentially)
-        # from cases that just need capture+compare.
-        # For simplicity: collect all (cfg, current_path) pairs for compare, run in parallel,
-        # then feed results into the compare pipeline.
-
-        # First pass: handle missing baselines / skip logic sequentially
-        pre_rows: dict[str, Dict[str, Any]] = {}  # case.name -> pre-filled row (SKIP/ERROR)
-        pending_cases = []  # cases that still need capture+compare
-        pending_paths: list[Path] = []
-        pending_cfgs: list[CaptureConfig] = []
-
-        for case in cases:
-            if failed_any and getattr(args, "fail_fast", False):
-                pre_rows[case.name] = {
-                    "name": case.name,
-                    "status": "SKIP",
-                    "message": "Skipped due to fail-fast",
-                    "mismatch_pct": None,
-                    "threshold_pct": case.threshold_pct,
-                    "report": "",
-                    "duration_seconds": 0.0,
-                    "decision_status": None,
-                    "ai_label": None,
-                    "ai_score": None,
-                    "severity": None,
-                    "ai_explanation": None,
-                }
-                continue
-
-            try:
-                from .dashboard_server import get_shared_browser
-                playwright_inst, browser_inst = get_shared_browser(getattr(case, "browser", "chromium"))
-
-                if not manager.exists(case.name):
-                    if not getattr(args, "create_missing_baseline", False):
-                        pre_rows[case.name] = {
-                            "name": case.name,
-                            "status": "SKIP",
-                            "message": "Missing baseline. Use --create-missing-baseline.",
-                            "mismatch_pct": None,
-                            "threshold_pct": case.threshold_pct,
-                            "report": "",
-                            "duration_seconds": 0.0,
-                            "decision_status": None,
-                            "ai_label": None,
-                            "ai_score": None,
-                            "severity": None,
-                            "ai_explanation": None,
-                        }
-                        failed_any = True
-                        print(f"[SKIP] Baseline '{case.name}' missing. Use --create-missing-baseline.")
-                        continue
-
-                    cap_cfg = _capture_config_from_case(case, args)
-                    try:
-                        _capture_and_save_baseline(
-                            manager=manager,
-                            paths=paths,
-                            name=case.name,
-                            capture_cfg=cap_cfg,
-                            capture_meta={**build_capture_metadata(cap_cfg), "updated_by": getattr(args, "updated_by", "system"), "source": "suite-auto-create"},
-                            playwright_instance=playwright_inst,
-                            browser_instance=browser_inst,
-                        )
-                        print(f"[BASELINE CREATED] {case.name}")
-                    except Exception as exc:
-                        pre_rows[case.name] = {
-                            "name": case.name,
-                            "status": "ERROR",
-                            "message": str(exc),
-                            "mismatch_pct": None,
-                            "threshold_pct": case.threshold_pct,
-                            "report": "",
-                            "duration_seconds": 0.0,
-                            "decision_status": None,
-                            "ai_label": None,
-                            "ai_score": None,
-                            "severity": None,
-                            "ai_explanation": None,
-                        }
-                        failed_any = True
-                        print(f"[ERROR] {case.name}: {exc}")
-                        continue
-
-                cap_cfg = _capture_config_from_case(case, args)
-                run_dir = paths.runs_dir / _run_name_for_capture(case.name, cap_cfg)
-                run_dir.mkdir(parents=True, exist_ok=True)
-                current_path = run_dir / "current.webp"
-                pending_cases.append(case)
-                pending_paths.append(current_path)
-                pending_cfgs.append(cap_cfg)
-            except Exception as exc:
-                pre_rows[case.name] = {
-                    "name": case.name,
-                    "status": "ERROR",
-                    "message": str(exc),
-                    "mismatch_pct": None,
-                    "threshold_pct": case.threshold_pct,
-                    "report": "",
-                    "duration_seconds": 0.0,
-                    "decision_status": None,
-                    "ai_label": None,
-                    "ai_score": None,
-                    "severity": None,
-                    "ai_explanation": None,
-                }
-                failed_any = True
-                print(f"[ERROR] {case.name}: {exc}")
-
-        # Parallel async capture for all pending cases
-        if pending_cases:
-            parallel_results = capture_websites_parallel(
-                list(zip(pending_cfgs, pending_paths)),
-                max_concurrency=getattr(args, "workers", 4),
-            )
-            # parallel_results[i] = (output_path, dynamic_regions, error_or_None)
-            for i, (case, cap_cfg, current_path) in enumerate(zip(pending_cases, pending_cfgs, pending_paths)):
-                _out_path, _dyn_regions, _exc = parallel_results[i]
-                case_started = time.perf_counter()
-                row: Dict[str, Any] = {
-                    "name": case.name,
-                    "status": "ERROR",
-                    "message": "",
-                    "mismatch_pct": None,
-                    "threshold_pct": case.threshold_pct,
-                    "report": "",
-                    "duration_seconds": 0.0,
-                    "decision_status": None,
-                    "ai_label": None,
-                    "ai_score": None,
-                    "severity": None,
-                    "ai_explanation": None,
-                }
-                if _exc is not None:
-                    row["message"] = str(_exc)
-                    failed_any = True
-                    print(f"[ERROR] {case.name} capture failed: {_exc}")
-                else:
-                    try:
-                        from .ai_training import assess_result
-                        from .decision import decide_pass_fail
-                        from .image_compare import compare_images
-                        from .reporter import generate_html_report, save_image, write_json
-
-                        active_ignore = list(case.ignore_regions)
-                        try:
-                            meta = manager.load_metadata(case.name)
-                            if "custom_threshold_pct" in meta:
-                                case_threshold = float(meta["custom_threshold_pct"])
-                            else:
-                                case_threshold = case.threshold_pct
-                            if not active_ignore:
-                                for r in meta.get("ignore_regions", []):
-                                    if isinstance(r, dict):
-                                        active_ignore.append((int(r["x"]), int(r["y"]), int(r["width"]), int(r["height"])))
-                                    elif isinstance(r, (list, tuple)) and len(r) == 4:
-                                        active_ignore.append((int(r[0]), int(r[1]), int(r[2]), int(r[3])))
-                        except Exception:
-                            case_threshold = case.threshold_pct
-
-                        run_dir = current_path.parent
-                        baseline_image_path = manager.resolve_baseline_image_path(case.name)
-                        result, diff_overlay, binary_diff = compare_images(
-                            baseline_path=baseline_image_path,
-                            current_path=current_path,
-                            pixel_threshold=case.pixel_threshold,
-                            min_region_area=case.min_region_area,
-                            ignore_regions=active_ignore,
-                        )
-
-                        baseline_for_report = _copy_baseline_into_run(baseline_image_path, run_dir)
-                        diff_overlay_path = run_dir / "diff_overlay.webp"
-                        binary_diff_path = run_dir / "binary_diff.webp"
-                        report_path = run_dir / "report.html"
-                        json_path = run_dir / "result.json"
-
-                        save_image(diff_overlay_path, diff_overlay)
-                        save_image(binary_diff_path, binary_diff)
-
-                        ai_assessment: Dict[str, Any] = {}
-                        ai_error = False
-                        ai_model_available = ai_model_is_available(ai_model_path)
-                        if ai_model_available:
-                            try:
-                                ai_assessment = assess_result(
-                                    result=result,
-                                    model_path=ai_model_path,
-                                    baseline_image_path=baseline_image_path,
-                                    current_image_path=current_path,
-                                ).to_dict()
-                            except Exception as ai_exc:
-                                ai_error = True
-                                print(f"[WARN] AI assessment failed for {case.name} ({ai_exc}); falling back to pixel-only decision")
-
-                        passed, comparison_decision = decide_pass_fail(
-                            comparison_mode=case.comparison_mode,
-                            mismatch_pct=result.mismatch_pct,
-                            threshold_pct=case_threshold,
-                            ai_assessment=ai_assessment,
-                            ai_model_available=ai_model_available,
-                            ai_error=ai_error,
-                        )
-                        decision = _initial_decision_status(passed)
-                        severity = summarize_severity(
-                            result.mismatch_pct,
-                            len(result.regions),
-                            ai_assessment.get("score"),
-                            ai_assessment.get("label"),
-                        )
-                        ai_explanation = build_ai_explanation(result, ai_assessment)
-
-                        output_payload = {
-                            "case_name": case.name,
-                            "baseline_name": case.name,
-                            "suite_name": getattr(args, "suite", None),
-                            "build_id": build_id,
-                            "status": "PASS" if passed else "FAIL",
-                            "threshold_pct": case_threshold,
-                            "comparison_decision": comparison_decision,
-                            "ignore_regions": [list(item) for item in active_ignore],
-                            "capture": build_capture_metadata(cap_cfg),
-                            "result": result.to_dict(),
-                            "decision": decision,
-                            "ai_assessment": ai_assessment,
-                            "ai_explanation": ai_explanation,
-                            "severity": severity,
-                            "artifacts": {
-                                "baseline": str(baseline_for_report),
-                                "current": str(current_path),
-                                "diff_overlay": str(diff_overlay_path),
-                                "binary_diff": str(binary_diff_path),
-                                "report": str(report_path),
-                            },
-                        }
-                        write_json(json_path, output_payload)
-                        _upsert_run_to_database(
-                            paths=paths, run_dir=run_dir, case_name=case.name,
-                            suite_name=getattr(args, "suite", None), passed=passed,
-                            result=result, decision=decision, severity=severity,
-                            ai_assessment=ai_assessment, capture_cfg=cap_cfg, build_id=build_id,
-                        )
-                        generate_html_report(
-                            report_path=report_path,
-                            test_name=case.name,
-                            baseline_image=Path("baseline.webp"),
-                            current_image=Path("current.webp"),
-                            diff_image=Path("diff_overlay.webp"),
-                            binary_image=Path("binary_diff.webp"),
-                            result=result,
-                            threshold_pct=case_threshold,
-                            ignore_regions=case.ignore_regions,
-                            capture=build_capture_metadata(cap_cfg),
-                            review=decision,
-                            decision_history=[decision],
-                            ai_assessment=ai_assessment,
-                            ai_explanation=ai_explanation,
-                            severity=severity,
-                            status=output_payload["status"],
-                        )
-
-                        print(f"[{'PASS' if passed else 'FAIL'}] {case.name}")
-                        print(f"Mismatch: {result.mismatch_pct:.4f}% (threshold {case_threshold:.4f}%)")
-                        print(f"Diff regions: {len(result.regions)}")
-                        if ai_assessment:
-                            print(f"AI assessment: {ai_assessment.get('label') or 'no meaningful change'}")
-                        print(f"Severity: {severity['label']}")
-                        print(f"Report: {report_path}")
-                        print("")
-
-                        row["status"] = "PASS" if passed else "FAIL"
-                        row["mismatch_pct"] = result.mismatch_pct
-                        row["threshold_pct"] = case_threshold
-                        row["report"] = str(report_path)
-                        row["decision_status"] = decision["status"]
-                        row["ai_label"] = ai_assessment.get("label")
-                        row["ai_score"] = ai_assessment.get("score")
-                        row["severity"] = severity.get("label")
-                        row["ai_explanation"] = ai_explanation
-                        if not passed:
-                            failed_any = True
-                    except Exception as exc:
-                        row["message"] = str(exc)
-                        failed_any = True
-                        print(f"[ERROR] {case.name}: {exc}")
-                row["duration_seconds"] = round(time.perf_counter() - case_started, 4)
-                pre_rows[case.name] = row
-
-        # Reassemble in original case order
-        case_rows = [pre_rows.get(case.name, {
-            "name": case.name,
-            "status": "ERROR",
-            "message": "Unexpected missing result",
-            "mismatch_pct": None,
-            "threshold_pct": case.threshold_pct,
-            "report": "",
-            "duration_seconds": 0.0,
-            "decision_status": None,
-            "ai_label": None,
-            "ai_score": None,
-            "severity": None,
-            "ai_explanation": None,
-        }) for case in cases]
+    # Reassemble in original case order
+    case_rows = [pre_rows.get(case.name, {
+        "name": case.name,
+        "status": "ERROR",
+        "message": "Unexpected missing result",
+        "mismatch_pct": None,
+        "threshold_pct": case.threshold_pct,
+        "report": "",
+        "duration_seconds": 0.0,
+        "decision_status": None,
+        "ai_label": None,
+        "ai_score": None,
+        "severity": None,
+        "ai_explanation": None,
+    }) for case in cases]
 
     for row in case_rows:
         if row["status"] == "PASS":
@@ -1902,106 +1679,6 @@ def add_ai_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-from http.server import BaseHTTPRequestHandler
-
-class AgentHTTPHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        if self.path == "/capture":
-            # This handler drives a real headless browser to whatever URL a
-            # caller supplies and streams the rendered page back — without
-            # a shared-secret check, any host that can reach this port can
-            # use it as an unauthenticated SSRF proxy (e.g. pointing `url`
-            # at cloud metadata endpoints or other internal-only services)
-            # and get the rendered content back in the response. hmac.
-            # compare_digest avoids leaking token length/content via timing.
-            import hmac
-            expected_token = os.environ.get("VRT_AGENT_TOKEN", "")
-            provided_token = self.headers.get("X-Agent-Token", "")
-            if not expected_token or not hmac.compare_digest(provided_token, expected_token):
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Missing or invalid X-Agent-Token"}).encode('utf-8'))
-                return
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            try:
-                from pathlib import Path
-                import tempfile
-                from urllib.parse import urlparse
-                from .config import CaptureConfig
-                from .browser import capture_website
-
-                data = json.loads(post_data.decode('utf-8'))
-                target_url = data["url"]
-                if urlparse(target_url).scheme not in ("http", "https"):
-                    raise ValueError("url must use http or https scheme")
-                cfg = CaptureConfig(
-                    name=data["name"],
-                    url=target_url,
-                    browser=data.get("browser", "chromium"),
-                    device=data.get("device"),
-                    viewport=tuple(data.get("viewport", (1440, 900))),
-                    wait_ms=data.get("wait_ms", 1200),
-                    wait_until=data.get("wait_until", "networkidle"),
-                    navigation_timeout_ms=data.get("navigation_timeout_ms", 45000),
-                    full_page=data.get("full_page", True),
-                    disable_animations=data.get("disable_animations", True),
-                    locale=data.get("locale"),
-                    timezone_id=data.get("timezone_id"),
-                    color_scheme=data.get("color_scheme", "light"),
-                    extra_headers=data.get("extra_headers", {}),
-                    hide_selectors=data.get("hide_selectors", []),
-                    wait_for_selector=data.get("wait_for_selector"),
-                    mock_routes=data.get("mock_routes", {}),
-                )
-                
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    out_path = Path(tmpdir) / "screenshot.webp"
-                    capture_website(cfg, out_path)
-                    if out_path.exists():
-                        img_bytes = out_path.read_bytes()
-                        self.send_response(200)
-                        self.send_header("Content-Type", "image/webp")
-                        self.send_header("Content-Length", str(len(img_bytes)))
-                        self.end_headers()
-                        self.wfile.write(img_bytes)
-                        return
-                    else:
-                        raise Exception("Screenshot file was not generated.")
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-def cmd_agent(args) -> int:
-    from http.server import HTTPServer
-    if not os.environ.get("VRT_AGENT_TOKEN"):
-        print(
-            "[FATAL] VRT_AGENT_TOKEN is not set. This agent drives a real "
-            "browser to any URL a caller supplies, so an unauthenticated "
-            "listener is an SSRF risk to anything reachable from this host. "
-            "Set VRT_AGENT_TOKEN to a shared secret (matching the value "
-            "callers pass via capture_website_remotely/--agent-node) before "
-            "starting.",
-            flush=True,
-        )
-        return 1
-    server = HTTPServer((args.host, args.port), AgentHTTPHandler)
-    print(f"Distributed Capture Agent running at http://{args.host}:{args.port}/", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2148,12 +1825,7 @@ def build_parser() -> argparse.ArgumentParser:
     suite_parser.add_argument("--fail-fast", action="store_true", help="Stop on first failure/error")
     suite_parser.add_argument("--junit-file", help="Write JUnit XML to this path")
     suite_parser.add_argument("--no-junit", action="store_true", help="Disable JUnit XML output")
-    suite_parser.add_argument("--agent-node", action="append", default=[], help="Address of remote agent node(s)")
     add_ai_args(suite_parser)
-
-    agent_parser = subparsers.add_parser("agent", help="Start a distributed capture agent worker")
-    agent_parser.add_argument("--host", default="127.0.0.1", help="Host address to bind to (use 0.0.0.0 only behind a trusted network/firewall — this endpoint drives a real browser to caller-supplied URLs)")
-    agent_parser.add_argument("--port", type=int, default=8140, help="Port to listen on")
 
     serve_parser = subparsers.add_parser("serve-demo", help="Serve local demo portal")
     serve_parser.add_argument("--site-dir", default="demo_portal")
@@ -2217,8 +1889,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_serve_dashboard(args, paths)
     if args.command == "check-ci":
         return cmd_check_ci(args, paths)
-    if args.command == "agent":
-        return cmd_agent(args)
     raise ValueError(f"Unknown command: {args.command}")
 
 
