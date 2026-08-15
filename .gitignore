@@ -16,14 +16,16 @@
 # keeps ~270 dev-machine PNGs (Windows-rendered, useless to a Linux runner) from
 # being swept into the repo by `git add .visual-regression/`.
 .visual-regression/baselines/bmk-*/
-# The quantised ONNX (32MB) is the one model artefact that is versioned, via Git
-# LFS, so the CI smoke job can prove the AI path executed. Everything else in
-# models/ is 123-304MB and stays out. Re-included explicitly because
-# `.visual-regression/*` above excludes the whole directory. See
-# docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md.
+# The unquantised ONNX (~160MB, graph + external-data weights) is versioned
+# via Git LFS so the CI smoke job can prove the AI path executed. This was
+# the 32MB quantised export until 2026-08-15 -- see .gitattributes for why
+# that switched. Everything else in models/ stays out. Re-included
+# explicitly because `.visual-regression/*` above excludes the whole
+# directory. See docs/adr/0004-ci-gates-detection-the-ai-is-smoke-tested.md.
 !.visual-regression/models/
 .visual-regression/models/*
-!.visual-regression/models/visual_ai.quant.onnx
+!.visual-regression/models/visual_ai.onnx
+!.visual-regression/models/visual_ai.onnx.data
 # The sidecar metadata is required alongside it: _load_legacy_or_hybrid_model
 # reads class_names, threshold and image_size from this file, and without it
 # falls through to torch.load on a file that is not a pickle. 3KB.

@@ -56,9 +56,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Without this the quantised model checks out as a text pointer file
-          # rather than the ONNX itself, and the AI smoke step below would fail
-          # on a file that looks present but is 130 bytes of metadata.
+          # Without this the LFS-tracked model checks out as a text pointer
+          # file rather than the ONNX itself, and the AI smoke step below
+          # would fail on a file that looks present but is 130 bytes of
+          # metadata.
           lfs: true
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -233,12 +234,24 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          ONNX=.visual-regression/models/visual_ai.quant.onnx
+          # Unquantised, not the quantised export -- see .gitattributes for
+          # why (static INT8 quantisation of the current model isn't
+          # correctness-verified; shipping it would defeat the point of this
+          # smoke test). ONNX_DATA is the external-data sidecar the graph
+          # references for its weights; without it onnxruntime fails to load
+          # the session at all, the same failure mode as a missing LFS
+          # restore, so it gets the same check.
+          ONNX=.visual-regression/models/visual_ai.onnx
+          ONNX_DATA=.visual-regression/models/visual_ai.onnx.data
           META=.visual-regression/models/visual_ai.json
 
           if [ ! -s "$ONNX" ] || head -c 40 "$ONNX" | grep -q "git-lfs"; then
             echo "::error title=Model not restored::$ONNX is missing or is still an LFS pointer. \
           Check that actions/checkout ran with lfs: true and that the file was pushed with git lfs push."
+            exit 1
+          fi
+          if [ ! -s "$ONNX_DATA" ] || head -c 40 "$ONNX_DATA" | grep -q "git-lfs"; then
+            echo "::error title=Model weights not restored::$ONNX_DATA is missing or is still an LFS pointer."
             exit 1
           fi
           if [ ! -s "$META" ]; then
@@ -248,12 +261,14 @@ jobs:
           fi
 
           # --ai-model takes the BASE path, not the ONNX itself. The loader
-          # derives the sidecars from it (visual_ai.pt -> visual_ai.quant.onnx,
-          # visual_ai.json), so passing the .onnx directly makes it look for
-          # visual_ai.quant.quant.onnx, find nothing, and fall through to
-          # torch.load on a file that is not a pickle. That surfaces as
-          # decision_source=pixel-fallback-ai-error rather than an obvious
-          # failure. The base file itself does not need to exist.
+          # derives the sidecars from it (checking visual_ai.quant.onnx first,
+          # then visual_ai.onnx, then visual_ai.json), so passing the .onnx
+          # directly makes it look for visual_ai.onnx.onnx, find nothing, and
+          # fall through to torch.load on a file that is not a pickle. That
+          # surfaces as decision_source=pixel-fallback-ai-error rather than an
+          # obvious failure. The base file itself does not need to exist —
+          # and in CI it does not: visual_ai.pt is gitignored (too large),
+          # only its sidecars are restored via LFS above.
           MODEL=.visual-regression/models/visual_ai.pt
 
           # The detection gate above ran with --no-ai and left its run
