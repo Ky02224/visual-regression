@@ -253,8 +253,7 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
     """Run static INT8 quantization on the exported ONNX model."""
     try:
         import onnx
-        from onnx.shape_inference import infer_shapes
-        from onnxruntime.quantization import quantize_static, QuantType, CalibrationDataReader
+        from onnxruntime.quantization import quantize_static, QuantType, QuantFormat, CalibrationDataReader
         
         class ONNXCalibrationDataReader(CalibrationDataReader):
             def __init__(self, samples, image_size, rule_dim):
@@ -296,11 +295,52 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
                     "rule_features": rule_batch
                 }
 
-        logger.info(f"[ONNX Quantization] Running shape inference on {onnx_path.name}...")
-        model = onnx.load(str(onnx_path))
-        inferred = infer_shapes(model)
+        # Plain onnx.shape_inference.infer_shapes (below, now unused for this
+        # step) is not what onnxruntime's own quantizer asks for -- it warns
+        # every run to use quant_pre_process instead, which also runs a model
+        # optimization pass first. Skipping that isn't cosmetic: an op whose
+        # output shape isn't resolved is left unquantized, and measured here
+        # that was enough to make every prediction collapse to one class
+        # (missing-element, argmax agreement 0/20 against the unquantized
+        # model) rather than merely losing some precision.
+        #
+        # Two more steps needed before quant_pre_process will actually run on
+        # this export, both specific to torch's dynamo-based exporter (the
+        # default since a recent torch version):
+        #
+        # 1. That exporter writes weights to a separate .onnx.data file by
+        #    default (not because this model exceeds any size limit -- it's
+        #    ~160MB, nowhere near the 2GB single-file cap -- just the
+        #    exporter's default). quant_pre_process's skip_symbolic_shape
+        #    path (next point) loads the model from a temp copy that doesn't
+        #    carry the external-data sidecar along, so it fails to find the
+        #    weights. Consolidating back to one self-contained file first
+        #    avoids that path entirely.
+        # 2. quant_pre_process's symbolic shape inference step crashes on a
+        #    Reshape node this exporter's graph shape produces
+        #    (TypeError: 'NoneType' object is not iterable, inside
+        #    onnxruntime's own symbolic_shape_infer.py) -- a real
+        #    incompatibility between the newest torch.onnx path and
+        #    onnxruntime's shape-inference tool, not anything specific to
+        #    this model's architecture. skip_symbolic_shape=True keeps the
+        #    plain ONNX shape inference and model-optimization passes
+        #    (quant_pre_process still does both), which is what actually
+        #    fixed the collapsed-to-one-class quantization -- only the
+        #    symbolic (shape-algebra) pass is skipped.
+        logger.info(f"[ONNX Quantization] Running quantization pre-processing on {onnx_path.name}...")
+        consolidated_path = onnx_path.with_name(f"{onnx_path.stem}.consolidated.onnx")
+        model = onnx.load(str(onnx_path), load_external_data=True)
+        onnx.save_model(model, str(consolidated_path), save_as_external_data=False)
+
         inferred_path = onnx_path.with_suffix(".inferred.onnx")
-        onnx.save(inferred, str(inferred_path))
+        from onnxruntime.quantization.shape_inference import quant_pre_process
+        quant_pre_process(
+            input_model=str(consolidated_path),
+            output_model_path=str(inferred_path),
+            save_as_external_data=True,
+            skip_symbolic_shape=True,
+        )
+        consolidated_path.unlink(missing_ok=True)
 
         torch, _ = _require_torch()
         checkpoint = torch.load(onnx_path.with_suffix(".pt"), map_location="cpu", weights_only=False) if onnx_path.with_suffix(".pt").exists() else {}
@@ -309,13 +349,25 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
         reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size, rule_dim)
 
         logger.info("[ONNX Quantization] Starting static INT8 quantization...")
+        # quant_format=0 (QuantFormat.QOperator) fuses quantization directly
+        # into specialised int8 op kernels, whose x64 CPU coverage is
+        # inconsistent — onnxruntime's own quantize_static call prints a
+        # warning recommending QDQ for this exact activation/weight
+        # combination, every run, unactioned. Measured consequence: a
+        # QOperator-quantized resnet50_multiscale model disagreed with the
+        # unquantized model on 20/20 argmax comparisons on random inputs — not
+        # degraded, completely wrong. QDQ inserts explicit Quantize/
+        # DeQuantize node pairs around each op instead of relying on a fused
+        # int8 kernel existing for every op in the graph, so it works
+        # correctly on architectures QOperator's kernel set doesn't cover.
         quantize_static(
             model_input=str(inferred_path),
             model_output=str(output_path),
             calibration_data_reader=reader,
-            quant_format=0,
+            quant_format=QuantFormat.QDQ,
             activation_type=QuantType.QInt8,
             weight_type=QuantType.QInt8,
+            per_channel=True,
         )
         logger.info(f"[ONNX Quantization] Saved quantized model to {output_path.name}")
 
