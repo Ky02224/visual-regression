@@ -1977,9 +1977,25 @@ def _dom_diff_region(result: CompareResult) -> "DiffRegion | None":
     caption's font changing) produce too small a pixel delta to clear
     min_region_area, but the DOM diff itself doesn't need a pixel region to
     work — it compares element structure directly.
+
+    The full-page fallback is withheld below the same noise floor
+    _is_micro_rendering_noise() uses to suppress the CNN's own guesses.
+    Without this, a page with genuinely rotating text content (confirmed on
+    tailwindcss.com: a homepage code-sample widget that shows a different
+    Tailwind class combo on every load) can register ~0.01% mismatch --
+    indistinguishable from anti-aliasing jitter -- and still have the
+    full-page scan confidently confirm "missing-element" purely because that
+    rotating text's exact string is, correctly but irrelevantly, not present
+    in the new capture. diagnose_from_dom_diff's identity tier is treated as
+    exact/trustworthy specifically because it's meant to run scoped to real
+    pixel evidence; at the noise floor there is no such evidence to scope it
+    with, so the "exact match" guarantee no longer implies the match is
+    meaningful.
     """
     if result.regions:
         return max(result.regions, key=lambda r: r.area)
+    if _is_micro_rendering_noise(result):
+        return None
     w, h = (result.baseline_size + [0, 0])[:2]
     if not w or not h:
         return None
