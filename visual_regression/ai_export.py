@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -131,6 +132,19 @@ def export_to_onnx(model_path: Path):
     torch, nn = _require_torch()
     if not model_path.exists():
         return
+    # torch.onnx.export's dynamo-based path (default since a recent torch
+    # version) prints Unicode progress markers (a checkmark, etc.) straight to
+    # stdout. On Windows, sys.stdout's default encoding is the console
+    # codepage (cp1252), not UTF-8, so that print raises UnicodeEncodeError —
+    # observed killing the export entirely on this platform. Reconfiguring to
+    # replace unencodable characters rather than crash keeps the export
+    # working on every platform; it only affects what gets printed, never the
+    # exported model's correctness.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     # Set before the try so a failure inside it (e.g. an architecture the
     # reconstruction can't yet build) reports that failure directly instead
     # of the validation/metadata blocks below raising an unrelated
