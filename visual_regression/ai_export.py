@@ -249,14 +249,21 @@ def export_to_onnx(model_path: Path):
         logger.info(f"[ONNX Export] Saved metadata sidecar to {json_path.name}")
     except Exception as e:
         logger.warning(f"[ONNX Export Warning] Failed to save metadata sidecar: {e}")
-def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], output_path: Path):
+def quantize_onnx_model(
+    onnx_path: Path,
+    calibration_samples: List[PairSample],
+    output_path: Path,
+    rule_feature_mean=None,
+    rule_feature_std=None,
+):
     """Run static INT8 quantization on the exported ONNX model."""
     try:
         import onnx
         from onnxruntime.quantization import quantize_static, QuantType, QuantFormat, CalibrationDataReader
-        
+        from .ai_features import standardise_rule_vector
+
         class ONNXCalibrationDataReader(CalibrationDataReader):
-            def __init__(self, samples, image_size, rule_dim):
+            def __init__(self, samples, image_size, rule_dim, rule_mean, rule_std):
                 super().__init__()
                 self.samples = samples
                 self.image_size = image_size
@@ -266,6 +273,8 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
                 # graph could not take — and the activation ranges it collects
                 # are what the INT8 scales are derived from.
                 self.rule_dim = int(rule_dim)
+                self.rule_mean = rule_mean
+                self.rule_std = rule_std
                 self.index = 0
 
             def get_next(self):
@@ -288,6 +297,19 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
                 elif len(rule_features) < self.rule_dim:
                     rule_features = np.pad(
                         rule_features, (0, self.rule_dim - len(rule_features)), mode="constant")
+                # The model was trained on standardised features (see
+                # standardise_rule_vector's docstring: raw columns span a
+                # standard-deviation ratio of 2.4e10), and the real inference
+                # path always standardises before calling the model —
+                # _standardised_rule_vector, not the raw PairSample.
+                # calibration_samples here comes straight from
+                # _build_pair_sample/train_dataset[idx], which never applied
+                # that step, so the calibrator was fitting INT8 ranges to a
+                # completely different scale of input than the model ever
+                # sees in production. That's not a rounding-error kind of
+                # miscalibration -- measured, it collapsed every prediction
+                # to the same class regardless of input.
+                rule_features = standardise_rule_vector(rule_features, self.rule_mean, self.rule_std)
                 rule_batch = np.expand_dims(rule_features, 0).astype(np.float32)
                 return {
                     "left_image": left_batch,
@@ -346,7 +368,9 @@ def quantize_onnx_model(onnx_path: Path, calibration_samples: List[PairSample], 
         checkpoint = torch.load(onnx_path.with_suffix(".pt"), map_location="cpu", weights_only=False) if onnx_path.with_suffix(".pt").exists() else {}
         img_size = int(checkpoint.get("image_size", DEFAULT_IMAGE_SIZE))
         rule_dim = len(checkpoint.get("rule_feature_names", FULL_FEATURE_NAMES))
-        reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size, rule_dim)
+        rule_mean = rule_feature_mean if rule_feature_mean is not None else checkpoint.get("rule_feature_mean")
+        rule_std = rule_feature_std if rule_feature_std is not None else checkpoint.get("rule_feature_std")
+        reader = ONNXCalibrationDataReader(calibration_samples[:100], img_size, rule_dim, rule_mean, rule_std)
 
         logger.info("[ONNX Quantization] Starting static INT8 quantization...")
         # quant_format=0 (QuantFormat.QOperator) fuses quantization directly
