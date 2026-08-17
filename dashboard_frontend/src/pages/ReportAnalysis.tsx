@@ -502,7 +502,7 @@ export function ReportAnalysis() {
   const decision = data.decision || data.review || {};
   const severity = data.severity?.level || 'medium';
   const regions = result.regions || [];
-  const history = data.decision_history || [];
+  const history = (data.decision_history || []).filter((h: any) => h.status === 'approved' || h.status === 'rejected');
   const isCompactDevice = /iphone|pixel|android|mobile/i.test(String(data.capture?.device || '').toLowerCase());
   const aspectRatio = isCompactDevice ? '9/16' : '16/10';
   const hasBinaryDiff = Number(result.diff_pixels || 0) > 0;

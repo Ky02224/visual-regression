@@ -1978,24 +1978,27 @@ def _dom_diff_region(result: CompareResult) -> "DiffRegion | None":
     min_region_area, but the DOM diff itself doesn't need a pixel region to
     work — it compares element structure directly.
 
-    The full-page fallback is withheld below the same noise floor
-    _is_micro_rendering_noise() uses to suppress the CNN's own guesses.
-    Without this, a page with genuinely rotating text content (confirmed on
+    This used to return None below the same noise floor
+    _is_micro_rendering_noise() uses to suppress the CNN's own guesses, to
+    stop a page with genuinely rotating text content (confirmed on
     tailwindcss.com: a homepage code-sample widget that shows a different
-    Tailwind class combo on every load) can register ~0.01% mismatch --
-    indistinguishable from anti-aliasing jitter -- and still have the
-    full-page scan confidently confirm "missing-element" purely because that
-    rotating text's exact string is, correctly but irrelevantly, not present
-    in the new capture. diagnose_from_dom_diff's identity tier is treated as
-    exact/trustworthy specifically because it's meant to run scoped to real
-    pixel evidence; at the noise floor there is no such evidence to scope it
-    with, so the "exact match" guarantee no longer implies the match is
-    meaningful.
+    Tailwind class combo on every load) from having the full-page scan
+    confidently confirm "missing-element" purely because that rotating
+    text's exact string is, correctly but irrelevantly, not present in the
+    new capture. That blocked the entire DOM engine at the noise floor, not
+    just the text-identity tier responsible — so a real color or font
+    change with little pixel evidence behind it (routine for a small
+    element's hue swap) got discarded right alongside the rotating-text
+    false positive: 89 of 97 colour-regression trials in a 500-trial replay
+    fell through to "insignificant-change" this way, most of them cases
+    where the CNN's own raw guess had been correct. The rotating-text case
+    is now handled at the point that actually causes it — see
+    `allow_strong_text_missing` on diagnose_from_dom_diff — so this function
+    always returns the full-page region again; withholding the whole region
+    achieved a narrower fix at a much wider cost.
     """
     if result.regions:
         return max(result.regions, key=lambda r: r.area)
-    if _is_micro_rendering_noise(result):
-        return None
     w, h = (result.baseline_size + [0, 0])[:2]
     if not w or not h:
         return None
@@ -2047,8 +2050,15 @@ def _diagnose_dom_diff_best(baseline_dom_elements, current_dom_elements, result:
     dom_region = _dom_diff_region(result)
     if dom_region is None:
         return None, ""
+    # No pixel region means no evidence to scope the search, so a strong
+    # text-identity "missing" claim is only trustworthy above the noise
+    # floor — below it, a page that rotates its own text (a code sample, a
+    # quote widget) can trip it on nothing. Color/font/text-issue/moved
+    # don't share that failure mode (they require a real matched-element
+    # comparison, not an absence claim) so they still run either way.
     return diagnose_from_dom_diff(
         baseline_dom_elements, current_dom_elements, dom_region, allow_missing=False,
+        allow_strong_text_missing=not _is_micro_rendering_noise(result),
     )
 
 

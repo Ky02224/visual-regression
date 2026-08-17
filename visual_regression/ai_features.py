@@ -589,6 +589,7 @@ def diagnose_from_dom_diff(
     current_elements: list,
     region: object,
     allow_missing: bool = True,
+    allow_strong_text_missing: bool = True,
 ) -> tuple[str | None, str]:
     """Deterministically diagnose a defect type from real baseline-vs-current DOM structure.
 
@@ -628,7 +629,18 @@ def diagnose_from_dom_diff(
     run under test. An id/text match, by contrast, is a global, exact check
     ("is this specific content anywhere on the page at all") rather than a
     local, fuzzy one, so it stays trustworthy even without a pixel region to
-    scope the search.
+    scope the search — except when the page itself rotates long text blocks
+    (a code sample, a quote-of-the-day widget): the check is still exact,
+    but "exact" no longer implies "meaningful". `allow_strong_text_missing`
+    covers that case: set it False to also withhold the text-backed
+    "missing" verdict (id-backed media verdicts are unaffected — they don't
+    share the rotating-content failure mode), while still letting color,
+    font, text-issue and moved fire on the same full-page scan. Without
+    this knob the only way to suppress the rotating-text case was to block
+    the DOM engine outright, which also discarded every real color/font
+    verdict with little pixel evidence behind it — color regressions
+    routinely have exactly that, since a hue swap over a small element
+    moves few pixels.
 
     text-issue covers two DOM-observable readability defects: new text
     overflow/clipping (scrollWidth > clientWidth) and a foreground/
@@ -975,7 +987,7 @@ def diagnose_from_dom_diff(
             f"DOM diff: a <{tag}> element present in the baseline page has no "
             f"matching element in the current page at the same position."
         )
-    if missing_generic_strong:
+    if missing_generic_strong and allow_strong_text_missing:
         tag = missing_generic_strong[0].get("tag", "")
         return "missing-element", (
             f"DOM diff: a <{tag}> element present in the baseline page is missing "
